@@ -14,6 +14,9 @@ export type ChatTurn = {
   content: string
   createdAt: number
   attachmentRefs: AttachmentRef[]
+  usage?: Record<string, unknown> | null
+  lastStreamChunk?: string
+  streamShimmerChunk?: string
 }
 
 export type ChatSession = {
@@ -26,6 +29,13 @@ export type ChatSession = {
   sessionAttachmentRefs: AttachmentRef[]
   codexSessionId: string | null
   codexResumeState: CodexResumeState | null
+  liveRunId: string | null
+  liveRunSeq: number
+  liveRunActive: boolean
+  liveAssistantTurnId: string | null
+  liveStatusText: string
+  liveRunStartedAt: number | null
+  liveStopRequested: boolean
   createdAt: number
   updatedAt: number
   lastTaskEventAt: number | null
@@ -42,6 +52,13 @@ export type ChatSessionServerSnapshot = {
   codexSessionId?: string | null
   codex_session_id?: string | null
   codexResumeState?: CodexResumeState | null
+  liveRunId?: string | null
+  liveRunSeq?: number
+  liveRunActive?: boolean
+  liveAssistantTurnId?: string | null
+  liveStatusText?: string
+  liveRunStartedAt?: number | null
+  liveStopRequested?: boolean
   createdAt?: number
   updatedAt?: number
   lastTaskEventAt?: number | null
@@ -134,7 +151,35 @@ function normalizeUsage(value: unknown): AgentChatUsage | null {
   }
   if (Number.isFinite(cached) && cached >= 0) normalized.cached_input_tokens = Math.floor(cached)
   if (Number.isFinite(contextLimit) && contextLimit > 0) normalized.context_limit_tokens = Math.floor(contextLimit)
+  const frameMode = String(usage.graph_context_frame_mode || '').trim().toLowerCase()
+  if (frameMode === 'full' || frameMode === 'delta') normalized.graph_context_frame_mode = frameMode
+  const frameRevision = typeof usage.graph_context_frame_revision === 'string'
+    ? usage.graph_context_frame_revision.trim()
+    : ''
+  if (frameRevision) normalized.graph_context_frame_revision = frameRevision
+  const promptMode = String(usage.prompt_mode || '').trim().toLowerCase()
+  if (promptMode === 'full' || promptMode === 'resume') normalized.prompt_mode = promptMode
+  const promptSegmentCharsRaw = usage.prompt_segment_chars
+  if (promptSegmentCharsRaw && typeof promptSegmentCharsRaw === 'object' && !Array.isArray(promptSegmentCharsRaw)) {
+    const normalizedSegments: Record<string, number> = {}
+    for (const [rawKey, rawValue] of Object.entries(promptSegmentCharsRaw as Record<string, unknown>)) {
+      const key = String(rawKey || '').trim()
+      const value = Number(rawValue)
+      if (!key) continue
+      if (!Number.isFinite(value) || value < 0) continue
+      normalizedSegments[key] = Math.floor(value)
+    }
+    if (Object.keys(normalizedSegments).length > 0) normalized.prompt_segment_chars = normalizedSegments
+  }
   return normalized
+}
+
+function normalizeTurnUsage(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const out = Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).filter(([key]) => String(key || '').trim())
+  )
+  return Object.keys(out).length > 0 ? out : null
 }
 
 function normalizeMcpServers(value: unknown): ChatMcpServer[] {
@@ -176,6 +221,34 @@ function normalizeAttachmentRefs(value: unknown): AttachmentRef[] {
   return out
 }
 
+function comparableJson(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? null) ?? 'null'
+  } catch {
+    return 'null'
+  }
+}
+
+function attachmentRefsEqual(left: AttachmentRef[], right: AttachmentRef[]): boolean {
+  return comparableJson(left) === comparableJson(right)
+}
+
+function chatTurnsEqual(left: ChatTurn[], right: ChatTurn[]): boolean {
+  return comparableJson(left) === comparableJson(right)
+}
+
+function usageEqual(left: AgentChatUsage | null, right: AgentChatUsage | null): boolean {
+  return comparableJson(left) === comparableJson(right)
+}
+
+function resumeStateEqual(left: CodexResumeState | null, right: CodexResumeState | null): boolean {
+  return comparableJson(left) === comparableJson(right)
+}
+
+function mcpServersEqual(left: ChatMcpServer[], right: ChatMcpServer[]): boolean {
+  return comparableJson(left) === comparableJson(right)
+}
+
 function normalizeTurns(value: unknown): ChatTurn[] {
   if (!Array.isArray(value)) return []
   const out: ChatTurn[] = []
@@ -186,12 +259,17 @@ function normalizeTurns(value: unknown): ChatTurn[] {
     if (!role) continue
     const content = typeof turn.content === 'string' ? turn.content : ''
     const createdAtRaw = Number(turn.createdAt)
+    const lastStreamChunk = typeof turn.lastStreamChunk === 'string' ? turn.lastStreamChunk : ''
+    const streamShimmerChunk = typeof turn.streamShimmerChunk === 'string' ? turn.streamShimmerChunk : ''
     out.push({
       id: typeof turn.id === 'string' && turn.id.trim() ? turn.id : makeId('turn'),
       role,
       content,
       createdAt: Number.isFinite(createdAtRaw) && createdAtRaw > 0 ? Math.floor(createdAtRaw) : Date.now(),
       attachmentRefs: normalizeAttachmentRefs(turn.attachmentRefs ?? turn.attachment_refs),
+      usage: normalizeTurnUsage(turn.usage),
+      lastStreamChunk,
+      streamShimmerChunk,
     })
   }
   return out.slice(-MAX_TURNS_PER_SESSION)
@@ -234,6 +312,13 @@ function createSession(title: string, projectId = ''): ChatSession {
     sessionAttachmentRefs: [],
     codexSessionId: null,
     codexResumeState: null,
+    liveRunId: null,
+    liveRunSeq: 0,
+    liveRunActive: false,
+    liveAssistantTurnId: null,
+    liveStatusText: '',
+    liveRunStartedAt: null,
+    liveStopRequested: false,
     createdAt: now,
     updatedAt: now,
     lastTaskEventAt: null,
@@ -265,6 +350,27 @@ function normalizeSession(value: unknown): ChatSession | null {
       ? rawCodexSessionId.trim()
       : null
   const codexResumeState = normalizeResumeState(session.codexResumeState ?? session.codex_resume_state ?? session.usage)
+  const liveRunIdRaw = session.liveRunId ?? session.live_run_id
+  const liveRunId =
+    typeof liveRunIdRaw === 'string' && liveRunIdRaw.trim()
+      ? liveRunIdRaw.trim()
+      : null
+  const liveRunSeqRaw = Number(session.liveRunSeq ?? session.live_run_seq)
+  const liveRunSeq = Number.isFinite(liveRunSeqRaw) && liveRunSeqRaw > 0 ? Math.floor(liveRunSeqRaw) : 0
+  const liveRunActive = Boolean(session.liveRunActive ?? session.live_run_active)
+  const liveAssistantTurnIdRaw = session.liveAssistantTurnId ?? session.live_assistant_turn_id
+  const liveAssistantTurnId =
+    typeof liveAssistantTurnIdRaw === 'string' && liveAssistantTurnIdRaw.trim()
+      ? liveAssistantTurnIdRaw.trim()
+      : null
+  const liveStatusTextRaw = session.liveStatusText ?? session.live_status_text
+  const liveStatusText = typeof liveStatusTextRaw === 'string' ? liveStatusTextRaw.trim() : ''
+  const liveRunStartedAtRaw = Number(session.liveRunStartedAt ?? session.live_run_started_at)
+  const liveRunStartedAt =
+    Number.isFinite(liveRunStartedAtRaw) && liveRunStartedAtRaw > 0 ? Math.floor(liveRunStartedAtRaw) : null
+  const liveStopRequestedRaw = normalizeBool(session.liveStopRequested ?? session.live_stop_requested)
+  const liveStopRequested =
+    liveStopRequestedRaw === null ? false : Boolean(liveStopRequestedRaw)
   return {
     id,
     title: typeof session.title === 'string' && session.title.trim()
@@ -277,6 +383,13 @@ function normalizeSession(value: unknown): ChatSession | null {
     sessionAttachmentRefs: normalizeAttachmentRefs(session.sessionAttachmentRefs ?? session.session_attachment_refs),
     codexSessionId,
     codexResumeState,
+    liveRunId,
+    liveRunSeq,
+    liveRunActive,
+    liveAssistantTurnId,
+    liveStatusText,
+    liveRunStartedAt,
+    liveStopRequested,
     createdAt,
     updatedAt,
     lastTaskEventAt:
@@ -421,6 +534,9 @@ export function useCodexChatState(storageUserId?: string | null) {
         : value
       const nextTurns = normalizeTurns(nextTurnsRaw)
       const nextTitle = deriveSessionTitle(session.title, nextTurns)
+      if (nextTitle === session.title && chatTurnsEqual(session.turns, nextTurns)) {
+        return session
+      }
       return {
         ...session,
         title: nextTitle,
@@ -434,56 +550,145 @@ export function useCodexChatState(storageUserId?: string | null) {
     patchSession(sessionId, (session) => {
       const normalizedUsage = normalizeUsage(usage)
       const inferredResumeState = normalizeResumeState(usage)
+      const nextResumeState = inferredResumeState ?? session.codexResumeState
+      if (usageEqual(session.usage, normalizedUsage) && resumeStateEqual(session.codexResumeState, nextResumeState)) {
+        return session
+      }
       return {
         ...session,
         usage: normalizedUsage,
-        codexResumeState: inferredResumeState ?? session.codexResumeState,
+        codexResumeState: nextResumeState,
         updatedAt: Date.now(),
       }
     })
   }, [patchSession])
 
   const setCodexChatMcpServersForSession = React.useCallback((sessionId: string, servers: ChatMcpServer[]) => {
-    patchSession(sessionId, (session) => ({
-      ...session,
-      mcpServers: normalizeMcpServers(servers),
-      updatedAt: Date.now(),
-    }))
+    patchSession(sessionId, (session) => {
+      const normalizedServers = normalizeMcpServers(servers)
+      if (mcpServersEqual(session.mcpServers, normalizedServers)) return session
+      return {
+        ...session,
+        mcpServers: normalizedServers,
+        updatedAt: Date.now(),
+      }
+    })
   }, [patchSession])
 
   const setCodexChatSessionAttachmentRefsForSession = React.useCallback((
     sessionId: string,
     refs: AttachmentRef[]
   ) => {
-    patchSession(sessionId, (session) => ({
-      ...session,
-      sessionAttachmentRefs: normalizeAttachmentRefs(refs),
-      updatedAt: Date.now(),
-    }))
+    patchSession(sessionId, (session) => {
+      const normalizedRefs = normalizeAttachmentRefs(refs)
+      if (attachmentRefsEqual(session.sessionAttachmentRefs, normalizedRefs)) return session
+      return {
+        ...session,
+        sessionAttachmentRefs: normalizedRefs,
+        updatedAt: Date.now(),
+      }
+    })
   }, [patchSession])
 
   const setCodexChatCodexSessionIdForSession = React.useCallback((sessionId: string, codexSessionId: string | null) => {
-    patchSession(sessionId, (session) => ({
-      ...session,
-      codexSessionId: codexSessionId && codexSessionId.trim() ? codexSessionId.trim() : null,
-      updatedAt: Date.now(),
-    }))
+    patchSession(sessionId, (session) => {
+      const normalizedSessionId = codexSessionId && codexSessionId.trim() ? codexSessionId.trim() : null
+      if (session.codexSessionId === normalizedSessionId) return session
+      return {
+        ...session,
+        codexSessionId: normalizedSessionId,
+        updatedAt: Date.now(),
+      }
+    })
   }, [patchSession])
 
   const setCodexChatResumeStateForSession = React.useCallback((sessionId: string, resumeState: CodexResumeState | null) => {
-    patchSession(sessionId, (session) => ({
-      ...session,
-      codexResumeState: normalizeResumeState(resumeState) ?? null,
-      updatedAt: Date.now(),
-    }))
+    patchSession(sessionId, (session) => {
+      const normalizedResumeState = normalizeResumeState(resumeState) ?? null
+      if (resumeStateEqual(session.codexResumeState, normalizedResumeState)) return session
+      return {
+        ...session,
+        codexResumeState: normalizedResumeState,
+        updatedAt: Date.now(),
+      }
+    })
   }, [patchSession])
 
   const setCodexChatLastTaskEventAtForSession = React.useCallback((sessionId: string, at: number | null) => {
-    patchSession(sessionId, (session) => ({
-      ...session,
-      lastTaskEventAt: at,
-      updatedAt: Date.now(),
-    }))
+    patchSession(sessionId, (session) => {
+      if (session.lastTaskEventAt === at) return session
+      return {
+        ...session,
+        lastTaskEventAt: at,
+        updatedAt: Date.now(),
+      }
+    })
+  }, [patchSession])
+
+  const setCodexChatLiveRunForSession = React.useCallback((
+    sessionId: string,
+    patch: Partial<Pick<ChatSession, 'liveRunId' | 'liveRunSeq' | 'liveRunActive' | 'liveAssistantTurnId' | 'liveStatusText' | 'liveRunStartedAt' | 'liveStopRequested'>>
+  ) => {
+    patchSession(sessionId, (session) => {
+      const nextLiveRunId =
+        patch.liveRunId !== undefined
+          ? (patch.liveRunId && String(patch.liveRunId).trim() ? String(patch.liveRunId).trim() : null)
+          : session.liveRunId
+      const nextLiveRunSeq =
+        patch.liveRunSeq !== undefined
+          ? Math.max(0, Math.floor(Number(patch.liveRunSeq) || 0))
+          : session.liveRunSeq
+      const nextLiveRunActive =
+        patch.liveRunActive !== undefined
+          ? Boolean(patch.liveRunActive)
+          : session.liveRunActive
+      const nextLiveAssistantTurnId =
+        patch.liveAssistantTurnId !== undefined
+          ? (patch.liveAssistantTurnId && String(patch.liveAssistantTurnId).trim()
+            ? String(patch.liveAssistantTurnId).trim()
+            : null)
+          : session.liveAssistantTurnId
+      const nextLiveStatusText =
+        patch.liveStatusText !== undefined
+          ? String(patch.liveStatusText || '').trim()
+          : session.liveStatusText
+      const nextLiveRunStartedAt =
+        patch.liveRunStartedAt !== undefined
+          ? (
+              patch.liveRunStartedAt && Number.isFinite(Number(patch.liveRunStartedAt))
+                ? Math.max(0, Math.floor(Number(patch.liveRunStartedAt)))
+                : null
+            )
+          : session.liveRunStartedAt
+      const nextLiveStopRequested =
+        patch.liveStopRequested !== undefined
+          ? Boolean(patch.liveStopRequested)
+          : session.liveStopRequested
+
+      if (
+        session.liveRunId === nextLiveRunId
+        && session.liveRunSeq === nextLiveRunSeq
+        && session.liveRunActive === nextLiveRunActive
+        && session.liveAssistantTurnId === nextLiveAssistantTurnId
+        && session.liveStatusText === nextLiveStatusText
+        && session.liveRunStartedAt === nextLiveRunStartedAt
+        && session.liveStopRequested === nextLiveStopRequested
+      ) {
+        return session
+      }
+
+      return {
+        ...session,
+        liveRunId: nextLiveRunId,
+        liveRunSeq: nextLiveRunSeq,
+        liveRunActive: nextLiveRunActive,
+        liveAssistantTurnId: nextLiveAssistantTurnId,
+        liveStatusText: nextLiveStatusText,
+        liveRunStartedAt: nextLiveRunStartedAt,
+        liveStopRequested: nextLiveStopRequested,
+        updatedAt: Date.now(),
+      }
+    })
   }, [patchSession])
 
   const mergeCodexChatSessionsFromServer = React.useCallback((
@@ -532,6 +737,38 @@ export function useCodexChatState(storageUserId?: string | null) {
                 : null)
               : (existing?.codexSessionId ?? null),
           codexResumeState: resumeState,
+          liveRunId:
+            snapshot.liveRunId !== undefined
+              ? (String(snapshot.liveRunId || '').trim() || null)
+              : (existing?.liveRunId ?? null),
+          liveRunSeq:
+            snapshot.liveRunSeq !== undefined && Number.isFinite(Number(snapshot.liveRunSeq))
+              ? Math.max(0, Math.floor(Number(snapshot.liveRunSeq)))
+              : (existing?.liveRunSeq ?? 0),
+          liveRunActive:
+            snapshot.liveRunActive !== undefined
+              ? Boolean(snapshot.liveRunActive)
+              : Boolean(existing?.liveRunActive),
+          liveAssistantTurnId:
+            snapshot.liveAssistantTurnId !== undefined
+              ? (String(snapshot.liveAssistantTurnId || '').trim() || null)
+              : (existing?.liveAssistantTurnId ?? null),
+          liveStatusText:
+            snapshot.liveStatusText !== undefined
+              ? String(snapshot.liveStatusText || '').trim()
+              : String(existing?.liveStatusText || ''),
+          liveRunStartedAt:
+            snapshot.liveRunStartedAt !== undefined
+              ? (
+                  snapshot.liveRunStartedAt === null
+                    ? null
+                    : normalizeTimestampMs(snapshot.liveRunStartedAt, existing?.liveRunStartedAt ?? now)
+                )
+              : (existing?.liveRunStartedAt ?? null),
+          liveStopRequested:
+            snapshot.liveStopRequested !== undefined
+              ? Boolean(snapshot.liveStopRequested)
+              : Boolean(existing?.liveStopRequested),
           createdAt,
           updatedAt,
           lastTaskEventAt,
@@ -628,6 +865,13 @@ export function useCodexChatState(storageUserId?: string | null) {
   const codexChatSessionAttachmentRefs = normalizeAttachmentRefs(activeSession?.sessionAttachmentRefs)
   const codexChatCodexSessionId = activeSession?.codexSessionId ?? null
   const codexChatResumeState = activeSession?.codexResumeState ?? null
+  const codexChatLiveRunId = activeSession?.liveRunId ?? null
+  const codexChatLiveRunSeq = activeSession?.liveRunSeq ?? 0
+  const codexChatLiveRunActive = Boolean(activeSession?.liveRunActive)
+  const codexChatLiveAssistantTurnId = activeSession?.liveAssistantTurnId ?? null
+  const codexChatLiveStatusText = activeSession?.liveStatusText ?? ''
+  const codexChatLiveRunStartedAt = activeSession?.liveRunStartedAt ?? null
+  const codexChatLiveStopRequested = Boolean(activeSession?.liveStopRequested)
   const codexChatLastTaskEventAt = activeSession?.lastTaskEventAt ?? null
   const codexChatActiveSessionTitle = activeSession?.title ?? ''
   const codexChatProjectSessions = React.useMemo(() => {
@@ -723,6 +967,14 @@ export function useCodexChatState(storageUserId?: string | null) {
     codexChatResumeState,
     setCodexChatResumeState,
     setCodexChatResumeStateForSession,
+    codexChatLiveRunId,
+    codexChatLiveRunSeq,
+    codexChatLiveRunActive,
+    codexChatLiveAssistantTurnId,
+    codexChatLiveStatusText,
+    codexChatLiveRunStartedAt,
+    codexChatLiveStopRequested,
+    setCodexChatLiveRunForSession,
     setCodexChatMcpServersForSession,
     mergeCodexChatSessionsFromServer,
   }

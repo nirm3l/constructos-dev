@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .settings import VECTOR_INDEX_DISTILL_ENABLED
+
 
 class ExternalRef(BaseModel):
     url: str = Field(min_length=1)
@@ -34,6 +36,7 @@ class TaskCreate(BaseModel):
     priority: str = "Med"
     due_date: datetime | None = None
     assignee_id: str | None = None
+    assigned_agent_code: str | None = None
     labels: list[str] = Field(default_factory=list)
     subtasks: list[dict[str, Any]] = Field(default_factory=list)
     attachments: list[dict[str, Any]] = Field(default_factory=list)
@@ -41,6 +44,8 @@ class TaskCreate(BaseModel):
     attachment_refs: list[AttachmentRef] = Field(default_factory=list)
     instruction: str | None = None
     execution_triggers: list[dict[str, Any]] = Field(default_factory=list)
+    task_relationships: list[dict[str, Any]] = Field(default_factory=list)
+    delivery_mode: str | None = None
     recurring_rule: str | None = None
     task_type: str = "manual"
     scheduled_instruction: str | None = None
@@ -55,6 +60,7 @@ class TaskPatch(BaseModel):
     priority: str | None = None
     due_date: datetime | None = None
     assignee_id: str | None = None
+    assigned_agent_code: str | None = None
     labels: list[str] | None = None
     subtasks: list[dict[str, Any]] | None = None
     attachments: list[dict[str, Any]] | None = None
@@ -62,6 +68,8 @@ class TaskPatch(BaseModel):
     attachment_refs: list[AttachmentRef] | None = None
     instruction: str | None = None
     execution_triggers: list[dict[str, Any]] | None = None
+    task_relationships: list[dict[str, Any]] | None = None
+    delivery_mode: str | None = None
     archived: bool | None = None
     project_id: str | None = None
     task_group_id: str | None = None
@@ -84,7 +92,17 @@ class CommentCreate(BaseModel):
 
 
 class TaskAutomationRun(BaseModel):
-    instruction: str | None = Field(default=None, max_length=2000)
+    instruction: str | None = None
+    source: str | None = None
+    source_task_id: str | None = None
+    chat_session_id: str | None = None
+    execution_intent: bool | None = None
+    execution_kickoff_intent: bool | None = None
+    project_creation_intent: bool | None = None
+    workflow_scope: str | None = None
+    execution_mode: str | None = None
+    task_completion_requested: bool | None = None
+    classifier_reason: str | None = None
 
 
 class AgentChatRun(BaseModel):
@@ -145,11 +163,14 @@ class ProjectCreate(BaseModel):
     custom_statuses: list[str] | None = None
     external_refs: list[ExternalRef] = Field(default_factory=list)
     attachment_refs: list[AttachmentRef] = Field(default_factory=list)
-    embedding_enabled: bool = False
+    embedding_enabled: bool = True
     embedding_model: str | None = None
     context_pack_evidence_top_k: int | None = Field(default=None, ge=1, le=40)
+    automation_max_parallel_tasks: int = Field(default=4, ge=1, le=50)
     chat_index_mode: str = "OFF"
     chat_attachment_ingestion_mode: str = "METADATA_ONLY"
+    vector_index_distill_enabled: bool = VECTOR_INDEX_DISTILL_ENABLED
+    event_storming_enabled: bool = True
     member_user_ids: list[str] = Field(default_factory=list)
 
 
@@ -162,8 +183,11 @@ class ProjectPatch(BaseModel):
     embedding_enabled: bool | None = None
     embedding_model: str | None = None
     context_pack_evidence_top_k: int | None = Field(default=None, ge=1, le=40)
+    automation_max_parallel_tasks: int | None = Field(default=None, ge=1, le=50)
     chat_index_mode: str | None = None
     chat_attachment_ingestion_mode: str | None = None
+    vector_index_distill_enabled: bool | None = None
+    event_storming_enabled: bool | None = None
 
 
 class ProjectMemberUpsert(BaseModel):
@@ -244,6 +268,8 @@ class UserPreferencesPatch(BaseModel):
     notifications_enabled: bool | None = None
     agent_chat_model: str | None = None
     agent_chat_reasoning_effort: str | None = None
+    onboarding_quick_tour_completed: bool | None = None
+    onboarding_advanced_tour_completed: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +295,7 @@ class TaskDTO:
     priority: str
     due_date: str | None
     assignee_id: str | None
+    assigned_agent_code: str | None
     labels: list[str]
     subtasks: list[dict[str, Any]]
     attachments: list[dict[str, Any]]
@@ -276,12 +303,15 @@ class TaskDTO:
     attachment_refs: list[dict[str, Any]]
     instruction: str | None
     execution_triggers: list[dict[str, Any]]
+    task_relationships: list[dict[str, Any]]
+    delivery_mode: str | None
     recurring_rule: str | None
     task_type: str
     scheduled_instruction: str | None
     scheduled_at_utc: str | None
     schedule_timezone: str | None
     schedule_state: str
+    automation_state: str
     last_schedule_run_at: str | None
     last_schedule_error: str | None
     archived: bool
@@ -450,3 +480,11 @@ class NoteGroupCommandState:
     workspace_id: str
     project_id: str
     is_deleted: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectCommandState:
+    id: str
+    workspace_id: str
+    is_deleted: bool
+    custom_statuses: list[str] | None = None

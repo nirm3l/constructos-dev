@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from shared.core import (
     AggregateEventRepository,
-    Project,
     ReorderPayload,
     TaskGroup,
     TaskGroupCreate,
@@ -18,6 +17,7 @@ from shared.core import (
     coerce_originator_id,
     ensure_project_access,
     ensure_role,
+    load_project_command_state,
     load_task_group_command_state,
     load_task_group_view,
 )
@@ -33,13 +33,26 @@ def _group_name_key(value: str) -> str:
     return _normalize_group_name(value).casefold()
 
 
-def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
-    project = db.get(Project, project_id)
+def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> None:
+    project = load_project_command_state(db, project_id)
     if not project or project.is_deleted:
         raise HTTPException(status_code=404, detail="Project not found")
     if project.workspace_id != workspace_id:
         raise HTTPException(status_code=400, detail="Project does not belong to workspace")
-    return project
+
+
+def _task_group_view_from_aggregate(*, group_id: str, aggregate: TaskGroupAggregate) -> dict:
+    return {
+        "id": group_id,
+        "workspace_id": getattr(aggregate, "workspace_id", None),
+        "project_id": getattr(aggregate, "project_id", None),
+        "name": getattr(aggregate, "name", "") or "",
+        "description": getattr(aggregate, "description", "") or "",
+        "color": getattr(aggregate, "color", None),
+        "order_index": int(getattr(aggregate, "order_index", 0) or 0),
+        "created_at": None,
+        "updated_at": None,
+    }
 
 
 def _find_group_by_name(db: Session, *, workspace_id: str, project_id: str, name: str) -> TaskGroup | None:
@@ -156,9 +169,9 @@ class CreateTaskGroupHandler:
         )
         self.ctx.db.commit()
         view = load_task_group_view(self.ctx.db, group_id)
-        if view is None:
-            raise HTTPException(status_code=404, detail="Task group not found after create")
-        return view
+        if view is not None:
+            return view
+        return _task_group_view_from_aggregate(group_id=group_id, aggregate=aggregate)
 
 
 @dataclass(frozen=True, slots=True)

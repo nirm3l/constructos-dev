@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 
 from shared.core import (
     AggregateEventRepository,
-    Project,
     ProjectRuleCreate,
     ProjectRulePatch,
     User,
@@ -15,20 +14,37 @@ from shared.core import (
     ensure_project_access,
     allocate_id,
     ensure_role,
+    load_project_command_state,
     load_project_rule_command_state,
     load_project_rule_view,
 )
 
 from .domain import ProjectRuleAggregate
 
+def _normalize_rule_body(*, body: str) -> str:
+    return str(body or "")
 
-def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
-    project = db.get(Project, project_id)
+
+def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> None:
+    project = load_project_command_state(db, project_id)
     if not project or project.is_deleted:
         raise HTTPException(status_code=404, detail="Project not found")
     if project.workspace_id != workspace_id:
         raise HTTPException(status_code=400, detail="Project does not belong to workspace")
-    return project
+
+
+def _project_rule_view_from_aggregate(*, rule_id: str, aggregate: ProjectRuleAggregate) -> dict:
+    return {
+        "id": rule_id,
+        "workspace_id": getattr(aggregate, "workspace_id", None),
+        "project_id": getattr(aggregate, "project_id", None),
+        "title": getattr(aggregate, "title", "") or "",
+        "body": getattr(aggregate, "body", "") or "",
+        "created_by": getattr(aggregate, "created_by", "") or "",
+        "updated_by": getattr(aggregate, "updated_by", "") or "",
+        "created_at": None,
+        "updated_at": None,
+    }
 
 
 def require_project_rule_command_state(db: Session, user: User, rule_id: str, *, allowed: set[str]) -> tuple[str, str]:
@@ -64,12 +80,13 @@ class CreateProjectRuleHandler:
         title = self.payload.title.strip()
         if not title:
             raise HTTPException(status_code=422, detail="title cannot be empty")
+        body = _normalize_rule_body(body=self.payload.body or "")
         aggregate = ProjectRuleAggregate(
             id=coerce_originator_id(rid),
             workspace_id=self.payload.workspace_id,
             project_id=self.payload.project_id,
             title=title,
-            body=self.payload.body or "",
+            body=body,
             created_by=self.ctx.user.id,
         )
         AggregateEventRepository(self.ctx.db).persist(
@@ -84,9 +101,9 @@ class CreateProjectRuleHandler:
         )
         self.ctx.db.commit()
         view = load_project_rule_view(self.ctx.db, rid)
-        if view is None:
-            raise HTTPException(status_code=404, detail="Project rule not found after create")
-        return view
+        if view is not None:
+            return view
+        return _project_rule_view_from_aggregate(rule_id=rid, aggregate=aggregate)
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,7 +136,7 @@ class PatchProjectRuleHandler:
                 raise HTTPException(status_code=422, detail="title cannot be empty")
             event_payload["title"] = title
         if "body" in data and data["body"] is not None:
-            event_payload["body"] = str(data["body"])
+            event_payload["body"] = _normalize_rule_body(body=str(data["body"]))
         if not event_payload:
             view = load_project_rule_view(self.ctx.db, self.rule_id)
             if view is None:

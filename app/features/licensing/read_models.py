@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -10,6 +11,8 @@ from sqlalchemy.orm import Session
 from shared.models import LicenseEntitlement, LicenseInstallation
 from shared.licensing import resolve_license_installation_id
 from shared.settings import (
+    APP_BUILD,
+    APP_VERSION,
     LICENSE_ENFORCEMENT_ENABLED,
     LICENSE_GRACE_HOURS,
 )
@@ -22,6 +25,8 @@ from .domain import (
     LICENSE_STATUS_UNLICENSED,
     WRITE_ALLOWED_STATUSES,
 )
+
+_VERSION_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 
 
 def _ensure_aware(value: datetime | None) -> datetime | None:
@@ -69,6 +74,110 @@ def _sanitize_license_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
+def _public_license_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    cleaned = _sanitize_license_metadata(metadata)
+    cleaned.pop("control_plane_notifications", None)
+    return cleaned
+
+
+def _normalize_version_token(value: Any) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return ""
+    if _VERSION_TOKEN_RE.fullmatch(token):
+        return token
+    return ""
+
+
+def _license_notifications_read_model(
+    *,
+    status_payload: dict[str, Any],
+    metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    notifications: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_dedupe: set[str] = set()
+
+    current_version = _normalize_version_token(status_payload.get("app_version"))
+    current_build = _normalize_version_token(status_payload.get("app_build"))
+    latest_version = _normalize_version_token(
+        metadata.get("latest_app_version")
+        or metadata.get("available_app_version")
+        or metadata.get("latest_version")
+        or metadata.get("app_update_version")
+    )
+    latest_image_tag = _normalize_version_token(
+        metadata.get("latest_image_tag")
+        or metadata.get("available_image_tag")
+        or metadata.get("app_image_tag")
+    )
+    update_released_at = str(
+        metadata.get("latest_release_at")
+        or metadata.get("latest_release_date")
+        or status_payload.get("last_validated_at")
+        or ""
+    ).strip() or None
+
+    has_update_version = bool(latest_version and latest_version != current_version)
+    has_update_tag = bool(latest_image_tag and latest_image_tag != current_version and latest_image_tag != current_build)
+    if has_update_version or has_update_tag:
+        target_version = latest_version or latest_image_tag
+        dedupe_key = f"license-app-update:{target_version}"
+        if dedupe_key not in seen_dedupe:
+            seen_dedupe.add(dedupe_key)
+            notification_id = dedupe_key
+            if notification_id not in seen_ids:
+                seen_ids.add(notification_id)
+                notifications.append(
+                    {
+                        "id": notification_id,
+                        "message": f"New application version is available: {target_version}",
+                        "is_read": False,
+                        "created_at": update_released_at,
+                        "notification_type": "AppUpdateAvailable",
+                        "severity": "info",
+                        "dedupe_key": dedupe_key,
+                        "source_event": "license.status",
+                        "payload": {
+                            "title": "New application version available",
+                            "action": "auto_update_app_images",
+                            "action_label": "Update app",
+                            "description": "Pull latest task-app and mcp-tools images and restart those services.",
+                            "target_image_tag": target_version,
+                        },
+                    }
+                )
+
+    control_plane_notifications = metadata.get("control_plane_notifications")
+    if isinstance(control_plane_notifications, list):
+        for item in control_plane_notifications:
+            if not isinstance(item, dict):
+                continue
+            notification_id = str(item.get("id") or "").strip()
+            if not notification_id or notification_id in seen_ids:
+                continue
+            dedupe_key = str(item.get("dedupe_key") or notification_id).strip() or notification_id
+            if dedupe_key in seen_dedupe:
+                continue
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            notifications.append(
+                {
+                    "id": notification_id,
+                    "message": str(item.get("message") or "").strip() or "Notification",
+                    "is_read": bool(item.get("is_read")),
+                    "created_at": str(item.get("created_at") or "").strip() or None,
+                    "notification_type": str(item.get("notification_type") or "ControlPlaneMessage").strip() or "ControlPlaneMessage",
+                    "severity": str(item.get("severity") or "info").strip() or "info",
+                    "dedupe_key": dedupe_key,
+                    "source_event": str(item.get("source_event") or "control-plane.notification").strip() or "control-plane.notification",
+                    "payload": payload,
+                }
+            )
+            seen_ids.add(notification_id)
+            seen_dedupe.add(dedupe_key)
+    return notifications
+
+
 def license_status_read_model(db: Session) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     installation_id = resolve_license_installation_id(db)
@@ -76,7 +185,7 @@ def license_status_read_model(db: Session) -> dict[str, Any]:
         select(LicenseInstallation).where(LicenseInstallation.installation_id == installation_id)
     ).scalar_one_or_none()
     if installation is None:
-        return {
+        payload = {
             "installation_id": installation_id,
             "status": LICENSE_STATUS_UNLICENSED,
             "plan_code": None,
@@ -87,7 +196,11 @@ def license_status_read_model(db: Session) -> dict[str, Any]:
             "last_validated_at": None,
             "token_expires_at": None,
             "metadata": {},
+            "app_version": APP_VERSION,
+            "app_build": APP_BUILD,
         }
+        payload["notifications"] = _license_notifications_read_model(status_payload=payload, metadata={})
+        return payload
 
     entitlement = _latest_entitlement(db, installation.id)
     trial_ends_at = _ensure_aware(installation.trial_ends_at)
@@ -130,8 +243,9 @@ def license_status_read_model(db: Session) -> dict[str, Any]:
     enforcement_enabled = bool(LICENSE_ENFORCEMENT_ENABLED)
     write_access = (not enforcement_enabled) or (status in WRITE_ALLOWED_STATUSES)
     metadata = _sanitize_license_metadata(_coerce_metadata(installation.metadata_json))
+    public_metadata = _public_license_metadata(metadata)
 
-    return {
+    payload = {
         "installation_id": installation.installation_id,
         "status": status,
         "plan_code": plan_code,
@@ -141,8 +255,12 @@ def license_status_read_model(db: Session) -> dict[str, Any]:
         "grace_ends_at": grace_ends_at.isoformat() if grace_ends_at else None,
         "last_validated_at": _ensure_aware(installation.last_validated_at).isoformat() if installation.last_validated_at else None,
         "token_expires_at": _ensure_aware(installation.token_expires_at).isoformat() if installation.token_expires_at else None,
-        "metadata": metadata,
+        "metadata": public_metadata,
+        "app_version": APP_VERSION,
+        "app_build": APP_BUILD,
     }
+    payload["notifications"] = _license_notifications_read_model(status_payload=payload, metadata=metadata)
+    return payload
 
 
 def license_health_summary_read_model(db: Session) -> dict[str, Any]:

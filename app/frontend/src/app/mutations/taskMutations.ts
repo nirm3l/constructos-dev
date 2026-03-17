@@ -7,8 +7,10 @@ import {
   deleteTaskGroup,
   patchTaskGroup,
   reorderTaskGroups,
+  reviewTask,
   reopenTask,
   restoreTask,
+  runTaskAutomationStream,
   runTaskWithCodex,
 } from '../../api'
 
@@ -56,6 +58,7 @@ export function useTaskMutations(c: any) {
       due_date?: string | null
       priority?: string
       labels?: string[]
+      instruction?: string | null
       task_type?: 'manual' | 'scheduled_instruction'
       scheduled_instruction?: string | null
       scheduled_at_utc?: string | null
@@ -110,8 +113,12 @@ export function useTaskMutations(c: any) {
             : effectiveTaskType === 'scheduled_instruction'
               ? resolvedTimezone
               : null
+        const instruction =
+          payload?.instruction !== undefined
+            ? payload.instruction
+            : (String(c.quickTaskScheduledInstruction || '').trim() || null)
 
-        return createTask(c.userId, {
+        const createPayload: Parameters<typeof createTask>[1] = {
           title: payload?.title?.trim() || c.taskTitle.trim(),
           workspace_id: c.workspaceId,
           project_id: payload?.project_id || c.quickProjectId || c.selectedProjectId,
@@ -123,12 +130,16 @@ export function useTaskMutations(c: any) {
           labels: payload?.labels ?? c.quickTaskTags,
           external_refs: c.parseExternalRefsText(c.quickTaskExternalRefsText),
           attachment_refs: c.parseAttachmentRefsText(c.quickTaskAttachmentRefsText),
-          recurring_rule: payload?.recurring_rule ?? null,
+          instruction,
           task_type: effectiveTaskType,
-          scheduled_instruction: scheduledInstruction,
-          scheduled_at_utc: scheduledAtUtc,
-          schedule_timezone: scheduleTimezone,
-        })
+        }
+        if (effectiveTaskType === 'scheduled_instruction') {
+          createPayload.recurring_rule = payload?.recurring_rule ?? null
+          createPayload.scheduled_instruction = scheduledInstruction
+          createPayload.scheduled_at_utc = scheduledAtUtc
+          createPayload.schedule_timezone = scheduleTimezone
+        }
+        return createTask(c.userId, createPayload)
       },
     onSuccess: async (task, payload) => {
       c.setUiError(null)
@@ -154,6 +165,17 @@ export function useTaskMutations(c: any) {
       await c.invalidateAll()
     },
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Complete failed')
+  })
+
+  const reviewTaskMutation = useMutation({
+    mutationFn: ({ taskId, action, comment }: { taskId: string; action: 'approve' | 'request_changes'; comment?: string | null }) =>
+      reviewTask(c.userId, taskId, { action, comment }),
+    onSuccess: async (task) => {
+      c.setUiError(null)
+      if (c.selectedTaskId === task.id) c.setEditStatus(task.status)
+      await c.invalidateAll()
+    },
+    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Review action failed')
   })
 
   const reopenTaskMutation = useMutation({
@@ -187,15 +209,78 @@ export function useTaskMutations(c: any) {
   })
 
   const runAutomationMutation = useMutation({
-    mutationFn: () => runTaskWithCodex(c.userId, c.selectedTaskId as string, c.automationInstruction.trim()),
+    mutationFn: async () => {
+      const taskId = c.selectedTaskId as string
+      const rawInstruction = String(c.automationInstruction || '').trim()
+      if (!rawInstruction) throw new Error('Instruction is required')
+      c.setAutomationLiveTaskId(null)
+      c.setAutomationLiveRunId(null)
+      c.setAutomationLiveActive(false)
+      c.setAutomationLiveBuffer('')
+      c.setAutomationLiveStatusText('')
+      c.setAutomationLiveUpdatedAt(null)
+      const dispatchMatch = rawInstruction.match(/^#dispatch\b\s*/i)
+      if (dispatchMatch) {
+        const queuedInstruction = rawInstruction.slice(dispatchMatch[0].length).trim() || rawInstruction
+        return runTaskWithCodex(c.userId, taskId, queuedInstruction)
+      }
+      const key = ['automation-status', c.userId, taskId] as const
+      await c.qc.cancelQueries({ queryKey: key })
+      const runId = globalThis.crypto?.randomUUID?.() ?? `run-${Date.now()}`
+      let streamBuffer = ''
+      c.setAutomationLiveTaskId(taskId)
+      c.setAutomationLiveRunId(runId)
+      c.setAutomationLiveActive(true)
+      c.setAutomationLiveBuffer('')
+      c.setAutomationLiveStatusText('Running...')
+      c.setAutomationLiveUpdatedAt(new Date().toISOString())
+      c.qc.setQueryData(key, (current: any) => {
+        const existing = current && typeof current === 'object' ? current : {}
+        const nowIso = new Date().toISOString()
+        return {
+          ...existing,
+          task_id: taskId,
+          automation_state: 'running',
+          last_agent_progress: '',
+          last_agent_comment: null,
+          last_agent_error: null,
+          last_agent_stream_status: 'Running...',
+          last_agent_stream_updated_at: nowIso,
+          last_requested_instruction: rawInstruction,
+          last_requested_source: 'manual_stream',
+        }
+      })
+      return runTaskAutomationStream(c.userId, taskId, rawInstruction, {
+        onAssistantDelta: (delta) => {
+          streamBuffer += String(delta || '')
+          c.setAutomationLiveBuffer(streamBuffer)
+          c.setAutomationLiveUpdatedAt(new Date().toISOString())
+        },
+        onStatus: (message) => {
+          c.setAutomationLiveStatusText(String(message || '').trim() || 'Running...')
+          c.setAutomationLiveUpdatedAt(new Date().toISOString())
+        },
+      })
+    },
     onSuccess: async () => {
       c.setUiError(null)
       c.setAutomationInstruction('')
+      c.setAutomationLiveActive(false)
+      c.setAutomationLiveStatusText('')
+      c.setAutomationLiveBuffer('')
+      c.setAutomationLiveUpdatedAt(null)
       await c.qc.invalidateQueries({ queryKey: ['automation-status', c.userId, c.selectedTaskId] })
       await c.qc.invalidateQueries({ queryKey: ['activity', c.userId, c.selectedTaskId] })
       await c.qc.invalidateQueries({ queryKey: ['tasks'] })
     },
-    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Codex run failed')
+    onError: async (err) => {
+      c.setUiError(err instanceof Error ? err.message : 'Codex run failed')
+      c.setAutomationLiveActive(false)
+      c.setAutomationLiveStatusText('')
+      c.setAutomationLiveBuffer('')
+      c.setAutomationLiveUpdatedAt(null)
+      await c.qc.invalidateQueries({ queryKey: ['automation-status', c.userId, c.selectedTaskId] })
+    }
   })
 
   const createTaskGroupMutation = useMutation({
@@ -275,6 +360,7 @@ export function useTaskMutations(c: any) {
     saveTaskMutation,
     createTaskMutation,
     completeTaskMutation,
+    reviewTaskMutation,
     reopenTaskMutation,
     archiveTaskMutation,
     restoreTaskMutation,

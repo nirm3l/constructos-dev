@@ -6,8 +6,8 @@ RUN npm ci
 COPY frontend /frontend
 RUN npm run build
 
-FROM node:22-bookworm-slim AS codex-builder
-RUN npm install -g --include=optional @openai/codex \
+FROM node:22-bookworm-slim AS agent-cli-builder
+RUN npm install -g --include=optional "@openai/codex@latest" "@anthropic-ai/claude-code@latest" \
     && npm cache clean --force
 
 FROM python:3.12-slim
@@ -34,13 +34,14 @@ ARG APP_BUNDLE_KDF_ITERATIONS=200000
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends dumb-init ca-certificates openssl bash git docker-cli docker-compose \
+    && apt-get install -y --no-install-recommends dumb-init ca-certificates openssl bash git curl ripgrep docker-cli docker-compose \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=codex-builder /usr/local/bin/node /usr/local/bin/node
-COPY --from=codex-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
-# Keep the same global bin layout npm creates so Codex can resolve platform packages.
+COPY --from=agent-cli-builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=agent-cli-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
+# Keep the same global bin layout npm creates so the agent CLIs can resolve platform packages.
 RUN ln -sf ../lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex
+RUN ln -sf ../lib/node_modules/@anthropic-ai/claude-code/cli.js /usr/local/bin/claude
 
 COPY requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
@@ -49,8 +50,14 @@ COPY . /app
 COPY --from=frontend-builder /frontend/dist /app/static
 COPY scripts/runtime_entrypoint.sh /usr/local/bin/constructos-entrypoint.sh
 COPY scripts/docker_wrapper.sh /usr/local/bin/docker
+COPY scripts/docker_compose_wrapper.sh /usr/local/bin/docker-compose
 
 RUN chmod 0755 /usr/local/bin/constructos-entrypoint.sh /usr/local/bin/docker \
+    /usr/local/bin/docker-compose \
+    && mv /usr/bin/docker /usr/bin/docker-real \
+    && if [ -x /usr/bin/docker-compose ]; then mv /usr/bin/docker-compose /usr/bin/docker-compose-real; fi \
+    && ln -sf /usr/local/bin/docker /usr/bin/docker \
+    && ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose \
     && if [ "${APP_BUNDLE_ENCRYPT}" = "true" ]; then \
         if [ -z "${APP_BUNDLE_PASSWORD}" ]; then \
           echo "APP_BUNDLE_PASSWORD is required when APP_BUNDLE_ENCRYPT=true" >&2; \
@@ -72,7 +79,7 @@ RUN chmod 0755 /usr/local/bin/constructos-entrypoint.sh /usr/local/bin/docker \
     && mkdir -p /opt/constructos \
     && groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid app --create-home --home-dir /home/app app \
-    && mkdir -p /data/uploads /home/app/.codex /home/app/codex-home /home/app/workspace \
+    && mkdir -p /data/uploads /home/app/.codex /home/app/.claude /home/app/agent-home /home/app/workspace \
     && chown -R app:app /app /data/uploads /home/app /opt/constructos
 
 USER app

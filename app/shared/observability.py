@@ -33,6 +33,10 @@ class RuntimeMetrics:
     embedding_requests_total: int = 0
     embedding_context_length_errors: int = 0
     context_pack_grounded_claim_ratio: int = 0
+    db_pool_checked_out: int = 0
+    db_pool_checked_out_peak: int = 0
+    db_pool_checkout_events: int = 0
+    db_pool_checkin_events: int = 0
 
 
 _metrics = RuntimeMetrics()
@@ -110,4 +114,8 @@ def snapshot() -> dict[str, int]:
             "embedding_requests_total": _metrics.embedding_requests_total,
             "embedding_context_length_errors": _metrics.embedding_context_length_errors,
             "context_pack_grounded_claim_ratio": _metrics.context_pack_grounded_claim_ratio,
+            "db_pool_checked_out": _metrics.db_pool_checked_out,
+            "db_pool_checked_out_peak": _metrics.db_pool_checked_out_peak,
+            "db_pool_checkout_events": _metrics.db_pool_checkout_events,
+            "db_pool_checkin_events": _metrics.db_pool_checkin_events,
         }

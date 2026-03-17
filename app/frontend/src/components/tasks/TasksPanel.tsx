@@ -7,8 +7,7 @@ import type { ProjectBoard, Task, TaskGroup } from '../../types'
 import { priorityTone, tagHue } from '../../utils/ui'
 import { Icon } from '../shared/uiHelpers'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
-import { VirtualizedList } from '../shared/VirtualizedList'
-import { taskDescriptionPreview, TaskListItem } from './taskViews'
+import { ChipTooltip, taskDescriptionPreview, TaskListItem } from './taskViews'
 
 type TaskSection = {
   key: string
@@ -105,11 +104,40 @@ function formatBoardRecurring(recurringRule: string | null | undefined): string 
   return `Repeat: every ${amount}d`
 }
 
+function formatBoardScheduleState(state: Task['schedule_state'] | null | undefined): string {
+  const raw = String(state ?? '').trim()
+  if (!raw) return 'Unknown'
+  return `${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
+}
+
+function formatBoardAutomationState(state: string | null | undefined): string {
+  const raw = String(state ?? '').trim()
+  if (!raw || raw.toLowerCase() === 'idle') return 'Idle'
+  if (raw === 'completed') return 'Execution Completed'
+  return `Execution ${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
+}
+
+function toBoardExecutionChipClassState(state: string | null | undefined): string {
+  const raw = String(state ?? 'idle').trim().toLowerCase()
+  if (!raw) return 'idle'
+  if (raw === 'completed') return 'done'
+  return raw
+}
+
+function resolveBoardEffectiveExecutionState(task: Task): string {
+  const automation = String(task.automation_state ?? '').trim().toLowerCase()
+  if (automation && automation !== 'idle') return automation
+  const schedule = String(task.schedule_state ?? '').trim().toLowerCase()
+  if (task.task_type === 'scheduled_instruction' && schedule) return schedule
+  return automation || 'idle'
+}
+
 type BoardTaskCardProps = {
   task: Task
   status: string
   statuses: string[]
   targetGroupId: string | null
+  assigneeLabel?: string
   onTagClick: (tag: string) => void
   onOpenTaskEditor: (taskId: string) => void
   onMoveTaskStatus: (taskId: string, nextStatus: string, nextTaskGroupId?: string | null) => void
@@ -122,6 +150,7 @@ function BoardTaskCard({
   status,
   statuses,
   targetGroupId,
+  assigneeLabel,
   onTagClick,
   onOpenTaskEditor,
   onMoveTaskStatus,
@@ -129,6 +158,12 @@ function BoardTaskCard({
   onDragEnd,
 }: BoardTaskCardProps) {
   const descriptionPreviewText = taskDescriptionPreview(task.description)
+  const isScheduled = task.task_type === 'scheduled_instruction'
+  const externalRefCount = Array.isArray(task.external_refs) ? task.external_refs.length : 0
+  const effectiveExecutionState = resolveBoardEffectiveExecutionState(task)
+  const hasVisibleAutomationState = effectiveExecutionState !== 'idle'
+  const executionStateLabel = formatBoardAutomationState(effectiveExecutionState)
+  const executionStateClass = toBoardExecutionChipClassState(effectiveExecutionState)
   const availableStatuses = statuses.filter((candidateStatus) => candidateStatus !== status)
   const currentStatusIndex = statuses.indexOf(status)
   const nextStatus = currentStatusIndex >= 0 && currentStatusIndex < statuses.length - 1
@@ -147,20 +182,119 @@ function BoardTaskCard({
     >
       <div className="kanban-title">
         <strong>{task.title}</strong>
-        <span className={`prio prio-${priorityTone(task.priority)}`} title={`Priority: ${task.priority}`}>
-          {task.priority}
-        </span>
+        <div
+          className="kanban-title-controls"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <span className={`prio prio-${priorityTone(task.priority)}`} title={`Priority: ${task.priority}`}>
+            {task.priority}
+          </span>
+          {availableStatuses.length > 0 ? (
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger asChild>
+                <button
+                  className="status-chip kanban-move-trigger"
+                  type="button"
+                  onClick={(event) => event.stopPropagation()}
+                  aria-label="Move task to another status"
+                  title="Move task to another status"
+                >
+                  <span>Move</span>
+                  <Icon path="M6 9l6 6 6-6" />
+                </button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content className="task-group-menu-content kanban-move-menu-content" sideOffset={6} align="end">
+                  {nextStatus && (
+                    <>
+                      <DropdownMenu.Item
+                        className="task-group-menu-item"
+                        onSelect={() => onMoveTaskStatus(task.id, nextStatus, targetGroupId)}
+                      >
+                        <Icon path="M13 5l7 7-7 7M5 12h14" />
+                        <span>{`Move to next (${nextStatus})`}</span>
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Separator className="task-group-menu-separator" />
+                    </>
+                  )}
+                  <DropdownMenu.RadioGroup
+                    value={status}
+                    onValueChange={(value) => {
+                      if (value !== status) onMoveTaskStatus(task.id, value, targetGroupId)
+                    }}
+                  >
+                    {statuses.map((candidateStatus) => (
+                      <DropdownMenu.RadioItem
+                        key={candidateStatus}
+                        value={candidateStatus}
+                        className="task-group-menu-item kanban-move-menu-item"
+                        disabled={candidateStatus === status}
+                      >
+                        <span className="kanban-move-menu-label">{candidateStatus}</span>
+                        {candidateStatus === status && <span className="meta kanban-move-menu-meta">Current</span>}
+                        <DropdownMenu.ItemIndicator className="kanban-move-menu-indicator">
+                          <Icon path="M5 13l4 4L19 7" />
+                        </DropdownMenu.ItemIndicator>
+                      </DropdownMenu.RadioItem>
+                    ))}
+                  </DropdownMenu.RadioGroup>
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
+          ) : (
+            <button
+              className="status-chip kanban-move-trigger"
+              type="button"
+              disabled
+              aria-label="No available status transitions"
+              title="No available status transitions"
+            >
+              <span>Move</span>
+              <Icon path="M6 9l6 6 6-6" />
+            </button>
+          )}
+        </div>
       </div>
       {descriptionPreviewText && (
         <p className="kanban-desc-preview" title={descriptionPreviewText}>
           {descriptionPreviewText}
         </p>
       )}
-      {task.task_type === 'scheduled_instruction' && (
+      {isScheduled && (
         <div className="kanban-schedule-compact">
           <span className="kanban-schedule-chip kanban-schedule-chip-kind">Scheduled</span>
           <span className="kanban-schedule-chip">{formatBoardScheduleTrigger(task.scheduled_at_utc)}</span>
           <span className="kanban-schedule-chip">{formatBoardRecurring(task.recurring_rule)}</span>
+          <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
+            {executionStateLabel}
+          </span>
+        </div>
+      )}
+      {(assigneeLabel || externalRefCount > 0) && (
+        <div className="kanban-meta-compact">
+          <div className="kanban-meta-left">
+            {assigneeLabel && (
+              <div className="task-assignee-compact" title={`Assigned to ${assigneeLabel}`}>
+                <Icon path="M20 21a8 8 0 0 0-16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8" />
+                <span>{assigneeLabel}</span>
+              </div>
+            )}
+          </div>
+          <div className="kanban-meta-right">
+            {!isScheduled && hasVisibleAutomationState && (
+              <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
+                {executionStateLabel}
+              </span>
+            )}
+            {externalRefCount > 0 && (
+              <ChipTooltip label={`${externalRefCount} external link${externalRefCount === 1 ? '' : 's'}`}>
+                <span className="task-resource-chip">
+                  <Icon path="M14 3h7v7m0-7L10 14M5 7v12h12v-5" />
+                  <span>{externalRefCount}</span>
+                </span>
+              </ChipTooltip>
+            )}
+          </div>
         </div>
       )}
       {(task.labels ?? []).length > 0 && (
@@ -186,75 +320,6 @@ function BoardTaskCard({
           ))}
         </div>
       )}
-      <div
-        className="kanban-actions"
-        onClick={(event) => event.stopPropagation()}
-      >
-        {availableStatuses.length > 0 ? (
-          <DropdownMenu.Root>
-            <DropdownMenu.Trigger asChild>
-              <button
-                className="status-chip kanban-move-trigger"
-                type="button"
-                onClick={(event) => event.stopPropagation()}
-                aria-label="Move task to another status"
-                title="Move task to another status"
-              >
-                <span>Move to</span>
-                <Icon path="M6 9l6 6 6-6" />
-              </button>
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
-              <DropdownMenu.Content className="task-group-menu-content kanban-move-menu-content" sideOffset={6} align="start">
-                {nextStatus && (
-                  <>
-                    <DropdownMenu.Item
-                      className="task-group-menu-item"
-                      onSelect={() => onMoveTaskStatus(task.id, nextStatus, targetGroupId)}
-                    >
-                      <Icon path="M13 5l7 7-7 7M5 12h14" />
-                      <span>{`Move to next (${nextStatus})`}</span>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator className="task-group-menu-separator" />
-                  </>
-                )}
-                <DropdownMenu.RadioGroup
-                  value={status}
-                  onValueChange={(value) => {
-                    if (value !== status) onMoveTaskStatus(task.id, value, targetGroupId)
-                  }}
-                >
-                  {statuses.map((candidateStatus) => (
-                    <DropdownMenu.RadioItem
-                      key={candidateStatus}
-                      value={candidateStatus}
-                      className="task-group-menu-item kanban-move-menu-item"
-                      disabled={candidateStatus === status}
-                    >
-                      <span className="kanban-move-menu-label">{candidateStatus}</span>
-                      {candidateStatus === status && <span className="meta kanban-move-menu-meta">Current</span>}
-                      <DropdownMenu.ItemIndicator className="kanban-move-menu-indicator">
-                        <Icon path="M5 13l4 4L19 7" />
-                      </DropdownMenu.ItemIndicator>
-                    </DropdownMenu.RadioItem>
-                  ))}
-                </DropdownMenu.RadioGroup>
-              </DropdownMenu.Content>
-            </DropdownMenu.Portal>
-          </DropdownMenu.Root>
-        ) : (
-          <button
-            className="status-chip kanban-move-trigger"
-            type="button"
-            disabled
-            aria-label="No available status transitions"
-            title="No available status transitions"
-          >
-            <span>Move to</span>
-            <Icon path="M6 9l6 6 6-6" />
-          </button>
-        )}
-      </div>
     </div>
   )
 }
@@ -276,6 +341,7 @@ type TasksPanelProps = {
   toggleSearchTag: (tag: string) => void
   clearSearchTags: () => void
   boardData: ProjectBoard | undefined
+  actorNames: Record<string, string>
   onOpenTaskEditor: (taskId: string) => void
   onOpenSpecification: (specificationId: string, projectId: string) => void
   specificationNames: Record<string, string>
@@ -306,6 +372,7 @@ export function TasksPanel({
   toggleSearchTag,
   clearSearchTags,
   boardData,
+  actorNames,
   onOpenTaskEditor,
   onOpenSpecification,
   specificationNames,
@@ -318,6 +385,43 @@ export function TasksPanel({
   onCompleteTask,
   onNewTask,
 }: TasksPanelProps) {
+  const getTeamAgentLabel = React.useCallback((task: Task): string => {
+    const slot = String(task.assigned_agent_code || '').trim()
+    if (!slot) return ''
+    const normalizedSlot = slot.toLowerCase()
+    if (normalizedSlot === 'dev-a') return 'Developer A'
+    if (normalizedSlot === 'dev-b') return 'Developer B'
+    if (normalizedSlot === 'qa-a') return 'QA A'
+    if (normalizedSlot === 'lead-a') return 'Lead A'
+    const parts = slot
+      .split('-')
+      .filter(Boolean)
+    if (parts.length === 2) {
+      const role = String(parts[0] || '')
+      const ordinal = String(parts[1] || '')
+      const normalizedRole = role.toLowerCase()
+      const roleLabel =
+        normalizedRole === 'dev'
+          ? 'Developer'
+          : normalizedRole === 'qa'
+            ? 'QA'
+            : normalizedRole === 'lead'
+              ? 'Lead'
+              : `${role.charAt(0).toUpperCase()}${role.slice(1)}`
+      return `${roleLabel} ${ordinal.toUpperCase()}`
+    }
+    return parts
+      .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+      .join(' ')
+  }, [])
+  const getAssigneeLabel = React.useCallback((task: Task): string => {
+    const assigneeId = String(task.assignee_id || '').trim()
+    const assignee = assigneeId ? String(actorNames?.[assigneeId] || assigneeId).trim() : ''
+    const agent = getTeamAgentLabel(task)
+    if (agent) return agent
+    return assignee
+  }, [actorNames, getTeamAgentLabel])
+
   const selectedGroupFilter = ''
 
   React.useEffect(() => {
@@ -579,7 +683,7 @@ export function TasksPanel({
   const taskGroupDialogSubmitLabel = taskGroupDialogMode === 'rename' ? 'Save' : 'Create'
 
   return (
-    <section className="card">
+    <section className="card" data-tour-id="tasks-panel">
       <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
         <h2 style={{ margin: 0 }}>{panelTitle}</h2>
         {allowBoardView && (
@@ -620,6 +724,7 @@ export function TasksPanel({
             onClick={() => onNewTask('manual')}
             title="Create task"
             aria-label="Create task"
+            data-tour-id="tasks-new-task"
           >
             <Icon path="M12 5v14M5 12h14" />
             <span>Task</span>
@@ -651,15 +756,17 @@ export function TasksPanel({
         </div>
       </div>
 
-      <div className="row wrap notes-tag-filters task-tag-filters">
-        <PopularTagFilters
-          tags={taskTagSuggestions}
-          selectedTags={searchTags}
-          onToggleTag={toggleSearchTag}
-          onClear={clearSearchTags}
-          idPrefix="project-tag"
-        />
-      </div>
+      {taskTagSuggestions.length > 0 && (
+        <div className="row wrap notes-tag-filters task-tag-filters">
+          <PopularTagFilters
+            tags={taskTagSuggestions}
+            selectedTags={searchTags}
+            onToggleTag={toggleSearchTag}
+            onClear={clearSearchTags}
+            idPrefix="project-tag"
+          />
+        </div>
+      )}
 
       {projectsMode === 'board' && boardData && boardLanes && (
         <>
@@ -690,30 +797,21 @@ export function TasksPanel({
                             }}
                             onDrop={(event) => onBoardLaneDrop(event, status, null)}
                           >
-                            {laneTasks.length > 0 && (
-                              <VirtualizedList
-                                items={laneTasks}
-                                estimateSize={170}
-                                overscan={10}
-                                maxHeight="68vh"
-                                className="kanban-virtual-scroll"
-                                itemKey={(task) => task.id}
-                                renderItem={(task) => (
-                                  <BoardTaskCard
-                                    key={task.id}
-                                    task={task}
-                                    status={status}
-                                    statuses={boardData.statuses}
-                                    targetGroupId={null}
-                                    onTagClick={toggleSearchTag}
-                                    onOpenTaskEditor={onOpenTaskEditor}
-                                    onMoveTaskStatus={onMoveTaskStatus}
-                                    onDragStart={onBoardCardDragStart}
-                                    onDragEnd={onBoardCardDragEnd}
-                                  />
-                                )}
+                            {laneTasks.length > 0 && laneTasks.map((task) => (
+                              <BoardTaskCard
+                                key={task.id}
+                                task={task}
+                                status={status}
+                                statuses={boardData.statuses}
+                                targetGroupId={null}
+                                assigneeLabel={getAssigneeLabel(task)}
+                                onTagClick={toggleSearchTag}
+                                onOpenTaskEditor={onOpenTaskEditor}
+                                onMoveTaskStatus={onMoveTaskStatus}
+                                onDragStart={onBoardCardDragStart}
+                                onDragEnd={onBoardCardDragEnd}
                               />
-                            )}
+                            ))}
                             {laneTasks.length === 0 && <div className="meta">Drop task here</div>}
                           </div>
                         </div>
@@ -723,12 +821,7 @@ export function TasksPanel({
                 </div>
               )}
               {boardGroupSections.length > 0 && (
-                <VirtualizedList
-                  items={boardGroupSections}
-                  estimateSize={520}
-                  overscan={2}
-                  itemKey={(group) => group.key}
-                  renderItem={(group) => {
+                boardGroupSections.map((group) => {
                     const groupIndex = group.groupId ? taskGroups.findIndex((item) => item.id === group.groupId) : -1
                     const canMoveUp = Boolean(group.managed && groupIndex > 0)
                     const canMoveDown = Boolean(group.managed && groupIndex >= 0 && groupIndex < taskGroups.length - 1)
@@ -809,6 +902,7 @@ export function TasksPanel({
                                       status={status}
                                       statuses={boardData.statuses}
                                       targetGroupId={group.groupId}
+                                      assigneeLabel={getAssigneeLabel(task)}
                                       onTagClick={toggleSearchTag}
                                       onOpenTaskEditor={onOpenTaskEditor}
                                       onMoveTaskStatus={onMoveTaskStatus}
@@ -825,8 +919,7 @@ export function TasksPanel({
                         {!groupHasTasks && <div className="meta" style={{ marginTop: 6 }}>No tasks in this group.</div>}
                       </div>
                     )
-                  }}
-                />
+                  })
               )}
               {boardGroupSections.length === 0 && <div className="notice">No groups available.</div>}
             </div>
@@ -856,30 +949,21 @@ export function TasksPanel({
                           }}
                           onDrop={(event) => onBoardLaneDrop(event, status, null)}
                         >
-                          {laneTasks.length > 0 && (
-                            <VirtualizedList
-                              items={laneTasks}
-                              estimateSize={170}
-                              overscan={10}
-                              maxHeight="68vh"
-                              className="kanban-virtual-scroll"
-                              itemKey={(task) => task.id}
-                              renderItem={(task) => (
-                                <BoardTaskCard
-                                  key={task.id}
-                                  task={task}
-                                  status={status}
-                                  statuses={boardData.statuses}
-                                  targetGroupId={null}
-                                  onTagClick={toggleSearchTag}
-                                  onOpenTaskEditor={onOpenTaskEditor}
-                                  onMoveTaskStatus={onMoveTaskStatus}
-                                  onDragStart={onBoardCardDragStart}
-                                  onDragEnd={onBoardCardDragEnd}
-                                />
-                              )}
+                          {laneTasks.length > 0 && laneTasks.map((task) => (
+                            <BoardTaskCard
+                              key={task.id}
+                              task={task}
+                              status={status}
+                              statuses={boardData.statuses}
+                              targetGroupId={null}
+                              assigneeLabel={getAssigneeLabel(task)}
+                              onTagClick={toggleSearchTag}
+                              onOpenTaskEditor={onOpenTaskEditor}
+                              onMoveTaskStatus={onMoveTaskStatus}
+                              onDragStart={onBoardCardDragStart}
+                              onDragEnd={onBoardCardDragEnd}
                             />
-                          )}
+                          ))}
                           {laneTasks.length === 0 && <div className="meta">Drop task here</div>}
                         </div>
                       </div>
@@ -911,56 +995,40 @@ export function TasksPanel({
                 }}
               onDrop={(event) => onListSectionDrop(event, null)}
               >
-                {ungroupedTasks.length > 0 && (
-                  <VirtualizedList
-                    items={ungroupedTasks}
-                    estimateSize={170}
-                    overscan={10}
-                    itemKey={(task) => task.id}
-                    renderItem={(task) => (
-                      <div
-                        key={task.id}
-                        draggable
-                        onDragStart={(event) => onBoardCardDragStart(event, task.id)}
-                        onDragEnd={onBoardCardDragEnd}
-                      >
-                        <TaskListItem
-                          task={task}
-                          onOpen={onOpenTaskEditor}
-                          onOpenSpecification={onOpenSpecification}
-                          onTagClick={toggleSearchTag}
-                          onRestore={onRestoreTask}
-                          onReopen={onReopenTask}
-                          onComplete={onCompleteTask}
-                          specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
-                        />
-                      </div>
-                    )}
-                  />
-                )}
-                {ungroupedTasks.length === 0 && <div className="meta">Drop task here</div>}
-              </div>
-            ) : (
-              <div style={{ marginBottom: 10 }}>
-                <VirtualizedList
-                  items={ungroupedTasks}
-                  estimateSize={170}
-                  overscan={10}
-                  itemKey={(task) => task.id}
-                  renderItem={(task) => (
+                {ungroupedTasks.length > 0 && ungroupedTasks.map((task) => (
+                  <div
+                    key={task.id}
+                    draggable
+                    onDragStart={(event) => onBoardCardDragStart(event, task.id)}
+                    onDragEnd={onBoardCardDragEnd}
+                  >
                     <TaskListItem
-                      key={task.id}
                       task={task}
+                      assigneeLabel={getAssigneeLabel(task)}
                       onOpen={onOpenTaskEditor}
-                      onOpenSpecification={onOpenSpecification}
                       onTagClick={toggleSearchTag}
                       onRestore={onRestoreTask}
                       onReopen={onReopenTask}
                       onComplete={onCompleteTask}
-                      specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
                     />
-                  )}
-                />
+                  </div>
+                ))}
+                {ungroupedTasks.length === 0 && <div className="meta">Drop task here</div>}
+              </div>
+            ) : (
+              <div style={{ marginBottom: 10 }}>
+                {ungroupedTasks.map((task) => (
+                  <TaskListItem
+                    key={task.id}
+                    task={task}
+                    assigneeLabel={getAssigneeLabel(task)}
+                    onOpen={onOpenTaskEditor}
+                    onTagClick={toggleSearchTag}
+                    onRestore={onRestoreTask}
+                    onReopen={onReopenTask}
+                    onComplete={onCompleteTask}
+                  />
+                ))}
               </div>
             )
           )}
@@ -971,12 +1039,7 @@ export function TasksPanel({
             className="tasks-sections-accordion"
           >
             {taskSections.length > 0 && (
-              <VirtualizedList
-                items={taskSections}
-                estimateSize={360}
-                overscan={4}
-                itemKey={(section) => section.key}
-                renderItem={(section) => {
+              taskSections.map((section) => {
                   const sectionGroup = section.groupId
                     ? taskGroups.find((group) => group.id === section.groupId) ?? null
                     : null
@@ -1063,13 +1126,12 @@ export function TasksPanel({
                             >
                               <TaskListItem
                                 task={task}
+                                assigneeLabel={getAssigneeLabel(task)}
                                 onOpen={onOpenTaskEditor}
-                                onOpenSpecification={onOpenSpecification}
                                 onTagClick={toggleSearchTag}
                                 onRestore={onRestoreTask}
                                 onReopen={onReopenTask}
                                 onComplete={onCompleteTask}
-                                specificationName={task.specification_id ? specificationNames[task.specification_id] : undefined}
                               />
                             </div>
                           ))}
@@ -1082,8 +1144,7 @@ export function TasksPanel({
                       </Accordion.Content>
                     </Accordion.Item>
                   )
-                }}
-              />
+                })
             )}
           </Accordion.Root>
 

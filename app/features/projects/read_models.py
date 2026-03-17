@@ -17,7 +17,9 @@ from shared.core import (
     ensure_project_access,
     serialize_task,
     to_iso_utc,
+    rebuild_state,
 )
+from shared.task_automation import normalize_execution_triggers
 
 
 def get_project_board_read_model(db: Session, user, project_id: str, tags: list[str] | None = None) -> dict:
@@ -36,10 +38,28 @@ def get_project_board_read_model(db: Session, user, project_id: str, tags: list[
         if tag_filters:
             stmt = stmt.where(or_(*tag_filters))
     tasks = db.execute(stmt.order_by(Task.order_index.asc())).scalars().all()
+    automation_state_by_task_id: dict[str, str] = {}
+    for task in tasks:
+        has_automation = bool(
+            str(task.instruction or task.scheduled_instruction or "").strip()
+            or normalize_execution_triggers(task.execution_triggers)
+        )
+        if not has_automation:
+            continue
+        try:
+            state, _ = rebuild_state(db, "Task", task.id)
+            automation_state_by_task_id[task.id] = str(state.get("automation_state") or "idle")
+        except Exception:
+            automation_state_by_task_id[task.id] = "idle"
     lanes = {s: [] for s in statuses}
     for task in tasks:
         lanes.setdefault(task.status, [])
-        lanes[task.status].append(serialize_task(task))
+        lanes[task.status].append(
+            serialize_task(
+                task,
+                automation_state=automation_state_by_task_id.get(task.id, "idle"),
+            )
+        )
     return {"project_id": project_id, "statuses": statuses, "lanes": lanes}
 
 

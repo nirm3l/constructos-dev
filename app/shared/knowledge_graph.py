@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import threading
 from time import perf_counter
@@ -10,7 +11,10 @@ from typing import Any
 
 import httpx
 
+from .json_utils import parse_json_object
 from .observability import incr, observe, set_value
+from features.agents.agent_mcp_adapter import run_structured_agent_prompt_with_usage
+from features.agents.workspace_runtime import resolve_workspace_background_runtime_with_new_session
 from .settings import (
     CONTEXT_PACK_EVIDENCE_TOP_K,
     GRAPH_CONTEXT_MAX_HOPS,
@@ -27,6 +31,8 @@ from .settings import (
     NEO4J_USERNAME,
     logger,
 )
+from .task_relationships import normalize_task_relationships
+from plugins.team_mode.task_roles import derive_task_role, normalize_team_agents
 from .vector_store import resolve_project_embedding_runtime, search_project_chunks
 
 try:  # pragma: no cover - exercised in integration only
@@ -224,6 +230,12 @@ def ensure_graph_schema() -> None:
             "CREATE CONSTRAINT chat_attachment_id_unique IF NOT EXISTS FOR (n:ChatAttachment) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT specification_id_unique IF NOT EXISTS FOR (n:Specification) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT project_rule_id_unique IF NOT EXISTS FOR (n:ProjectRule) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT bounded_context_id_unique IF NOT EXISTS FOR (n:BoundedContext) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT aggregate_id_unique IF NOT EXISTS FOR (n:Aggregate) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT command_id_unique IF NOT EXISTS FOR (n:Command) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT domain_event_id_unique IF NOT EXISTS FOR (n:DomainEvent) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT policy_id_unique IF NOT EXISTS FOR (n:Policy) REQUIRE n.id IS UNIQUE",
+            "CREATE CONSTRAINT read_model_id_unique IF NOT EXISTS FOR (n:ReadModel) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (n:User) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT tag_value_unique IF NOT EXISTS FOR (n:Tag) REQUIRE n.value IS UNIQUE",
             "CREATE INDEX project_workspace_idx IF NOT EXISTS FOR (n:Project) ON (n.workspace_id)",
@@ -235,6 +247,12 @@ def ensure_graph_schema() -> None:
             "CREATE INDEX chat_attachment_project_idx IF NOT EXISTS FOR (n:ChatAttachment) ON (n.project_id)",
             "CREATE INDEX specification_project_idx IF NOT EXISTS FOR (n:Specification) ON (n.project_id)",
             "CREATE INDEX project_rule_project_idx IF NOT EXISTS FOR (n:ProjectRule) ON (n.project_id)",
+            "CREATE INDEX bounded_context_project_idx IF NOT EXISTS FOR (n:BoundedContext) ON (n.project_id)",
+            "CREATE INDEX aggregate_project_idx IF NOT EXISTS FOR (n:Aggregate) ON (n.project_id)",
+            "CREATE INDEX command_project_idx IF NOT EXISTS FOR (n:Command) ON (n.project_id)",
+            "CREATE INDEX domain_event_project_idx IF NOT EXISTS FOR (n:DomainEvent) ON (n.project_id)",
+            "CREATE INDEX policy_project_idx IF NOT EXISTS FOR (n:Policy) ON (n.project_id)",
+            "CREATE INDEX read_model_project_idx IF NOT EXISTS FOR (n:ReadModel) ON (n.project_id)",
         ]
         driver = _get_driver()
         if driver is None:
@@ -287,7 +305,7 @@ def graph_get_project_overview(project_id: str, *, top_limit: int = 8) -> dict[s
     project_rows = run_graph_query(
         """
         MATCH (p:Project {id:$project_id})
-        RETURN p.id AS project_id, coalesce(p.name, '') AS project_name
+        RETURN p.id AS project_id, coalesce(p.name, p.title, '') AS project_name
         LIMIT 1
         """,
         {"project_id": project_id},
@@ -424,6 +442,14 @@ def graph_get_project_subgraph(
         }
 
     project_name = str(project_rows[0].get("project_name") or "").strip()
+    if not project_name:
+        # Fallback to SQL source-of-truth when the graph node exists but lacks a display name.
+        from .models import Project, SessionLocal
+
+        with SessionLocal() as db:
+            project_row = db.get(Project, project_id)
+            if project_row is not None and not bool(project_row.is_deleted):
+                project_name = str(project_row.name or "").strip()
     resource_rows = run_graph_query(
         """
         MATCH (p:Project {id:$project_id})
@@ -515,75 +541,271 @@ def graph_get_project_subgraph(
     synthetic_edges: list[dict[str, str]] = []
     task_ids = [str(node.get("entity_id") or "") for node in nodes if str(node.get("entity_type") or "").lower() == "task"]
     remaining_node_slots = max(0, safe_nodes - len(nodes))
-    if task_ids and remaining_node_slots:
-        from .models import SessionLocal, TaskComment
+    if task_ids:
+        from .models import ProjectMember, ProjectPluginConfig, SessionLocal, Task, TaskComment
+        from .eventing import rebuild_state
 
-        thread_previews: dict[str, str] = {}
+        if remaining_node_slots:
+            thread_previews: dict[str, str] = {}
+            with SessionLocal() as db:
+                comment_rows_sql = (
+                    db.query(TaskComment.task_id, TaskComment.user_id, TaskComment.body)
+                    .filter(TaskComment.task_id.in_(task_ids))
+                    .order_by(TaskComment.created_at.desc(), TaskComment.id.desc())
+                    .limit(2000)
+                    .all()
+                )
+                for task_id_raw, user_id_raw, body_raw in comment_rows_sql:
+                    task_id_text = str(task_id_raw or "").strip()
+                    user_id_text = str(user_id_raw or "").strip()
+                    if not task_id_text or not user_id_text:
+                        continue
+                    thread_key = f"{task_id_text}:{user_id_text}"
+                    if thread_key in thread_previews:
+                        continue
+                    preview = _truncate_snippet(str(body_raw or ""), max_chars=72)
+                    if preview:
+                        thread_previews[thread_key] = preview
+
+            comment_rows = run_graph_query(
+                """
+                MATCH (t:Task)-[r:COMMENTED_BY]->(u:User)
+                WHERE t.id IN $task_ids
+                  AND coalesce(t.is_deleted, false) = false
+                RETURN
+                  t.id AS task_id,
+                  u.id AS user_id,
+                  coalesce(u.username, u.name, u.id) AS author_label,
+                  coalesce(r.count, 1) AS comment_count
+                ORDER BY comment_count DESC, author_label ASC
+                LIMIT $limit
+                """,
+                {"task_ids": task_ids, "limit": min(remaining_node_slots, safe_edges, 80)},
+            )
+            for row in comment_rows:
+                if len(nodes) >= safe_nodes:
+                    break
+                task_id = str(row.get("task_id") or "").strip()
+                user_id = str(row.get("user_id") or "").strip()
+                if not task_id or not user_id:
+                    continue
+                comment_id = f"comment-thread:{task_id}:{user_id}"
+                if comment_id in seen_ids:
+                    continue
+                count = max(1, int(row.get("comment_count") or 1))
+                author = str(row.get("author_label") or user_id).strip() or user_id
+                label = thread_previews.get(f"{task_id}:{user_id}") or f"{author} · {count} comment{'s' if count != 1 else ''}"
+                seen_ids.add(comment_id)
+                nodes.append(
+                    {
+                        "entity_type": "Comment",
+                        "entity_id": comment_id,
+                        "title": label,
+                        "degree": 0,
+                    }
+                )
+                synthetic_edges.append(
+                    {
+                        "source_entity_id": comment_id,
+                        "target_entity_id": task_id,
+                        "relationship": "COMMENT_ACTIVITY",
+                    }
+                )
+            remaining_node_slots = max(0, safe_nodes - len(nodes))
+
+        task_id_set = {tid for tid in task_ids if tid}
+        task_dependency_keys: set[tuple[str, str, str]] = set()
         with SessionLocal() as db:
-            comment_rows_sql = (
-                db.query(TaskComment.task_id, TaskComment.user_id, TaskComment.body)
-                .filter(TaskComment.task_id.in_(task_ids))
-                .order_by(TaskComment.created_at.desc(), TaskComment.id.desc())
-                .limit(2000)
+            member_role_by_user_id = {
+                str(user_id or "").strip(): str(role or "").strip()
+                for user_id, role in (
+                    db.query(ProjectMember.user_id, ProjectMember.role)
+                    .filter(ProjectMember.project_id == project_id)
+                    .all()
+                )
+                if str(user_id or "").strip()
+            }
+            team_mode_config_row = (
+                db.query(ProjectPluginConfig.config_json)
+                .filter(ProjectPluginConfig.project_id == project_id)
+                .filter(ProjectPluginConfig.plugin_key == "team_mode")
+                .filter(ProjectPluginConfig.enabled.is_(True))
+                .filter(ProjectPluginConfig.is_deleted.is_(False))
+                .first()
+            )
+            team_mode_agents: list[dict[str, str]] = []
+            if team_mode_config_row is not None:
+                try:
+                    parsed_team_mode = json.loads(str(team_mode_config_row[0] or "").strip() or "{}")
+                except Exception:
+                    parsed_team_mode = {}
+                if isinstance(parsed_team_mode, dict):
+                    team_mode_agents = normalize_team_agents(parsed_team_mode.get("team"))
+            agent_role_by_code = {
+                str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
+                for agent in team_mode_agents
+                if str(agent.get("id") or "").strip()
+            }
+            task_role_rows_sql = (
+                db.query(Task.id, Task.assignee_id, Task.assigned_agent_code, Task.labels, Task.status)
+                .filter(Task.id.in_(task_ids))
+                .filter(Task.project_id == project_id)
+                .filter(Task.is_deleted.is_(False))
                 .all()
             )
-            for task_id_raw, user_id_raw, body_raw in comment_rows_sql:
-                task_id_text = str(task_id_raw or "").strip()
-                user_id_text = str(user_id_raw or "").strip()
-                if not task_id_text or not user_id_text:
-                    continue
-                thread_key = f"{task_id_text}:{user_id_text}"
-                if thread_key in thread_previews:
-                    continue
-                preview = _truncate_snippet(str(body_raw or ""), max_chars=72)
-                if preview:
-                    thread_previews[thread_key] = preview
-
-        comment_rows = run_graph_query(
-            """
-            MATCH (t:Task)-[r:COMMENTED_BY]->(u:User)
-            WHERE t.id IN $task_ids
-              AND coalesce(t.is_deleted, false) = false
-            RETURN
-              t.id AS task_id,
-              u.id AS user_id,
-              coalesce(u.username, u.name, u.id) AS author_label,
-              coalesce(r.count, 1) AS comment_count
-            ORDER BY comment_count DESC, author_label ASC
-            LIMIT $limit
-            """,
-            {"task_ids": task_ids, "limit": min(remaining_node_slots, safe_edges, 80)},
-        )
-        for row in comment_rows:
-            if len(nodes) >= safe_nodes:
-                break
-            task_id = str(row.get("task_id") or "").strip()
-            user_id = str(row.get("user_id") or "").strip()
-            if not task_id or not user_id:
-                continue
-            comment_id = f"comment-thread:{task_id}:{user_id}"
-            if comment_id in seen_ids:
-                continue
-            count = max(1, int(row.get("comment_count") or 1))
-            author = str(row.get("author_label") or user_id).strip() or user_id
-            label = thread_previews.get(f"{task_id}:{user_id}") or f"{author} · {count} comment{'s' if count != 1 else ''}"
-            seen_ids.add(comment_id)
-            nodes.append(
-                {
-                    "entity_type": "Comment",
-                    "entity_id": comment_id,
-                    "title": label,
-                    "degree": 0,
-                }
+            task_rows_sql = (
+                db.query(Task.id, Task.execution_triggers, Task.task_relationships)
+                .filter(Task.id.in_(task_ids))
+                .filter(Task.project_id == project_id)
+                .filter(Task.is_deleted.is_(False))
+                .all()
             )
+
+        if team_mode_agents:
+            task_role_by_id: dict[str, str] = {}
+            for task_id_raw, assignee_id_raw, assigned_agent_code_raw, labels_raw, status_raw in task_role_rows_sql:
+                task_id = str(task_id_raw or "").strip()
+                if not task_id:
+                    continue
+                task_role_by_id[task_id] = derive_task_role(
+                    task_like={
+                        "id": task_id,
+                        "assignee_id": str(assignee_id_raw or "").strip(),
+                        "assigned_agent_code": str(assigned_agent_code_raw or "").strip(),
+                        "labels": labels_raw,
+                        "status": str(status_raw or "").strip(),
+                    },
+                    member_role_by_user_id=member_role_by_user_id,
+                    agent_role_by_code=agent_role_by_code,
+                )
+
+            for dependent_task_raw, _execution_triggers_raw, task_relationships_raw in task_rows_sql:
+                task_id = str(dependent_task_raw or "").strip()
+                if not task_id:
+                    continue
+                relationships = normalize_task_relationships(task_relationships_raw)
+                task_role = str(task_role_by_id.get(task_id) or "").strip()
+                for relationship in relationships:
+                    kind = str(relationship.get("kind") or "").strip().lower()
+                    statuses = {
+                        str(item or "").strip()
+                        for item in (relationship.get("statuses") or [])
+                        if str(item or "").strip()
+                    }
+                    linked_task_ids = [
+                        str(source_raw or "").strip()
+                        for source_raw in (relationship.get("task_ids") or [])
+                        if str(source_raw or "").strip() and str(source_raw or "").strip() in task_id_set
+                    ]
+                    if kind == "delivers_to":
+                        for target_task_id in linked_task_ids:
+                            dep_key = (task_id, target_task_id, "TEAM_MODE_DELIVERS_TO")
+                            if dep_key in task_dependency_keys:
+                                continue
+                            task_dependency_keys.add(dep_key)
+                            synthetic_edges.append(
+                                {
+                                    "source_entity_id": task_id,
+                                    "target_entity_id": target_task_id,
+                                    "relationship": "TEAM_MODE_DELIVERS_TO",
+                                }
+                            )
+                    elif kind == "hands_off_to":
+                        for source_task_id in linked_task_ids:
+                            dep_key = (source_task_id, task_id, "TEAM_MODE_HANDS_OFF_TO")
+                            if dep_key in task_dependency_keys:
+                                continue
+                            task_dependency_keys.add(dep_key)
+                            synthetic_edges.append(
+                                {
+                                    "source_entity_id": source_task_id,
+                                    "target_entity_id": task_id,
+                                    "relationship": "TEAM_MODE_HANDS_OFF_TO",
+                                }
+                            )
+                    elif kind == "escalates_to":
+                        for target_task_id in linked_task_ids:
+                            dep_key = (task_id, target_task_id, "TEAM_MODE_ESCALATES_TO")
+                            if dep_key in task_dependency_keys:
+                                continue
+                            task_dependency_keys.add(dep_key)
+                            synthetic_edges.append(
+                                {
+                                    "source_entity_id": task_id,
+                                    "target_entity_id": target_task_id,
+                                    "relationship": "TEAM_MODE_ESCALATES_TO",
+                                }
+                            )
+                    elif kind == "depends_on" and task_role == "Lead" and "Blocked" in statuses:
+                        for source_task_id in linked_task_ids:
+                            dep_key = (source_task_id, task_id, "TEAM_MODE_ESCALATES_TO")
+                            if dep_key in task_dependency_keys:
+                                continue
+                            task_dependency_keys.add(dep_key)
+                            synthetic_edges.append(
+                                {
+                                    "source_entity_id": source_task_id,
+                                    "target_entity_id": task_id,
+                                    "relationship": "TEAM_MODE_ESCALATES_TO",
+                                }
+                            )
+
+        for task_id in task_ids:
+            try:
+                with SessionLocal() as db:
+                    state, _version = rebuild_state(db, "Task", task_id)
+            except Exception:
+                state = {}
+            source_task_id = str(state.get("last_requested_source_task_id") or "").strip()
+            if not source_task_id or source_task_id not in task_id_set or source_task_id == task_id:
+                continue
+            request_source = str(state.get("last_requested_source") or "").strip().lower()
+            if request_source == "lead_handoff":
+                relationship = "TEAM_MODE_RUNTIME_HANDOFF"
+            else:
+                relationship = "REQUESTED_AUTOMATION_FOR"
+            dep_key = (source_task_id, task_id, relationship)
+            if dep_key in task_dependency_keys:
+                continue
+            task_dependency_keys.add(dep_key)
             synthetic_edges.append(
                 {
-                    "source_entity_id": comment_id,
+                    "source_entity_id": source_task_id,
                     "target_entity_id": task_id,
-                    "relationship": "COMMENT_ACTIVITY",
+                    "relationship": relationship,
                 }
             )
-        remaining_node_slots = max(0, safe_nodes - len(nodes))
+
+        for dependent_task_raw, _execution_triggers_raw, task_relationships_raw in task_rows_sql:
+            dependent_task_id = str(dependent_task_raw or "").strip()
+            if not dependent_task_id:
+                continue
+            relationships = normalize_task_relationships(task_relationships_raw)
+            for relationship in relationships:
+                if str(relationship.get("kind") or "").strip().lower() != "depends_on":
+                    continue
+                source_ids = []
+                seen_source_ids: set[str] = set()
+                for source_raw in (relationship.get("task_ids") or []):
+                    source_id = str(source_raw or "").strip()
+                    if not source_id or source_id in seen_source_ids:
+                        continue
+                    seen_source_ids.add(source_id)
+                    if source_id == dependent_task_id or source_id not in task_id_set:
+                        continue
+                    source_ids.append(source_id)
+                for source_id in source_ids:
+                    dep_key = (source_id, dependent_task_id, "DEPENDS_ON_TASK_STATUS")
+                    if dep_key in task_dependency_keys:
+                        continue
+                    task_dependency_keys.add(dep_key)
+                    synthetic_edges.append(
+                        {
+                            "source_entity_id": source_id,
+                            "target_entity_id": dependent_task_id,
+                            "relationship": "DEPENDS_ON_TASK_STATUS",
+                        }
+                    )
 
     if remaining_node_slots and any(buckets.get(key) for key in ordered_types):
         while remaining_node_slots > 0 and any(buckets.get(key) for key in ordered_types):
@@ -638,15 +860,28 @@ def graph_get_project_subgraph(
     dedup: set[tuple[str, str, str]] = set()
     edges: list[dict[str, str]] = []
     degree_map: dict[str, int] = {node_id: 0 for node_id in node_ids}
+    directional_relationships = {
+        "DEPENDS_ON_TASK_STATUS",
+        "REQUESTED_AUTOMATION_FOR",
+        "TEAM_MODE_DELIVERS_TO",
+        "TEAM_MODE_HANDS_OFF_TO",
+        "TEAM_MODE_RUNTIME_HANDOFF",
+        "TEAM_MODE_ESCALATES_TO",
+    }
+
     for row in edge_rows:
         source = str(row.get("source_entity_id") or "").strip()
         target = str(row.get("target_entity_id") or "").strip()
         relationship = str(row.get("relationship") or "RELATED").strip() or "RELATED"
         if not source or not target or source == target:
             continue
-        if source > target:
+        if relationship not in directional_relationships and source > target:
             source, target = target, source
-        key = (source, target, relationship)
+        if relationship in directional_relationships:
+            key = (source, target, relationship)
+        else:
+            lhs, rhs = (source, target) if source <= target else (target, source)
+            key = (lhs, rhs, relationship)
         if key in dedup:
             continue
         dedup.add(key)
@@ -670,8 +905,11 @@ def graph_get_project_subgraph(
         relationship = str(edge.get("relationship") or "RELATED").strip() or "RELATED"
         if not source or not target or source == target:
             continue
-        lhs, rhs = (source, target) if source <= target else (target, source)
-        key = (lhs, rhs, relationship)
+        if relationship in directional_relationships:
+            key = (source, target, relationship)
+        else:
+            lhs, rhs = (source, target) if source <= target else (target, source)
+            key = (lhs, rhs, relationship)
         if key in dedup:
             continue
         dedup.add(key)
@@ -696,6 +934,947 @@ def graph_get_project_subgraph(
         "edge_count": len(edges),
         "nodes": nodes,
         "edges": edges,
+    }
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _normalize_layout_input(
+    *,
+    nodes: Iterable[dict[str, Any]],
+    edges: Iterable[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    normalized_nodes: list[dict[str, Any]] = []
+    seen_node_ids: set[str] = set()
+    for row in nodes:
+        node_id = str(row.get("entity_id") or "").strip()
+        if not node_id or node_id in seen_node_ids:
+            continue
+        seen_node_ids.add(node_id)
+        normalized_nodes.append(
+            {
+                "entity_id": node_id,
+                "entity_type": str(row.get("entity_type") or "Entity").strip() or "Entity",
+                "title": str(row.get("title") or node_id).strip() or node_id,
+                "degree": max(0, _safe_int(row.get("degree"), 0)),
+            }
+        )
+
+    normalized_edges: list[dict[str, Any]] = []
+    seen_edges: set[tuple[str, str, str]] = set()
+    for row in edges:
+        source = str(row.get("source_entity_id") or "").strip()
+        target = str(row.get("target_entity_id") or "").strip()
+        if not source or not target or source == target:
+            continue
+        if source not in seen_node_ids or target not in seen_node_ids:
+            continue
+        relationship = str(row.get("relationship") or "RELATED").strip().upper() or "RELATED"
+        key = (source, target, relationship)
+        if key in seen_edges:
+            continue
+        seen_edges.add(key)
+        normalized_edges.append(
+            {
+                "source_entity_id": source,
+                "target_entity_id": target,
+                "relationship": relationship,
+            }
+        )
+
+    return normalized_nodes, normalized_edges
+
+
+def _build_graph_layout_signature(*, nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> str:
+    payload = {
+        "nodes": sorted(
+            [
+                {
+                    "entity_id": str(item.get("entity_id") or ""),
+                    "entity_type": str(item.get("entity_type") or ""),
+                    "title": str(item.get("title") or ""),
+                }
+                for item in nodes
+            ],
+            key=lambda item: str(item.get("entity_id") or ""),
+        ),
+        "edges": sorted(
+            [
+                {
+                    "source_entity_id": str(item.get("source_entity_id") or ""),
+                    "target_entity_id": str(item.get("target_entity_id") or ""),
+                    "relationship": str(item.get("relationship") or ""),
+                }
+                for item in edges
+            ],
+            key=lambda item: (
+                str(item.get("source_entity_id") or ""),
+                str(item.get("target_entity_id") or ""),
+                str(item.get("relationship") or ""),
+            ),
+        ),
+    }
+    blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+
+def _heuristic_graph_layout_positions(
+    *,
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    node_width: int,
+    node_height: int,
+) -> dict[str, dict[str, int]]:
+    if not nodes:
+        return {}
+
+    node_ids = [str(row.get("entity_id") or "") for row in nodes if str(row.get("entity_id") or "")]
+    node_meta = {str(row.get("entity_id") or ""): row for row in nodes}
+    outgoing = {node_id: set() for node_id in node_ids}
+    incoming = {node_id: set() for node_id in node_ids}
+    indegree = {node_id: 0 for node_id in node_ids}
+
+    for row in edges:
+        source = str(row.get("source_entity_id") or "")
+        target = str(row.get("target_entity_id") or "")
+        if source not in outgoing or target not in outgoing or source == target:
+            continue
+        if target in outgoing[source]:
+            continue
+        outgoing[source].add(target)
+        incoming[target].add(source)
+        indegree[target] = int(indegree.get(target, 0)) + 1
+
+    def _node_sort_key(node_id: str) -> tuple[int, int, str]:
+        meta = node_meta.get(node_id) or {}
+        title = str(meta.get("title") or node_id).lower()
+        degree = max(0, _safe_int(meta.get("degree"), 0))
+        return (-degree, len(title), title)
+
+    depth: dict[str, int] = {}
+    queue = sorted([node_id for node_id, value in indegree.items() if value == 0], key=_node_sort_key)
+    for node_id in queue:
+        depth[node_id] = 0
+    seen = set(queue)
+
+    while queue:
+        current = queue.pop(0)
+        current_depth = int(depth.get(current, 0))
+        for child in sorted(outgoing.get(current) or [], key=_node_sort_key):
+            next_depth = current_depth + 1
+            if child not in depth or next_depth > depth[child]:
+                depth[child] = next_depth
+            indegree[child] = max(0, int(indegree.get(child, 0)) - 1)
+            if indegree[child] == 0 and child not in seen:
+                queue.append(child)
+                seen.add(child)
+
+    unresolved = sorted([node_id for node_id in node_ids if node_id not in depth], key=_node_sort_key)
+    max_depth = max(depth.values()) if depth else 0
+    for idx, node_id in enumerate(unresolved):
+        depth[node_id] = max_depth + 1 + idx
+
+    by_depth: dict[int, list[str]] = {}
+    for node_id in node_ids:
+        layer = int(depth.get(node_id, 0))
+        by_depth.setdefault(layer, []).append(node_id)
+    for layer in by_depth.values():
+        layer.sort(key=_node_sort_key)
+
+    ordered_depths = sorted(by_depth.keys())
+
+    def _reorder_layer(layer_ids: list[str], neighbor_layer: list[str], neighbor_getter: dict[str, set[str]]) -> list[str]:
+        if not layer_ids or not neighbor_layer:
+            return layer_ids
+        neighbor_index = {node_id: idx for idx, node_id in enumerate(neighbor_layer)}
+
+        def _barycenter(node_id: str) -> float:
+            indices = [neighbor_index[nid] for nid in (neighbor_getter.get(node_id) or set()) if nid in neighbor_index]
+            if not indices:
+                return float("inf")
+            return float(sum(indices)) / float(len(indices))
+
+        return sorted(layer_ids, key=lambda node_id: (_barycenter(node_id), *_node_sort_key(node_id)))
+
+    for _ in range(4):
+        for idx in range(1, len(ordered_depths)):
+            current_depth = ordered_depths[idx]
+            prev_depth = ordered_depths[idx - 1]
+            by_depth[current_depth] = _reorder_layer(by_depth[current_depth], by_depth[prev_depth], incoming)
+        for idx in range(len(ordered_depths) - 2, -1, -1):
+            current_depth = ordered_depths[idx]
+            next_depth = ordered_depths[idx + 1]
+            by_depth[current_depth] = _reorder_layer(by_depth[current_depth], by_depth[next_depth], outgoing)
+
+    x_pitch = max(140, int(node_width) + 54)
+    y_pitch = max(80, int(node_height) + 16)
+    positions: dict[str, dict[str, int]] = {}
+    for layer in ordered_depths:
+        rows = by_depth.get(layer) or []
+        for row_idx, node_id in enumerate(rows):
+            positions[node_id] = {
+                "x": max(0, 18 + int(layer) * x_pitch),
+                "y": max(0, 18 + int(row_idx) * y_pitch),
+            }
+    return positions
+
+
+def _llm_graph_layout_positions(
+    *,
+    workspace_id: str | None,
+    project_name: str,
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    node_width: int,
+    node_height: int,
+    fallback_positions: dict[str, dict[str, int]],
+) -> tuple[dict[str, dict[str, int]], str]:
+    runtime_provider = (
+        getattr(resolve_workspace_background_runtime_with_new_session(workspace_id), "provider", None)
+        if workspace_id
+        else None
+    )
+    if not nodes:
+        return {}, str(runtime_provider or "codex")
+
+    output_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "positions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "entity_id": {"type": "string", "minLength": 1},
+                        "x": {"type": "number"},
+                        "y": {"type": "number"},
+                    },
+                    "required": ["entity_id", "x", "y"],
+                },
+            }
+        },
+        "required": ["positions"],
+    }
+
+    graph_payload = {
+        "project_name": str(project_name or "").strip(),
+        "node_width": int(node_width),
+        "node_height": int(node_height),
+        "nodes": [
+            {
+                "entity_id": str(row.get("entity_id") or ""),
+                "entity_type": str(row.get("entity_type") or "Entity"),
+                "title": str(row.get("title") or ""),
+                "degree": int(row.get("degree") or 0),
+            }
+            for row in nodes
+        ],
+        "edges": [
+            {
+                "source_entity_id": str(row.get("source_entity_id") or ""),
+                "target_entity_id": str(row.get("target_entity_id") or ""),
+                "relationship": str(row.get("relationship") or "RELATED"),
+            }
+            for row in edges
+        ],
+    }
+    prompt = (
+        "Compute a graph layout and return JSON that matches the schema.\n"
+        "Use only the graph payload below as context.\n"
+        "Goal: reduce edge crossings and keep dependency flow readable.\n"
+        "Rules:\n"
+        "- include every node exactly once in positions\n"
+        "- non-negative integer coordinates\n"
+        "- prefer left-to-right direction for dependency chains\n"
+        "- avoid overlapping nodes\n"
+        f"- minimum horizontal gap between node boxes: {int(node_width) + 36}\n"
+        f"- minimum vertical gap between node boxes: {int(node_height) + 14}\n"
+        f"- for task-to-task nodes, prefer larger vertical gap: at least {int(node_height) + 24}\n\n"
+        "Graph payload:\n"
+        f"{json.dumps(graph_payload, ensure_ascii=True)}\n"
+    )
+    parsed_payload, _ = run_structured_agent_prompt_with_usage(
+        prompt=prompt,
+        output_schema=output_schema,
+        workspace_id=workspace_id,
+        session_key=f"knowledge-graph-layout-{project_name or 'project'}",
+        mcp_servers=[],
+    )
+
+    rows = parsed_payload.get("positions") if isinstance(parsed_payload, dict) else None
+    if not isinstance(rows, list):
+        raise RuntimeError("Layout response does not include positions array")
+
+    out: dict[str, dict[str, int]] = {}
+    known_ids = {str(item.get("entity_id") or "") for item in nodes}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        entity_id = str(row.get("entity_id") or "").strip()
+        if not entity_id or entity_id not in known_ids:
+            continue
+        try:
+            x = int(float(row.get("x")))
+            y = int(float(row.get("y")))
+        except Exception:
+            continue
+        out[entity_id] = {"x": max(0, x), "y": max(0, y)}
+
+    if len(out) != len(known_ids):
+        raise RuntimeError("Layout response must provide coordinates for every graph node")
+    return _postprocess_codex_layout_positions(
+        nodes=nodes,
+        positions=out,
+        node_width=node_width,
+        node_height=node_height,
+    ), str(runtime_provider or "codex")
+
+
+def _postprocess_codex_layout_positions(
+    *,
+    nodes: list[dict[str, Any]],
+    positions: dict[str, dict[str, int]],
+    node_width: int,
+    node_height: int,
+) -> dict[str, dict[str, int]]:
+    node_ids = [str(row.get("entity_id") or "") for row in nodes if str(row.get("entity_id") or "")]
+    type_by_id = {str(row.get("entity_id") or ""): str(row.get("entity_type") or "Entity").strip().lower() for row in nodes}
+    title_by_id = {str(row.get("entity_id") or ""): str(row.get("title") or "").strip() for row in nodes}
+    out = {
+        node_id: {
+            "x": max(0, int((positions.get(node_id) or {}).get("x") or 0)),
+            "y": max(0, int((positions.get(node_id) or {}).get("y") or 0)),
+        }
+        for node_id in node_ids
+    }
+    if not out:
+        return out
+
+    # The AI model uses approximate node dimensions. In practice labels wrap and
+    # rendered node height can be larger, so we add a conservative per-node estimate.
+    avg_char_width = 7
+    text_room = max(120, int(node_width) - 24)
+    chars_per_line = max(14, text_room // avg_char_width)
+
+    def _estimated_box_height(node_id: str) -> int:
+        title = title_by_id.get(node_id, "")
+        title_len = len(title)
+        lines = max(1, min(5, (title_len + chars_per_line - 1) // chars_per_line))
+        return int(node_height) + (lines - 1) * 14
+
+    box_height_by_id = {node_id: _estimated_box_height(node_id) for node_id in node_ids}
+    horizontal_gap = max(34, int(node_width) + 34)
+    vertical_padding = max(8, int(node_height * 0.14))
+    vertical_padding_task = max(vertical_padding + 4, int(node_height * 0.25))
+
+    def _required_vertical(upper_id: str, lower_id: str) -> int:
+        base = box_height_by_id.get(upper_id, int(node_height))
+        pad = vertical_padding_task if type_by_id.get(upper_id) == "task" and type_by_id.get(lower_id) == "task" else vertical_padding
+        return base + pad
+
+    # Pass 1: spread nodes inside approximate columns.
+    column_pitch = max(80, horizontal_gap // 2)
+    columns: dict[int, list[str]] = {}
+    for node_id in node_ids:
+        col = int(round(out[node_id]["x"] / float(column_pitch)))
+        columns.setdefault(col, []).append(node_id)
+    for col in sorted(columns.keys()):
+        col_ids = sorted(columns[col], key=lambda nid: (out[nid]["y"], out[nid]["x"], nid))
+        prev_id: str | None = None
+        prev_y = 0
+        for nid in col_ids:
+            current_y = out[nid]["y"]
+            if prev_id is not None:
+                min_y = prev_y + _required_vertical(prev_id, nid)
+                if current_y < min_y:
+                    current_y = min_y
+                    out[nid]["y"] = current_y
+            prev_id = nid
+            prev_y = current_y
+
+    # Pass 2: resolve remaining pair overlaps.
+    for _ in range(16):
+        moved = False
+        for i in range(len(node_ids)):
+            lhs = node_ids[i]
+            lhs_pos = out[lhs]
+            for j in range(i + 1, len(node_ids)):
+                rhs = node_ids[j]
+                rhs_pos = out[rhs]
+                dx = abs(rhs_pos["x"] - lhs_pos["x"])
+                if dx >= horizontal_gap:
+                    continue
+                if lhs_pos["y"] <= rhs_pos["y"]:
+                    upper, lower = lhs, rhs
+                else:
+                    upper, lower = rhs, lhs
+                upper_pos = out[upper]
+                lower_pos = out[lower]
+                current_delta = lower_pos["y"] - upper_pos["y"]
+                required_delta = _required_vertical(upper, lower)
+                if current_delta >= required_delta:
+                    continue
+                lower_pos["y"] += required_delta - current_delta
+                moved = True
+        if not moved:
+            break
+
+    return out
+
+
+def graph_generate_layout(
+    *,
+    project_id: str,
+    project_name: str,
+    nodes: Iterable[dict[str, Any]],
+    edges: Iterable[dict[str, Any]],
+    node_width: int = 220,
+    node_height: int = 74,
+) -> dict[str, Any]:
+    workspace_id: str | None = None
+    from .models import Project, SessionLocal
+
+    with SessionLocal() as db:
+        project_row = db.get(Project, project_id)
+        if project_row is not None:
+            workspace_id = str(getattr(project_row, "workspace_id", "") or "").strip() or None
+    normalized_nodes, normalized_edges = _normalize_layout_input(nodes=nodes, edges=edges)
+    signature = _build_graph_layout_signature(nodes=normalized_nodes, edges=normalized_edges)
+    if not normalized_nodes:
+        return {
+            "project_id": project_id,
+            "project_name": project_name,
+            "graph_signature": signature,
+            "strategy": "empty",
+            "positions": [],
+        }
+
+    width = max(120, min(int(node_width or 220), 420))
+    height = max(48, min(int(node_height or 74), 280))
+    positions, strategy = _llm_graph_layout_positions(
+        workspace_id=workspace_id,
+        project_name=project_name,
+        nodes=normalized_nodes,
+        edges=normalized_edges,
+        node_width=width,
+        node_height=height,
+        fallback_positions={},
+    )
+
+    ordered = sorted(normalized_nodes, key=lambda item: str(item.get("entity_id") or ""))
+    return {
+        "project_id": project_id,
+        "project_name": project_name,
+        "graph_signature": signature,
+        "strategy": strategy,
+        "positions": [
+            {
+                "entity_id": str(item.get("entity_id") or ""),
+                "x": int((positions.get(str(item.get("entity_id") or "")) or {}).get("x") or 0),
+                "y": int((positions.get(str(item.get("entity_id") or "")) or {}).get("y") or 0),
+            }
+            for item in ordered
+        ],
+    }
+
+
+_EVENT_STORMING_COMPONENT_LABELS = [
+    "BoundedContext",
+    "Aggregate",
+    "Command",
+    "DomainEvent",
+    "Policy",
+    "ReadModel",
+]
+_EVENT_STORMING_ARTIFACT_LABELS = ["Task", "Note", "Specification"]
+
+
+def event_storming_get_project_overview(project_id: str) -> dict[str, Any]:
+    require_graph_available()
+    from sqlalchemy import func, select
+
+    from .models import ContextSessionState, EventStormingAnalysisJob, Note, Project, SessionLocal, Specification, Task
+
+    project_rows = run_graph_query(
+        """
+        MATCH (p:Project {id:$project_id})
+        RETURN p.id AS project_id, coalesce(p.name, '') AS project_name
+        LIMIT 1
+        """,
+        {"project_id": project_id},
+    )
+    if not project_rows:
+        return {
+            "project_id": project_id,
+            "project_name": "",
+            "component_counts": {},
+            "artifact_link_count": 0,
+            "event_storming_enabled": True,
+            "processing": {
+                "artifact_total": 0,
+                "processed": 0,
+                "queued": 0,
+                "running": 0,
+                "failed": 0,
+                "done": 0,
+                "progress_pct": 0.0,
+            },
+        }
+
+    component_counts: dict[str, int] = {}
+    for label in _EVENT_STORMING_COMPONENT_LABELS:
+        rows = run_graph_query(
+            f"""
+            MATCH (n:{label})
+            WHERE coalesce(n.project_id, '') = $project_id
+              AND EXISTS {{
+                MATCH (a)-[:RELATES_TO_ES]->(n)
+                WHERE any(artifact_label IN labels(a) WHERE artifact_label IN $artifact_labels)
+              }}
+            RETURN count(n) AS count
+            """,
+            {"project_id": project_id, "artifact_labels": _EVENT_STORMING_ARTIFACT_LABELS},
+        )
+        component_counts[label] = int((rows[0] if rows else {}).get("count") or 0)
+
+    link_rows = run_graph_query(
+        """
+        MATCH (a)-[r:RELATES_TO_ES]->(c)
+        WHERE any(label IN labels(a) WHERE label IN $artifact_labels)
+          AND any(label IN labels(c) WHERE label IN $component_labels)
+          AND coalesce(c.project_id, '') = $project_id
+        RETURN count(r) AS count
+        """,
+        {
+            "project_id": project_id,
+            "artifact_labels": _EVENT_STORMING_ARTIFACT_LABELS,
+            "component_labels": _EVENT_STORMING_COMPONENT_LABELS,
+        },
+    )
+    first = project_rows[0]
+    processing = {
+        "artifact_total": 0,
+        "processed": 0,
+        "queued": 0,
+        "running": 0,
+        "failed": 0,
+        "done": 0,
+        "progress_pct": 0.0,
+    }
+    event_storming_enabled = True
+    with SessionLocal() as db:
+        project = db.get(Project, project_id)
+        if project is not None and not bool(project.is_deleted):
+            event_storming_enabled = bool(getattr(project, "event_storming_enabled", True))
+        frame_state = db.execute(
+            select(ContextSessionState).where(
+                ContextSessionState.project_id == project_id,
+                ContextSessionState.scope_type == "event_storming_project",
+                ContextSessionState.scope_id == project_id,
+            )
+        ).scalar_one_or_none()
+        task_count = int(
+            db.execute(
+                select(func.count(Task.id)).where(Task.project_id == project_id, Task.is_deleted == False)
+            ).scalar_one()
+            or 0
+        )
+        note_count = int(
+            db.execute(
+                select(func.count(Note.id)).where(Note.project_id == project_id, Note.is_deleted == False)
+            ).scalar_one()
+            or 0
+        )
+        specification_count = int(
+            db.execute(
+                select(func.count(Specification.id)).where(Specification.project_id == project_id, Specification.is_deleted == False)
+            ).scalar_one()
+            or 0
+        )
+        status_rows = db.execute(
+            select(EventStormingAnalysisJob.status, func.count(EventStormingAnalysisJob.id))
+            .where(EventStormingAnalysisJob.project_id == project_id)
+            .group_by(EventStormingAnalysisJob.status)
+        ).all()
+        status_counts = {str(status or "").strip().lower(): int(count or 0) for status, count in status_rows}
+        artifact_total = task_count + note_count + specification_count
+        done_count = int(status_counts.get("done", 0))
+        processing = {
+            "artifact_total": artifact_total,
+            "processed": min(done_count, artifact_total) if artifact_total > 0 else done_count,
+            "queued": int(status_counts.get("queued", 0)),
+            "running": int(status_counts.get("running", 0)),
+            "failed": int(status_counts.get("failed", 0)),
+            "done": done_count,
+            "progress_pct": (
+                round((min(done_count, artifact_total) / artifact_total) * 100.0, 1)
+                if artifact_total > 0
+                else 100.0
+            ),
+        }
+    context_frame = {
+        "mode": str(getattr(frame_state, "last_frame_mode", "") or "").strip().lower() or None,
+        "revision": str(getattr(frame_state, "context_revision", "") or "").strip() or None,
+        "updated_at": (
+            frame_state.last_frame_at.astimezone(timezone.utc).isoformat()
+            if getattr(frame_state, "last_frame_at", None) is not None
+            else None
+        ),
+    }
+    return {
+        "project_id": str(first.get("project_id") or project_id),
+        "project_name": str(first.get("project_name") or ""),
+        "component_counts": component_counts,
+        "artifact_link_count": int((link_rows[0] if link_rows else {}).get("count") or 0),
+        "event_storming_enabled": event_storming_enabled,
+        "processing": processing,
+        "context_frame": context_frame,
+    }
+
+
+def event_storming_get_project_subgraph(
+    project_id: str,
+    *,
+    limit_nodes: int = 120,
+    limit_edges: int = 220,
+) -> dict[str, Any]:
+    require_graph_available()
+    safe_nodes = max(16, min(int(limit_nodes or 120), 300))
+    safe_edges = max(16, min(int(limit_edges or 220), 500))
+
+    project_rows = run_graph_query(
+        """
+        MATCH (p:Project {id:$project_id})
+        RETURN p.id AS project_id, coalesce(p.name, '') AS project_name
+        LIMIT 1
+        """,
+        {"project_id": project_id},
+    )
+    if not project_rows:
+        return {
+            "project_id": project_id,
+            "project_name": "",
+            "node_count": 0,
+            "edge_count": 0,
+            "nodes": [],
+            "edges": [],
+        }
+
+    component_rows = run_graph_query(
+        """
+        MATCH (n)
+        WHERE any(label IN labels(n) WHERE label IN $component_labels)
+          AND coalesce(n.project_id, '') = $project_id
+          AND EXISTS {
+            MATCH (a)-[:RELATES_TO_ES]->(n)
+            WHERE any(artifact_label IN labels(a) WHERE artifact_label IN $artifact_labels)
+          }
+        RETURN n.id AS entity_id,
+               head([label IN labels(n) WHERE label IN $component_labels]) AS entity_type,
+               coalesce(n.title, n.name, n.id) AS title
+        ORDER BY title ASC
+        LIMIT $limit
+        """,
+        {
+            "project_id": project_id,
+            "component_labels": _EVENT_STORMING_COMPONENT_LABELS,
+            "artifact_labels": _EVENT_STORMING_ARTIFACT_LABELS,
+            "limit": safe_nodes,
+        },
+    )
+    nodes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in component_rows:
+        entity_id = str(row.get("entity_id") or "").strip()
+        if not entity_id or entity_id in seen:
+            continue
+        seen.add(entity_id)
+        nodes.append(
+            {
+                "entity_type": str(row.get("entity_type") or "Entity"),
+                "entity_id": entity_id,
+                "title": str(row.get("title") or entity_id),
+                "degree": 0,
+            }
+        )
+
+    component_ids = [str(item["entity_id"]) for item in nodes]
+    if not component_ids:
+        first = project_rows[0]
+        return {
+            "project_id": str(first.get("project_id") or project_id),
+            "project_name": str(first.get("project_name") or ""),
+            "node_count": 0,
+            "edge_count": 0,
+            "nodes": [],
+            "edges": [],
+        }
+
+    component_edge_rows = run_graph_query(
+        """
+        MATCH (a)-[r]->(b)
+        WHERE a.id IN $component_ids
+          AND b.id IN $component_ids
+          AND any(label IN labels(a) WHERE label IN $component_labels)
+          AND any(label IN labels(b) WHERE label IN $component_labels)
+        RETURN a.id AS source_entity_id, b.id AS target_entity_id, type(r) AS relationship
+        ORDER BY relationship ASC
+        LIMIT $limit
+        """,
+        {
+            "component_ids": component_ids,
+            "component_labels": _EVENT_STORMING_COMPONENT_LABELS,
+            "limit": safe_edges,
+        },
+    )
+    artifact_link_rows = run_graph_query(
+        """
+        MATCH (a)-[r:RELATES_TO_ES]->(c)
+        WHERE c.id IN $component_ids
+          AND any(label IN labels(a) WHERE label IN $artifact_labels)
+        RETURN a.id AS source_entity_id,
+               c.id AS target_entity_id,
+               type(r) AS relationship,
+               coalesce(r.review_status, 'candidate') AS review_status,
+               coalesce(r.inference_method, 'heuristic') AS inference_method,
+               toFloat(coalesce(r.confidence, 0.0)) AS confidence,
+               head([label IN labels(a) WHERE label IN $artifact_labels]) AS artifact_label,
+               coalesce(a.title, a.name, a.id) AS artifact_title
+        ORDER BY artifact_title ASC
+        LIMIT $limit
+        """,
+        {
+            "component_ids": component_ids,
+            "artifact_labels": _EVENT_STORMING_ARTIFACT_LABELS,
+            "limit": safe_edges,
+        },
+    )
+
+    for row in artifact_link_rows:
+        artifact_id = str(row.get("source_entity_id") or "").strip()
+        if not artifact_id or artifact_id in seen:
+            continue
+        seen.add(artifact_id)
+        nodes.append(
+            {
+                "entity_type": str(row.get("artifact_label") or "Entity"),
+                "entity_id": artifact_id,
+                "title": str(row.get("artifact_title") or artifact_id),
+                "degree": 0,
+            }
+        )
+
+    edges = [
+        {
+            "source_entity_id": str(row.get("source_entity_id") or ""),
+            "target_entity_id": str(row.get("target_entity_id") or ""),
+            "relationship": str(row.get("relationship") or "RELATED"),
+            "review_status": str(row.get("review_status") or ""),
+            "inference_method": str(row.get("inference_method") or ""),
+            "confidence": float(row.get("confidence") or 0.0),
+        }
+        for row in [*component_edge_rows, *artifact_link_rows]
+        if str(row.get("source_entity_id") or "").strip() and str(row.get("target_entity_id") or "").strip()
+    ]
+    degree_by_id: dict[str, int] = {}
+    for edge in edges:
+        source_id = str(edge["source_entity_id"])
+        target_id = str(edge["target_entity_id"])
+        degree_by_id[source_id] = degree_by_id.get(source_id, 0) + 1
+        degree_by_id[target_id] = degree_by_id.get(target_id, 0) + 1
+    for node in nodes:
+        node_id = str(node.get("entity_id") or "")
+        node["degree"] = int(degree_by_id.get(node_id, 0))
+
+    first = project_rows[0]
+    return {
+        "project_id": str(first.get("project_id") or project_id),
+        "project_name": str(first.get("project_name") or ""),
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
+def event_storming_get_entity_links(
+    *,
+    project_id: str,
+    entity_type: str,
+    entity_id: str,
+) -> dict[str, Any]:
+    require_graph_available()
+    label = normalize_entity_label(entity_type)
+    if label not in _EVENT_STORMING_ARTIFACT_LABELS:
+        raise ValueError("entity_type must be task, note, or specification")
+    links = run_graph_query(
+        f"""
+        MATCH (a:{label} {{id:$entity_id}})-[r:RELATES_TO_ES]->(c)
+        WHERE coalesce(c.project_id, '') = $project_id
+          AND any(lbl IN labels(c) WHERE lbl IN $component_labels)
+        RETURN c.id AS component_id,
+               head([lbl IN labels(c) WHERE lbl IN $component_labels]) AS component_type,
+               coalesce(c.title, c.name, c.id) AS component_title,
+               coalesce(r.confidence, 0.0) AS confidence,
+               coalesce(r.review_status, 'candidate') AS review_status,
+               coalesce(r.inference_method, 'heuristic') AS inference_method,
+               coalesce(r.updated_at, '') AS updated_at
+        ORDER BY confidence DESC, component_title ASC
+        """,
+        {
+            "project_id": project_id,
+            "entity_id": entity_id,
+            "component_labels": _EVENT_STORMING_COMPONENT_LABELS,
+        },
+    )
+    return {
+        "project_id": project_id,
+        "entity_type": label,
+        "entity_id": entity_id,
+        "items": [
+            {
+                "component_id": str(item.get("component_id") or ""),
+                "component_type": str(item.get("component_type") or ""),
+                "component_title": str(item.get("component_title") or ""),
+                "confidence": float(item.get("confidence") or 0.0),
+                "review_status": str(item.get("review_status") or "candidate"),
+                "inference_method": str(item.get("inference_method") or "heuristic"),
+                "updated_at": str(item.get("updated_at") or ""),
+            }
+            for item in links
+        ],
+    }
+
+
+def event_storming_get_component_links(
+    *,
+    project_id: str,
+    component_id: str,
+) -> dict[str, Any]:
+    require_graph_available()
+    rows = run_graph_query(
+        """
+        MATCH (c {id:$component_id})
+        WHERE any(lbl IN labels(c) WHERE lbl IN $component_labels)
+          AND coalesce(c.project_id, '') = $project_id
+        OPTIONAL MATCH (a)-[r:RELATES_TO_ES]->(c)
+        WHERE any(lbl IN labels(a) WHERE lbl IN $artifact_labels)
+        RETURN head([lbl IN labels(c) WHERE lbl IN $component_labels]) AS component_type,
+               coalesce(c.title, c.name, c.id) AS component_title,
+               a.id AS entity_id,
+               head([lbl IN labels(a) WHERE lbl IN $artifact_labels]) AS entity_type,
+               coalesce(a.title, a.name, a.id) AS entity_title,
+               coalesce(r.confidence, 0.0) AS confidence,
+               coalesce(r.review_status, 'candidate') AS review_status,
+               coalesce(r.inference_method, 'heuristic') AS inference_method,
+               coalesce(r.updated_at, '') AS updated_at
+        ORDER BY confidence DESC, entity_title ASC
+        """,
+        {
+            "project_id": project_id,
+            "component_id": component_id,
+            "component_labels": _EVENT_STORMING_COMPONENT_LABELS,
+            "artifact_labels": _EVENT_STORMING_ARTIFACT_LABELS,
+        },
+    )
+    if not rows:
+        return {
+            "project_id": project_id,
+            "component_id": component_id,
+            "component_type": "",
+            "component_title": "",
+            "items": [],
+        }
+    first = rows[0]
+    items = []
+    for item in rows:
+        entity_id = str(item.get("entity_id") or "").strip()
+        if not entity_id:
+            continue
+        items.append(
+            {
+                "entity_id": entity_id,
+                "entity_type": str(item.get("entity_type") or ""),
+                "entity_title": str(item.get("entity_title") or entity_id),
+                "confidence": float(item.get("confidence") or 0.0),
+                "review_status": str(item.get("review_status") or "candidate"),
+                "inference_method": str(item.get("inference_method") or "heuristic"),
+                "updated_at": str(item.get("updated_at") or ""),
+            }
+        )
+    return {
+        "project_id": project_id,
+        "component_id": component_id,
+        "component_type": str(first.get("component_type") or ""),
+        "component_title": str(first.get("component_title") or component_id),
+        "items": items,
+    }
+
+
+def event_storming_set_link_review_status(
+    *,
+    project_id: str,
+    entity_type: str,
+    entity_id: str,
+    component_id: str,
+    review_status: str,
+    confidence: float | None = None,
+) -> dict[str, Any]:
+    require_graph_available()
+    artifact_label = normalize_entity_label(entity_type)
+    if artifact_label not in _EVENT_STORMING_ARTIFACT_LABELS:
+        raise ValueError("entity_type must be task, note, or specification")
+    normalized_status = str(review_status or "").strip().lower()
+    if normalized_status not in {"candidate", "approved", "rejected"}:
+        raise ValueError("review_status must be one of: candidate, approved, rejected")
+    confidence_value = None if confidence is None else max(0.0, min(1.0, float(confidence)))
+
+    rows = run_graph_query(
+        f"""
+        MATCH (a:{artifact_label} {{id:$entity_id}})-[r:RELATES_TO_ES]->(c {{id:$component_id}})
+        WHERE coalesce(c.project_id, '') = $project_id
+        SET r.review_status = $review_status,
+            r.inference_method = 'manual',
+            r.updated_at = $updated_at,
+            r.confidence = coalesce($confidence, r.confidence)
+        RETURN
+            a.id AS entity_id,
+            c.id AS component_id,
+            coalesce(r.review_status, 'candidate') AS review_status,
+            coalesce(r.inference_method, 'manual') AS inference_method,
+            coalesce(r.confidence, 0.0) AS confidence,
+            coalesce(r.updated_at, '') AS updated_at
+        LIMIT 1
+        """,
+        {
+            "project_id": project_id,
+            "entity_id": entity_id,
+            "component_id": component_id,
+            "review_status": normalized_status,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "confidence": confidence_value,
+        },
+        write=True,
+    )
+    if not rows:
+        raise ValueError("RELATES_TO_ES link not found for provided entity/component")
+    row = rows[0]
+    return {
+        "project_id": project_id,
+        "entity_type": artifact_label,
+        "entity_id": str(row.get("entity_id") or entity_id),
+        "component_id": str(row.get("component_id") or component_id),
+        "review_status": str(row.get("review_status") or normalized_status),
+        "inference_method": str(row.get("inference_method") or "manual"),
+        "confidence": float(row.get("confidence") or 0.0),
+        "updated_at": str(row.get("updated_at") or ""),
     }
 
 
@@ -1090,10 +2269,18 @@ def search_project_knowledge(
             if not snippet:
                 continue
             key = (entity_type, entity_id)
-            graph_score = float(candidate_scores.get(key, 0.2 if not candidate_scores else 0.3))
+            raw_graph_score = float(candidate_scores.get(key, 0.2 if not candidate_scores else 0.3))
             vector_similarity = float(candidate.get("vector_similarity") or 0.0)
+            graph_score = _effective_graph_score(
+                raw_graph_score=raw_graph_score,
+                vector_similarity=vector_similarity,
+                focus_entity_type=focus_type,
+                focus_entity_id=focus_id,
+            )
             freshness = _score_freshness(candidate.get("source_updated_at"))
             entity_priority = _score_entity_priority(entity_type)
+            source_priority = _score_source_type_priority(source_type)
+            lexical_overlap = _score_query_snippet_overlap(query=text_query, snippet=snippet)
             graph_path = path_lookup.get(key, [entity_type])
             template_alignment = _template_alignment_score(
                 template_key=template_key,
@@ -1102,11 +2289,13 @@ def search_project_knowledge(
                 graph_path=graph_path,
             )
             final_score = (
-                (0.38 * vector_similarity)
-                + (0.30 * graph_score)
-                + (0.14 * freshness)
-                + (0.08 * entity_priority)
-                + (0.10 * template_alignment)
+                (0.42 * vector_similarity)
+                + (0.14 * graph_score)
+                + (0.12 * freshness)
+                + (0.07 * entity_priority)
+                + (0.05 * source_priority)
+                + (0.04 * template_alignment)
+                + (0.16 * lexical_overlap)
             )
             updated_at = _as_datetime_utc(candidate.get("source_updated_at"))
             items.append(
@@ -1117,6 +2306,7 @@ def search_project_knowledge(
                     "snippet": snippet,
                     "vector_similarity": round(vector_similarity, 4),
                     "graph_score": round(graph_score, 4),
+                    "lexical_overlap": round(lexical_overlap, 4),
                     "template_alignment": round(template_alignment, 4),
                     "final_score": float(final_score),
                     "graph_path": graph_path,
@@ -1143,6 +2333,7 @@ def search_project_knowledge(
             graph_score = float(candidate.get("graph_score") or 0.0)
             freshness = _score_freshness(candidate.get("source_updated_at"))
             entity_priority = _score_entity_priority(entity_type)
+            source_priority = _score_source_type_priority(source_type)
             key = (entity_type, entity_id)
             graph_path = path_lookup.get(key, [entity_type])
             template_alignment = _template_alignment_score(
@@ -1155,7 +2346,8 @@ def search_project_knowledge(
                 (0.62 * graph_score)
                 + (0.16 * freshness)
                 + (0.08 * entity_priority)
-                + (0.14 * template_alignment)
+                + (0.06 * source_priority)
+                + (0.08 * template_alignment)
             )
             updated_at = _as_datetime_utc(candidate.get("source_updated_at"))
             items.append(
@@ -1277,6 +2469,64 @@ def _score_entity_priority(entity_type: str) -> float:
     if key == "comment":
         return 0.6
     return 0.5
+
+
+def _score_source_type_priority(source_type: str | None) -> float:
+    raw = str(source_type or "").strip().lower()
+    if raw.endswith(".distilled"):
+        return 0.98
+    if raw.endswith(".description") or raw.endswith(".body") or raw.endswith(".content"):
+        return 0.92
+    if raw.endswith(".title"):
+        return 0.78
+    if raw.endswith(".metadata"):
+        return 0.68
+    return 0.72
+
+
+def _normalize_knowledge_search_text(value: str) -> str:
+    return re.sub(r"[^\w\s]+", " ", str(value or "").lower()).strip()
+
+
+def _knowledge_search_tokens(value: str, *, min_length: int = 3, max_terms: int = 12) -> list[str]:
+    normalized = _normalize_knowledge_search_text(value)
+    if not normalized:
+        return []
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in normalized.split():
+        if len(token) < min_length or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+        if len(tokens) >= max_terms:
+            break
+    return tokens
+
+
+def _score_query_snippet_overlap(*, query: str, snippet: str) -> float:
+    query_tokens = _knowledge_search_tokens(query)
+    if not query_tokens:
+        return 0.0
+    normalized_snippet = _normalize_knowledge_search_text(snippet)
+    if not normalized_snippet:
+        return 0.0
+    matches = sum(1 for token in query_tokens if token in normalized_snippet)
+    return max(0.0, min(1.0, matches / max(1, len(query_tokens))))
+
+
+def _effective_graph_score(
+    *,
+    raw_graph_score: float,
+    vector_similarity: float,
+    focus_entity_type: str | None,
+    focus_entity_id: str | None,
+) -> float:
+    base = max(0.0, min(1.0, float(raw_graph_score or 0.0)))
+    if focus_entity_type and focus_entity_id:
+        return base
+    semantic_cap = min(1.0, max(0.35, vector_similarity + 0.08))
+    return min(base, semantic_cap)
 
 
 _TEMPLATE_ENTITY_ALIGNMENT: dict[str, set[str]] = {
@@ -1635,25 +2885,6 @@ def _normalize_summary_payload(raw: dict[str, Any], *, evidence: list[dict[str, 
     }
 
 
-def _parse_json_object(raw_text: str) -> dict[str, Any]:
-    text = str(raw_text or "").strip()
-    if not text:
-        raise ValueError("Summary response is empty")
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        parsed = json.loads(text[start : end + 1])
-        if isinstance(parsed, dict):
-            return parsed
-    raise ValueError("Summary response is not valid JSON object")
-
-
 def _build_grounded_summary_with_ollama(
     *,
     project_name: str,
@@ -1684,7 +2915,11 @@ def _build_grounded_summary_with_ollama(
         detail = (response.text or f"Ollama summary request failed ({response.status_code})").strip()
         raise RuntimeError(detail)
     data = response.json()
-    summary_raw = _parse_json_object(str(data.get("response") or ""))
+    summary_raw = parse_json_object(
+        str(data.get("response") or ""),
+        empty_error="Summary response is empty",
+        invalid_error="Summary response is not valid JSON object",
+    )
     summary = _normalize_summary_payload(summary_raw, evidence=evidence)
     if not summary.get("key_points"):
         raise RuntimeError("Summary payload has no grounded key points")
@@ -1954,10 +3189,17 @@ def graph_context_pack(
                 if not snippet:
                     continue
                 key = (entity_type, entity_id)
-                graph_score = float(candidate_scores.get(key, 0.25))
+                raw_graph_score = float(candidate_scores.get(key, 0.25))
                 vector_similarity = float(item.get("vector_similarity") or 0.0)
+                graph_score = _effective_graph_score(
+                    raw_graph_score=raw_graph_score,
+                    vector_similarity=vector_similarity,
+                    focus_entity_type=focus_entity_type,
+                    focus_entity_id=focus_entity_id,
+                )
                 freshness = _score_freshness(item.get("source_updated_at"))
                 entity_priority = _score_entity_priority(entity_type)
+                source_priority = _score_source_type_priority(source_type)
                 graph_path = path_lookup.get(key, [entity_type])
                 template_alignment = _template_alignment_score(
                     template_key=template_key,
@@ -1966,11 +3208,12 @@ def graph_context_pack(
                     graph_path=graph_path,
                 )
                 final_score = (
-                    (0.34 * graph_score)
-                    + (0.34 * vector_similarity)
+                    (0.44 * vector_similarity)
+                    + (0.22 * graph_score)
                     + (0.14 * freshness)
                     + (0.08 * entity_priority)
-                    + (0.10 * template_alignment)
+                    + (0.07 * source_priority)
+                    + (0.05 * template_alignment)
                 )
                 source_updated_at = _as_datetime_utc(item.get("source_updated_at"))
                 evidence.append(
@@ -2012,6 +3255,7 @@ def graph_context_pack(
                 graph_score = float(item.get("graph_score") or 0.0)
                 freshness = _score_freshness(item.get("source_updated_at"))
                 entity_priority = _score_entity_priority(entity_type)
+                source_priority = _score_source_type_priority(source_type)
                 source_updated_at = _as_datetime_utc(item.get("source_updated_at"))
                 key = (entity_type, entity_id)
                 graph_path = path_lookup.get(key, [entity_type])
@@ -2025,7 +3269,8 @@ def graph_context_pack(
                     (0.60 * graph_score)
                     + (0.18 * freshness)
                     + (0.08 * entity_priority)
-                    + (0.14 * template_alignment)
+                    + (0.06 * source_priority)
+                    + (0.08 * template_alignment)
                 )
                 evidence.append(
                     {

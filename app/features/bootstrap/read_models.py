@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from features.agents.model_registry import list_available_codex_models
+from features.agents.execution_provider import encode_execution_model, parse_execution_model
+from features.agents.model_registry import list_available_agent_models
+from features.agents.provider_auth import resolve_provider_effective_auth_source
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -20,15 +22,25 @@ from shared.models import (
 )
 from shared.serializers import load_created_by_map, serialize_notification, to_iso_utc
 from shared.settings import (
-    AGENT_CODEX_AVAILABLE_MODELS,
-    AGENT_CODEX_MODEL,
-    AGENT_CODEX_REASONING_EFFORT,
     AGENT_CHAT_CONTEXT_LIMIT_TOKENS,
+    AGENT_DEFAULT_EXECUTION_PROVIDER,
     ALLOWED_EMBEDDING_MODELS,
     CONTEXT_PACK_EVIDENCE_TOP_K,
     DEFAULT_EMBEDDING_MODEL,
+    VECTOR_INDEX_DISTILL_ENABLED,
+    agent_default_model_for_provider,
+    agent_default_reasoning_effort_for_provider,
 )
 from shared.vector_store import normalize_embedding_model, project_embedding_index_snapshot, vector_store_enabled
+
+
+def _normalize_reasoning_effort(raw: object) -> str:
+    normalized = str(raw or "").strip().lower()
+    if normalized in {"max", "maximum"}:
+        return "xhigh"
+    if normalized in {"low", "medium", "high", "xhigh"}:
+        return normalized
+    return "medium"
 
 
 def _parse_agent_chat_available_models(raw: object) -> list[str]:
@@ -59,6 +71,24 @@ def _append_agent_chat_models(target: list[str], extras: list[str]) -> list[str]
         out.append(model)
         seen.add(key)
     return out
+
+
+def _normalize_agent_chat_model(raw: object) -> str:
+    model = str(raw or "").strip()
+    if not model:
+        return ""
+    provider, normalized_model = parse_execution_model(model)
+    if not normalized_model:
+        return ""
+    return encode_execution_model(provider=provider, model=normalized_model)
+
+
+def _resolve_available_default_provider() -> str:
+    if resolve_provider_effective_auth_source("codex") != "none":
+        return "codex"
+    if resolve_provider_effective_auth_source("claude") != "none":
+        return "claude"
+    return str(AGENT_DEFAULT_EXECUTION_PROVIDER or "").strip().lower() or "codex"
 
 
 def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
@@ -140,10 +170,15 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
                 "embedding_enabled": bool(p.embedding_enabled),
                 "embedding_model": p.embedding_model,
                 "context_pack_evidence_top_k": p.context_pack_evidence_top_k,
+                "automation_max_parallel_tasks": int(getattr(p, "automation_max_parallel_tasks", 4) or 4),
                 "chat_index_mode": str(p.chat_index_mode or "OFF"),
                 "chat_attachment_ingestion_mode": str(
                     p.chat_attachment_ingestion_mode or "METADATA_ONLY"
                 ),
+                "vector_index_distill_enabled": bool(
+                    getattr(p, "vector_index_distill_enabled", VECTOR_INDEX_DISTILL_ENABLED)
+                ),
+                "event_storming_enabled": bool(getattr(p, "event_storming_enabled", True)),
                 "embedding_index_status": str(index_snapshot.get("status") or "not_indexed"),
                 "embedding_index_progress_pct": index_snapshot.get("progress_pct"),
                 "embedding_indexed_entities": int(index_snapshot.get("indexed_entities") or 0),
@@ -156,25 +191,35 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             }
         )
     vector_enabled = bool(vector_store_enabled())
-    discovered_agent_chat_models, discovered_default_agent_chat_model = list_available_codex_models()
-    default_agent_chat_model = str(AGENT_CODEX_MODEL or "").strip()
+    discovered_agent_chat_models, discovered_default_agent_chat_model = list_available_agent_models()
+    preferred_default_provider = _resolve_available_default_provider()
+    default_agent_chat_model = _normalize_agent_chat_model(
+        agent_default_model_for_provider(preferred_default_provider)
+    )
     if not default_agent_chat_model:
-        default_agent_chat_model = str(discovered_default_agent_chat_model or "").strip()
-    agent_chat_available_models = _parse_agent_chat_available_models(AGENT_CODEX_AVAILABLE_MODELS)
-    agent_chat_available_models = _append_agent_chat_models(agent_chat_available_models, discovered_agent_chat_models)
+        alternate_provider = "claude" if preferred_default_provider == "codex" else "codex"
+        default_agent_chat_model = _normalize_agent_chat_model(agent_default_model_for_provider(alternate_provider))
+    if not default_agent_chat_model:
+        default_agent_chat_model = _normalize_agent_chat_model(discovered_default_agent_chat_model)
+    if not default_agent_chat_model:
+        default_agent_chat_model = "claude:sonnet" if preferred_default_provider == "claude" else "codex:gpt-5"
+    agent_chat_available_models = list(discovered_agent_chat_models)
+    if not agent_chat_available_models:
+        agent_chat_available_models = ["codex:gpt-5", "claude:sonnet", "claude:opus"]
     available_model_keys = {model.lower() for model in agent_chat_available_models}
     if default_agent_chat_model and default_agent_chat_model.lower() not in available_model_keys:
         agent_chat_available_models.insert(0, default_agent_chat_model)
         available_model_keys.add(default_agent_chat_model.lower())
-    default_agent_chat_reasoning_effort = str(AGENT_CODEX_REASONING_EFFORT or "").strip().lower() or "medium"
-    if default_agent_chat_reasoning_effort not in {"low", "medium", "high", "xhigh"}:
-        default_agent_chat_reasoning_effort = "medium"
-    current_agent_chat_model = str(getattr(user, "agent_chat_model", "") or "").strip()
+    default_agent_chat_provider, _ = parse_execution_model(default_agent_chat_model)
+    default_agent_chat_reasoning_effort = _normalize_reasoning_effort(
+        agent_default_reasoning_effort_for_provider(default_agent_chat_provider or "codex")
+    )
+    current_agent_chat_model = _normalize_agent_chat_model(getattr(user, "agent_chat_model", ""))
     if current_agent_chat_model and current_agent_chat_model.lower() not in available_model_keys:
         agent_chat_available_models.insert(0, current_agent_chat_model)
         available_model_keys.add(current_agent_chat_model.lower())
-    current_agent_chat_reasoning_effort = str(getattr(user, "agent_chat_reasoning_effort", "") or "").strip().lower()
-    if current_agent_chat_reasoning_effort not in {"low", "medium", "high", "xhigh"}:
+    current_agent_chat_reasoning_effort = _normalize_reasoning_effort(getattr(user, "agent_chat_reasoning_effort", ""))
+    if not str(getattr(user, "agent_chat_reasoning_effort", "") or "").strip():
         current_agent_chat_reasoning_effort = default_agent_chat_reasoning_effort
     embedding_models = list(ALLOWED_EMBEDDING_MODELS)
     default_embedding_model = normalize_embedding_model(DEFAULT_EMBEDDING_MODEL)
@@ -193,6 +238,8 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             "timezone": user.timezone,
             "agent_chat_model": current_agent_chat_model,
             "agent_chat_reasoning_effort": current_agent_chat_reasoning_effort,
+            "onboarding_quick_tour_completed": bool(getattr(user, "onboarding_quick_tour_completed", False)),
+            "onboarding_advanced_tour_completed": bool(getattr(user, "onboarding_advanced_tour_completed", False)),
         },
         "workspaces": [{"id": w.id, "name": w.name, "type": w.type} for w in workspaces],
         "memberships": [{"workspace_id": m.workspace_id, "role": m.role} for m in memberships],

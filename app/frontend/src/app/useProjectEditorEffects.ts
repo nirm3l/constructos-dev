@@ -11,7 +11,6 @@ function normalizeChatIndexMode(value: unknown): 'OFF' | 'VECTOR_ONLY' | 'KG_AND
 function normalizeChatAttachmentIngestionMode(value: unknown): 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' {
   const mode = String(value || '').trim().toUpperCase()
   if (mode === 'OFF') return 'OFF'
-  if (mode === 'FULL_TEXT_OCR') return 'FULL_TEXT'
   if (mode === 'FULL_TEXT') return 'FULL_TEXT'
   return 'METADATA_ONLY'
 }
@@ -19,6 +18,7 @@ function normalizeChatAttachmentIngestionMode(value: unknown): 'OFF' | 'METADATA
 export function useProjectEditorEffects(c: any) {
   React.useEffect(() => {
     if (!c.selectedProject) {
+      if (c.selectedProjectId) return
       c.setEditProjectName('')
       c.setEditProjectDescription('')
       c.setEditProjectCustomStatusesText('')
@@ -26,11 +26,14 @@ export function useProjectEditorEffects(c: any) {
       c.setEditProjectAttachmentRefsText('')
       c.setEditProjectEmbeddingEnabled(false)
       c.setEditProjectEmbeddingModel('')
+      c.setEditProjectVectorIndexDistillEnabled(false)
       c.setEditProjectContextPackEvidenceTopKText('')
+      c.setEditProjectAutomationMaxParallelTasksText('4')
       c.setEditProjectChatIndexMode('OFF')
       c.setEditProjectChatAttachmentIngestionMode('METADATA_ONLY')
+      c.setEditProjectEventStormingEnabled(true)
       c.setEditProjectDescriptionView('split')
-      if (!c.selectedProjectId) c.setShowProjectEditForm(false)
+      c.setShowProjectEditForm(false)
       c.setSelectedProjectRuleId(null)
       c.setProjectRuleTitle('')
       c.setProjectRuleBody('')
@@ -44,23 +47,31 @@ export function useProjectEditorEffects(c: any) {
     c.setEditProjectAttachmentRefsText(attachmentRefsToText(c.selectedProject.attachment_refs))
     c.setEditProjectEmbeddingEnabled(Boolean(c.selectedProject.embedding_enabled))
     c.setEditProjectEmbeddingModel(String(c.selectedProject.embedding_model || ''))
+    c.setEditProjectVectorIndexDistillEnabled(Boolean(c.selectedProject.vector_index_distill_enabled))
     c.setEditProjectContextPackEvidenceTopKText(
       c.selectedProject.context_pack_evidence_top_k == null ? '' : String(c.selectedProject.context_pack_evidence_top_k)
+    )
+    c.setEditProjectAutomationMaxParallelTasksText(
+      String(c.selectedProject.automation_max_parallel_tasks ?? 4)
     )
     c.setEditProjectChatIndexMode(normalizeChatIndexMode(c.selectedProject.chat_index_mode))
     c.setEditProjectChatAttachmentIngestionMode(
       normalizeChatAttachmentIngestionMode(c.selectedProject.chat_attachment_ingestion_mode)
     )
+    c.setEditProjectEventStormingEnabled(Boolean(c.selectedProject.event_storming_enabled ?? true))
     c.setEditProjectDescriptionView('split')
     c.setSelectedProjectRuleId(null)
     c.setProjectRuleTitle('')
     c.setProjectRuleBody('')
     c.setProjectRuleView('split')
-  }, [c.selectedProject?.id, c.selectedProjectId, c.setShowProjectEditForm])
+  }, [c.selectedProject?.id, c.selectedProjectId, c.showProjectEditForm, c.setShowProjectEditForm])
 
   React.useEffect(() => {
     if (!c.showProjectCreateForm) return
     c.setProjectDescriptionView('split')
+    if (typeof c.setProjectEventStormingEnabled === 'function') {
+      c.setProjectEventStormingEnabled(true)
+    }
   }, [c.showProjectCreateForm])
 
   React.useEffect(() => {

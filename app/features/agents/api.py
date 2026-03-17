@@ -6,6 +6,8 @@ import logging
 import mimetypes
 import os
 import queue
+import re
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import threading
@@ -13,27 +15,76 @@ import uuid
 import zipfile
 import xml.etree.ElementTree as ET
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from shared.core import AgentChatRun, User, ensure_project_access, ensure_role, get_command_id, get_current_user, get_db
-from shared.models import ActivityLog, ChatMessage, ChatSession
+from plugins import api_policy as plugin_api_policy
+from plugins.team_mode.semantics import semantic_status_key
+from shared.core import (
+    AgentChatRun,
+    User,
+    ensure_project_access,
+    ensure_role,
+    get_command_id,
+    get_current_user,
+    get_current_user_detached,
+    get_db,
+)
+from shared.classification_cache import ClassificationCache, build_classification_cache_key
+from shared.models import (
+    ActivityLog,
+    ChatMessage,
+    ChatSession,
+    CommandExecution,
+    Note,
+    Project,
+    ProjectPluginConfig,
+    Task,
+    SessionLocal,
+    WorkspaceMember,
+)
+from shared.in_memory_stream_broker import InMemoryStreamBroker
+from shared.knowledge_graph import search_project_knowledge as search_project_knowledge_query
 from shared.settings import (
     ATTACHMENTS_DIR,
     AGENT_CHAT_HISTORY_COMPACT_THRESHOLD,
     AGENT_CHAT_HISTORY_RECENT_TAIL,
+    AGENT_ENABLED_PLUGINS,
+    AGENT_SYSTEM_USER_ID,
 )
 
+from features.agents.agent_mcp_adapter import run_structured_agent_prompt
 from .executor import AutomationOutcome, execute_task_automation, execute_task_automation_stream
-from .mcp_registry import normalize_chat_mcp_servers as normalize_chat_mcp_servers_registry
+from .intent_classifier import classify_instruction_intent
+from .mcp_registry import (
+    filter_mcp_servers_for_project_plugins as filter_mcp_servers_for_project_plugins_registry,
+    normalize_chat_mcp_servers as normalize_chat_mcp_servers_registry,
+)
+from .claude_auth import (
+    cancel_device_auth_session as cancel_claude_device_auth_session,
+    delete_system_override_auth as delete_claude_system_override_auth,
+    get_claude_auth_status,
+    start_device_auth_session as start_claude_device_auth_session,
+    submit_device_auth_code as submit_claude_device_auth_code,
+)
+from .codex_auth import (
+    cancel_device_auth_session,
+    delete_system_override_auth,
+    get_codex_auth_status,
+    start_device_auth_session,
+)
+from .execution_provider import encode_execution_model, parse_execution_model, resolve_execution_provider
+from .provider_auth import resolve_provider_effective_auth_source
+from .gateway import build_ui_gateway
 from features.chat.application import ChatApplicationService
 from features.chat.command_handlers import (
     AppendAssistantMessagePayload,
     AppendUserMessagePayload,
     LinkMessageResourcePayload,
 )
+from features.agents.gates import default_required_delivery_checks, normalize_delivery_required_checks
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -51,6 +102,12 @@ _TEXT_MIME_TYPES = {
 }
 _PDF_MIME_TYPES = {"application/pdf"}
 _DOCX_MIME_TYPES = {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+_COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
+_DEPLOY_STACK_RE = re.compile(r"\b(constructos-[a-z0-9_-]+)\b", re.IGNORECASE)
+_DOCKER_COMPOSE_STACK_RE = re.compile(r"docker\s+compose\s+-p\s+([a-z0-9][a-z0-9_-]*)", re.IGNORECASE)
+_DEPLOY_PORT_RE = re.compile(r"\bport\s*[:=]?\s*[`\"']?(\d{2,5})", re.IGNORECASE)
+_HOST_PORT_RE = re.compile(r"(?:localhost|0\.0\.0\.0):(\d{2,5})\b", re.IGNORECASE)
+_HEALTH_PATH_RE = re.compile(r"(/health[^\s\"'`]*)", re.IGNORECASE)
 _TEXT_EXTENSIONS = {
     ".txt",
     ".md",
@@ -85,12 +142,208 @@ _MAX_CHAT_ATTACHMENT_CHARS_TOTAL = 36_000
 _MAX_CROSS_SESSION_DELTA_MESSAGES = 8
 _MAX_CROSS_SESSION_DELTA_CHARS_PER_MESSAGE = 220
 _ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+_CHAT_KNOWLEDGE_EVIDENCE_LIMIT = 5
+_CHAT_KNOWLEDGE_MIN_FINAL_SCORE = 0.42
+_CHAT_KNOWLEDGE_MIN_VECTOR_SIMILARITY = 0.24
+_CHAT_KNOWLEDGE_QUERY_NORMALIZER_VERSION = "chat-knowledge-query-normalizer-v2"
+_CHAT_KNOWLEDGE_QUERY_NORMALIZER_SCHEMA_VERSION = "2"
+_CHAT_KNOWLEDGE_QUERY_NORMALIZER_CACHE = ClassificationCache(max_entries=256)
+_PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt_templates" / "codex"
 _CREATED_RESOURCE_ACTIONS: dict[str, str] = {
     "TaskCreated": "task",
     "NoteCreated": "note",
     "SpecificationCreated": "specification",
     "ProjectRuleCreated": "project_rule",
 }
+
+_CHAT_STREAM_BROKER = InMemoryStreamBroker(max_events=1500)
+_CHAT_STREAM_CANCEL_LOCK = threading.Lock()
+_CHAT_STREAM_CANCEL_EVENTS: dict[str, threading.Event] = {}
+_CHAT_STREAM_CANCEL_BY_KEY: dict[str, tuple[str, threading.Event]] = {}
+_CHAT_STREAM_STOP_REQUESTED_BY_KEY: dict[str, bool] = {}
+_PROJECT_SETUP_STARTER_NEXT_QUESTION = "What should the new project be named?"
+_AUTH_REQUIRED_COMMENT_TEMPLATE = "Open Settings and use Workspace > Connections to configure {provider}, or ask a workspace admin to do it."
+
+
+def _provider_display_name(provider: str) -> str:
+    normalized = str(provider or "").strip().lower()
+    if normalized == "claude":
+        return "Claude"
+    return "Codex"
+
+
+def _user_can_manage_agent_auth(db: Session, user_id: str) -> bool:
+    membership = db.execute(
+        select(WorkspaceMember.id).where(
+            WorkspaceMember.user_id == user_id,
+            WorkspaceMember.role.in_(("Owner", "Admin")),
+        ).limit(1)
+    ).scalar_one_or_none()
+    return membership is not None
+
+
+def _ensure_agent_auth_manage_allowed(db: Session, user_id: str, *, provider: str) -> None:
+    if _user_can_manage_agent_auth(db, user_id):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=f"Only workspace owners and admins can configure {_provider_display_name(provider)} authentication.",
+    )
+
+
+def _normalize_execution_model_value(value: object) -> str | None:
+    provider, model = parse_execution_model(value)
+    if not model:
+        return None
+    return encode_execution_model(provider=provider, model=model)
+
+
+def _build_auth_required_response(*, session_id: str, provider: str, alternate_provider: str | None = None) -> dict[str, object]:
+    display_name = _provider_display_name(provider)
+    comment = _AUTH_REQUIRED_COMMENT_TEMPLATE.format(provider=display_name)
+    if alternate_provider:
+        comment = (
+            f"{comment} You can also switch Chat execution to {_provider_display_name(alternate_provider)} "
+            f"if that provider is already configured."
+        )
+    return {
+        "ok": False,
+        "action": "comment",
+        "summary": f"{display_name} authentication is not configured.",
+        "comment": comment,
+        "session_id": session_id,
+        "codex_session_id": None,
+        "usage": None,
+        "resume_attempted": False,
+        "resume_succeeded": False,
+        "resume_fallback_used": False,
+    }
+
+
+def _chat_stream_key(*, workspace_id: str, session_id: str) -> str:
+    return f"{str(workspace_id or '').strip()}::{str(session_id or '').strip()}"
+
+
+def _should_prompt_for_project_setup_name(*, intent_flags: dict[str, object], project_id: str | None) -> bool:
+    _ = project_id
+    if not bool(intent_flags.get("project_creation_intent")):
+        return False
+    return not bool(intent_flags.get("project_name_provided"))
+
+
+def _create_chat_stream_run(*, stream_key: str, preferred_run_id: str | None = None) -> str:
+    return _CHAT_STREAM_BROKER.create_run(key=stream_key, preferred_run_id=preferred_run_id)
+
+
+def _publish_chat_stream_event(*, stream_key: str, event: dict[str, object]) -> dict[str, object] | None:
+    return _CHAT_STREAM_BROKER.publish_event(key=stream_key, event=event)
+
+
+def _finish_chat_stream_run(*, stream_key: str) -> None:
+    _CHAT_STREAM_BROKER.finish_run(key=stream_key)
+
+
+def _subscribe_chat_stream_run(
+    *,
+    stream_key: str,
+    run_id: str,
+    since_seq: int,
+) -> tuple[queue.Queue[dict[str, object]], list[dict[str, object]], bool]:
+    return _CHAT_STREAM_BROKER.subscribe_run(key=stream_key, run_id=run_id, since_seq=since_seq)
+
+
+def _unsubscribe_chat_stream_run(*, stream_key: str, subscriber_queue: queue.Queue[dict[str, object]]) -> None:
+    _CHAT_STREAM_BROKER.unsubscribe_run(key=stream_key, subscriber_queue=subscriber_queue)
+
+
+def _chat_stream_cancel_key(*, stream_key: str, run_id: str) -> str:
+    return f"{stream_key}::{str(run_id or '').strip()}"
+
+
+def _register_chat_stream_cancel_event(*, stream_key: str, run_id: str) -> threading.Event:
+    event = threading.Event()
+    key = _chat_stream_cancel_key(stream_key=stream_key, run_id=run_id)
+    with _CHAT_STREAM_CANCEL_LOCK:
+        _CHAT_STREAM_CANCEL_EVENTS[key] = event
+        _CHAT_STREAM_CANCEL_BY_KEY[stream_key] = (str(run_id or "").strip(), event)
+    return event
+
+
+def _request_chat_stream_cancel(*, stream_key: str, run_id: str) -> bool:
+    normalized_run_id = str(run_id or "").strip()
+    key = _chat_stream_cancel_key(stream_key=stream_key, run_id=normalized_run_id)
+    with _CHAT_STREAM_CANCEL_LOCK:
+        event = _CHAT_STREAM_CANCEL_EVENTS.get(key)
+        if event is None:
+            current = _CHAT_STREAM_CANCEL_BY_KEY.get(stream_key)
+            if isinstance(current, tuple) and len(current) == 2:
+                event = current[1]
+    if event is None:
+        return False
+    event.set()
+    return True
+
+
+def _clear_chat_stream_cancel_event(*, stream_key: str, run_id: str) -> None:
+    key = _chat_stream_cancel_key(stream_key=stream_key, run_id=run_id)
+    with _CHAT_STREAM_CANCEL_LOCK:
+        _CHAT_STREAM_CANCEL_EVENTS.pop(key, None)
+        current = _CHAT_STREAM_CANCEL_BY_KEY.get(stream_key)
+        if isinstance(current, tuple) and len(current) == 2:
+            current_run_id = str(current[0] or "").strip()
+            if current_run_id == str(run_id or "").strip():
+                _CHAT_STREAM_CANCEL_BY_KEY.pop(stream_key, None)
+
+
+def _set_chat_stream_stop_requested(*, stream_key: str, value: bool) -> None:
+    with _CHAT_STREAM_CANCEL_LOCK:
+        if value:
+            _CHAT_STREAM_STOP_REQUESTED_BY_KEY[stream_key] = True
+        else:
+            _CHAT_STREAM_STOP_REQUESTED_BY_KEY.pop(stream_key, None)
+
+
+def _is_chat_stream_stop_requested(*, stream_key: str) -> bool:
+    with _CHAT_STREAM_CANCEL_LOCK:
+        return bool(_CHAT_STREAM_STOP_REQUESTED_BY_KEY.get(stream_key))
+
+
+@lru_cache(maxsize=16)
+def _load_prompt_template(name: str) -> str:
+    candidate_paths = [_PROMPT_TEMPLATES_DIR / name]
+    candidate_paths.extend(base / name for base in _plugin_prompt_template_dirs())
+    for template_path in candidate_paths:
+        try:
+            return template_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+    raise RuntimeError(f"Prompt template file not found: {candidate_paths[0]}")
+
+
+@lru_cache(maxsize=1)
+def _plugin_prompt_template_dirs() -> tuple[Path, ...]:
+    plugins_root = Path(__file__).resolve().parents[2] / "plugins"
+    enabled = {str(item or "").strip().lower() for item in (AGENT_ENABLED_PLUGINS or []) if str(item or "").strip()}
+    if not enabled:
+        enabled = {"team_mode"}
+    if enabled.intersection({"none", "off", "disabled"}):
+        return tuple()
+    out: list[Path] = []
+    for key in sorted(enabled):
+        candidate = plugins_root / key / "prompt_templates"
+        if candidate.is_dir():
+            out.append(candidate)
+    return tuple(out)
+
+
+def _render_prompt_template(name: str, values: dict[str, object]) -> str:
+    rendered_values = {key: str(value) for key, value in values.items()}
+    template = _load_prompt_template(name)
+    try:
+        return template.format(**rendered_values)
+    except KeyError as exc:
+        missing_key = str(exc).strip("'")
+        raise RuntimeError(f"Missing prompt template value '{missing_key}' for {name}") from exc
 
 
 def _normalize_reasoning_effort(value: object) -> str | None:
@@ -101,6 +354,8 @@ def _normalize_reasoning_effort(value: object) -> str | None:
         "very-high": "xhigh",
         "very_high": "xhigh",
         "very high": "xhigh",
+        "max": "xhigh",
+        "maximum": "xhigh",
     }
     canonical = alias_map.get(normalized, normalized)
     if canonical not in _ALLOWED_REASONING_EFFORTS:
@@ -109,8 +364,8 @@ def _normalize_reasoning_effort(value: object) -> str | None:
 
 
 def _resolve_chat_execution_preferences(payload: AgentChatRun, user: User) -> tuple[str | None, str | None]:
-    payload_model = str(payload.model or "").strip()
-    user_model = str(getattr(user, "agent_chat_model", "") or "").strip()
+    payload_model = _normalize_execution_model_value(payload.model)
+    user_model = _normalize_execution_model_value(getattr(user, "agent_chat_model", ""))
     model = payload_model or user_model or None
 
     payload_reasoning = _normalize_reasoning_effort(payload.reasoning_effort)
@@ -120,12 +375,20 @@ def _resolve_chat_execution_preferences(payload: AgentChatRun, user: User) -> tu
 
 
 def _chat_timeout_summary() -> str:
-    return "Codex execution timed out."
+    return "Chat execution timed out."
 
 
-def _normalize_chat_mcp_servers(raw_servers: list[str] | None) -> list[str]:
+def _normalize_chat_mcp_servers(
+    raw_servers: list[str] | None,
+    *,
+    project_id: str | None = None,
+) -> list[str]:
     try:
-        return normalize_chat_mcp_servers_registry(raw_servers, strict=True)
+        normalized = normalize_chat_mcp_servers_registry(raw_servers, strict=True)
+        return filter_mcp_servers_for_project_plugins_registry(
+            project_id=project_id,
+            selected_servers=normalized,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -279,11 +542,23 @@ def _extract_pdf_text(path: Path, *, max_chars: int) -> tuple[str, bool, str | N
     return full_text, truncated, None
 
 
+def _attachment_checksum(*, path: str, mime_type: str, size_bytes: int, snippet: str) -> str:
+    payload = {
+        "path": path,
+        "mime_type": mime_type,
+        "size_bytes": size_bytes,
+        "snippet": _truncate_chat_delta_text(snippet, max_chars=2048),
+    }
+    material = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _build_attachment_context(
     *,
     payload: AgentChatRun,
     db: Session,
     user: User,
+    reuse_session_extracted_context: bool = False,
 ) -> tuple[str, list[dict[str, object]], list[dict[str, object]]]:
     def _ref_value(ref: object, field: str) -> object:
         if isinstance(ref, dict):
@@ -340,13 +615,46 @@ def _build_attachment_context(
 
         display_name = str(_ref_value(ref, "name") or Path(path).name or f"attachment-{index}").strip()
         mime_type = str(_ref_value(ref, "mime_type") or "").strip() or mimetypes.guess_type(display_name)[0] or ""
+        size_bytes = int(candidate.stat().st_size)
         normalized_ref: dict[str, object] = {
             "path": path,
             "name": display_name,
             "mime_type": mime_type or None,
-            "size_bytes": int(candidate.stat().st_size),
+            "size_bytes": size_bytes,
             "extraction_status": "pending",
         }
+        ref_checksum = str(_ref_value(ref, "checksum") or "").strip()
+        if ref_checksum:
+            normalized_ref["checksum"] = ref_checksum
+
+        is_message_ref = path_key in message_ref_paths
+        is_session_ref = path_key in session_ref_paths
+        prior_status = str(_ref_value(ref, "extraction_status") or "").strip().lower()
+        prior_extracted_text = str(_ref_value(ref, "extracted_text") or "").strip()
+        can_reuse_session_context = (
+            reuse_session_extracted_context
+            and is_session_ref
+            and not is_message_ref
+            and (prior_status in {"extracted", "truncated", "reused"} or bool(prior_extracted_text))
+        )
+        if can_reuse_session_context:
+            normalized_ref["extraction_status"] = "reused"
+            if not ref_checksum:
+                normalized_ref["checksum"] = _attachment_checksum(
+                    path=path,
+                    mime_type=mime_type,
+                    size_bytes=size_bytes,
+                    snippet=prior_extracted_text,
+                )
+            short_checksum = str(normalized_ref.get("checksum") or "").strip()[:10]
+            checksum_text = f"; checksum={short_checksum}" if short_checksum else ""
+            lines.append(f"Attachment {index}: {display_name} (reused from session memory{checksum_text})")
+            if is_message_ref:
+                processed_message_refs.append(normalized_ref)
+            if is_session_ref:
+                processed_session_refs.append(normalized_ref)
+            lines.append("")
+            continue
 
         lines.append(f"Attachment {index}: {display_name}")
         lines.append(f"Path: {path}")
@@ -356,9 +664,9 @@ def _build_attachment_context(
         if remaining_chars <= 0:
             lines.append("Content: omitted (chat attachment context limit reached).")
             normalized_ref["extraction_status"] = "skipped_limit"
-            if path_key in message_ref_paths:
+            if is_message_ref:
                 processed_message_refs.append(normalized_ref)
-            if path_key in session_ref_paths:
+            if is_session_ref:
                 processed_session_refs.append(normalized_ref)
             lines.append("")
             break
@@ -378,6 +686,12 @@ def _build_attachment_context(
         if snippet:
             normalized_ref["extraction_status"] = "extracted" if not truncated else "truncated"
             normalized_ref["extracted_text"] = snippet
+            normalized_ref["checksum"] = _attachment_checksum(
+                path=path,
+                mime_type=mime_type,
+                size_bytes=size_bytes,
+                snippet=snippet,
+            )
             lines.append("Content:")
             lines.append(snippet)
             if truncated:
@@ -386,9 +700,16 @@ def _build_attachment_context(
         else:
             normalized_ref["extraction_status"] = "skipped"
             lines.append(status_message or "Content: omitted (empty or unreadable file).")
-        if path_key in message_ref_paths:
+            if not ref_checksum:
+                normalized_ref["checksum"] = _attachment_checksum(
+                    path=path,
+                    mime_type=mime_type,
+                    size_bytes=size_bytes,
+                    snippet="",
+                )
+        if is_message_ref:
             processed_message_refs.append(normalized_ref)
-        if path_key in session_ref_paths:
+        if is_session_ref:
             processed_session_refs.append(normalized_ref)
         lines.append("")
 
@@ -416,6 +737,9 @@ def _build_attachment_context(
             else None,
             "extraction_status": "skipped_file_limit",
         }
+        checksum = str(_ref_value(ref, "checksum") or "").strip()
+        if checksum:
+            normalized_ref["checksum"] = checksum
         if path_key in message_ref_paths:
             processed_message_refs.append(normalized_ref)
         if path_key in session_ref_paths:
@@ -493,8 +817,14 @@ def _coerce_bool(value: object) -> bool | None:
     return None
 
 
-def _build_usage_with_resume_metadata(outcome: AutomationOutcome) -> dict[str, object]:
+def _build_usage_with_resume_metadata(
+    outcome: AutomationOutcome,
+    *,
+    extra_usage: dict[str, object] | None = None,
+) -> dict[str, object]:
     usage_payload: dict[str, object] = dict(outcome.usage or {})
+    if isinstance(extra_usage, dict):
+        usage_payload.update(extra_usage)
     usage_payload["codex_resume_attempted"] = bool(outcome.resume_attempted)
     usage_payload["codex_resume_succeeded"] = bool(outcome.resume_succeeded)
     usage_payload["codex_resume_fallback_used"] = bool(outcome.resume_fallback_used)
@@ -526,12 +856,15 @@ def _collect_created_resources(
         return []
     window_start = started_at - timedelta(seconds=2)
     window_end = ended_at + timedelta(seconds=2)
+    actor_ids = {str(actor_id or "").strip()}
+    actor_ids.add(str(AGENT_SYSTEM_USER_ID or "").strip())
+    normalized_actor_ids = [item for item in actor_ids if item]
     query = (
         select(ActivityLog.action, ActivityLog.details)
         .where(
             ActivityLog.workspace_id == workspace_id,
             ActivityLog.project_id == normalized_project_id,
-            ActivityLog.actor_id == actor_id,
+            ActivityLog.actor_id.in_(tuple(normalized_actor_ids)),
             ActivityLog.action.in_(tuple(_CREATED_RESOURCE_ACTIONS.keys())),
             ActivityLog.created_at >= window_start,
             ActivityLog.created_at <= window_end,
@@ -742,6 +1075,7 @@ def _load_cross_session_recent_updates(
     message_time = func.coalesce(ChatMessage.turn_created_at, ChatMessage.created_at)
     base_query = (
         select(
+            ChatMessage.id,
             ChatMessage.role,
             ChatMessage.content,
             ChatSession.session_key,
@@ -761,7 +1095,9 @@ def _load_cross_session_recent_updates(
     if current_session_db_id:
         query = query.where(ChatMessage.session_id != current_session_db_id)
     if current_last_message_at is not None:
-        query = query.where(message_time > current_last_message_at)
+        # Include same-timestamp messages from other sessions to avoid dropping
+        # user turns when requests are processed nearly simultaneously.
+        query = query.where(message_time >= current_last_message_at)
 
     rows = db.execute(query).all()
     if not rows and current_last_message_at is not None:
@@ -772,18 +1108,23 @@ def _load_cross_session_recent_updates(
         rows = db.execute(fallback_query).all()
     out: list[dict[str, str]] = []
     seen: set[str] = set()
-    for role_raw, content_raw, source_session_key, _ in rows:
+    for message_id_raw, role_raw, content_raw, source_session_key, _ in rows:
         content = _truncate_chat_delta_text(str(content_raw or ""))
         if not content:
             continue
         normalized_role = "assistant" if str(role_raw or "").strip().lower() == "assistant" else "user"
         source_key = str(source_session_key or "").strip()
+        message_id = str(message_id_raw or "").strip()
+        update_id = hashlib.sha256(
+            f"{message_id}|{source_key}|{normalized_role}|{content}".encode("utf-8")
+        ).hexdigest()[:24]
         dedupe_key = f"{source_key}|{normalized_role}|{content}".lower()
         if dedupe_key in seen:
             continue
         seen.add(dedupe_key)
         out.append(
             {
+                "update_id": update_id,
                 "role": normalized_role,
                 "content": content,
                 "source_session_key": source_key,
@@ -807,7 +1148,9 @@ def _compose_cross_session_updates_text(updates: list[dict[str, str]]) -> str:
         content = str(item.get("content") or "").strip()
         if not content:
             continue
-        lines.append(f"- {source_label}{role_label}: {content}")
+        update_id = str(item.get("update_id") or "").strip()
+        update_prefix = f"[{update_id}] " if update_id else ""
+        lines.append(f"- {update_prefix}{source_label}{role_label}: {content}")
     if not lines:
         return ""
     return (
@@ -924,8 +1267,70 @@ def _load_persisted_session_attachment_refs(
         checksum = str(item.get("checksum") or "").strip()
         if checksum:
             normalized["checksum"] = checksum
+        extraction_status = str(item.get("extraction_status") or "").strip().lower()
+        if extraction_status in {"extracted", "truncated", "reused", "skipped", "skipped_limit", "skipped_file_limit"}:
+            normalized["extraction_status"] = extraction_status
+        extracted_text = str(item.get("extracted_text") or "").strip()
+        if extracted_text:
+            normalized["extracted_text"] = extracted_text
         out.append(normalized)
     return out
+
+
+def _load_chat_session_usage_metadata(
+    *,
+    db: Session,
+    user: User,
+    workspace_id: str,
+    session_id: str | None,
+) -> dict[str, object]:
+    session_key = str(session_id or "").strip()
+    if not session_key:
+        return {}
+    session = db.execute(
+        select(ChatSession).where(
+            ChatSession.workspace_id == workspace_id,
+            ChatSession.session_key == session_key,
+            ChatSession.created_by == user.id,
+        )
+    ).scalar_one_or_none()
+    if session is None:
+        return {}
+    if session.project_id:
+        ensure_project_access(db, workspace_id, session.project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    try:
+        payload = json.loads(session.usage_json or "{}")
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _load_sent_cross_session_update_ids(
+    *,
+    db: Session,
+    user: User,
+    workspace_id: str,
+    session_id: str | None,
+    max_items: int = 160,
+) -> list[str]:
+    usage = _load_chat_session_usage_metadata(
+        db=db,
+        user=user,
+        workspace_id=workspace_id,
+        session_id=session_id,
+    )
+    raw = usage.get("sent_cross_session_update_ids")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        update_id = str(item or "").strip()
+        if not update_id or update_id in seen:
+            continue
+        seen.add(update_id)
+        out.append(update_id)
+    return out[-max(1, int(max_items)) :]
 
 
 def _parse_compact_command(instruction: str) -> tuple[bool, str]:
@@ -939,6 +1344,924 @@ def _parse_compact_command(instruction: str) -> tuple[bool, str]:
     return True, remainder
 
 
+def _classify_chat_instruction_intents(
+    *,
+    instruction: str,
+    workspace_id: str,
+    project_id: str | None,
+    session_id: str | None,
+    actor_user_id: str | None,
+) -> dict[str, object]:
+    return classify_instruction_intent(
+        instruction=instruction,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        session_id=session_id,
+        actor_user_id=actor_user_id,
+    )
+
+
+def _build_execution_intent_mandate() -> str:
+    return _render_prompt_template("chat_execution_intent_mandate.md", {})
+
+
+def _format_chat_knowledge_evidence_block(
+    *,
+    query: str,
+    items: list[dict[str, object]],
+    grounded_answer_required: bool,
+) -> str:
+    lines = [
+        "Project knowledge evidence",
+        f"Query: {query}",
+        (
+            "Answer factual questions using this evidence first. "
+            "If the answer is not supported here, say you could not verify it from project knowledge."
+            if grounded_answer_required
+            else "Use this evidence when it is relevant to the user's question."
+        ),
+    ]
+    for index, item in enumerate(items, start=1):
+        entity_type = str(item.get("entity_type") or "Entity").strip() or "Entity"
+        entity_id = str(item.get("entity_id") or "").strip()
+        source_type = str(item.get("source_type") or "source").strip() or "source"
+        snippet = str(item.get("snippet") or "").strip()
+        final_score = item.get("final_score")
+        vector_similarity = item.get("vector_similarity")
+        metrics: list[str] = []
+        if isinstance(final_score, (int, float)):
+            metrics.append(f"final_score={float(final_score):.4f}")
+        if isinstance(vector_similarity, (int, float)):
+            metrics.append(f"vector_similarity={float(vector_similarity):.4f}")
+        score_suffix = f" ({', '.join(metrics)})" if metrics else ""
+        lines.append(f"{index}. [{entity_type}] {source_type} {entity_id}{score_suffix}")
+        if snippet:
+            lines.append(f"   {snippet}")
+    return "\n".join(lines).strip()
+
+
+def _normalize_chat_knowledge_query_payload(values: dict[str, object] | None) -> dict[str, object]:
+    parsed = dict(values or {})
+    project_knowledge_lookup_intent = bool(parsed.get("project_knowledge_lookup_intent"))
+    grounded_answer_required = bool(parsed.get("grounded_answer_required"))
+    input_language = str(parsed.get("input_language") or "").strip().lower() or "unknown"
+    english_retrieval_query = str(parsed.get("english_retrieval_query") or "").strip()
+    native_retrieval_query = str(parsed.get("native_retrieval_query") or "").strip()
+    reasoning = str(parsed.get("reasoning") or "").strip()
+    return {
+        "project_knowledge_lookup_intent": project_knowledge_lookup_intent,
+        "grounded_answer_required": grounded_answer_required,
+        "input_language": input_language,
+        "english_retrieval_query": english_retrieval_query,
+        "native_retrieval_query": native_retrieval_query,
+        "reasoning": reasoning,
+    }
+
+
+def _normalize_chat_knowledge_lookup_query(
+    *,
+    instruction: str,
+    workspace_id: str,
+    project_id: str | None,
+    session_id: str | None,
+    actor_user_id: str | None,
+) -> dict[str, object]:
+    normalized_instruction = str(instruction or "").strip()
+    if not normalized_instruction:
+        return _normalize_chat_knowledge_query_payload({})
+    payload = {
+        "instruction": normalized_instruction,
+        "workspace_id": str(workspace_id or "").strip() or None,
+        "project_id": str(project_id or "").strip() or None,
+        "session_id": str(session_id or "").strip() or None,
+    }
+    cache_key = build_classification_cache_key(
+        cache_name="chat_knowledge_query_normalizer",
+        workspace_id=str(workspace_id or "").strip() or None,
+        project_id=str(project_id or "").strip() or None,
+        classifier_version=_CHAT_KNOWLEDGE_QUERY_NORMALIZER_VERSION,
+        schema_version=_CHAT_KNOWLEDGE_QUERY_NORMALIZER_SCHEMA_VERSION,
+        payload=payload,
+    )
+    cached = _CHAT_KNOWLEDGE_QUERY_NORMALIZER_CACHE.get(cache_key)
+    if cached is not None:
+        return _normalize_chat_knowledge_query_payload(cached)
+    prompt = _render_prompt_template(
+        "chat_knowledge_query_normalizer.md",
+        {"payload_json": json.dumps(payload, ensure_ascii=True)},
+    )
+    output_schema: dict[str, object] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "project_knowledge_lookup_intent": {"type": "boolean"},
+            "grounded_answer_required": {"type": "boolean"},
+            "input_language": {"type": "string"},
+            "english_retrieval_query": {"type": "string"},
+            "native_retrieval_query": {"type": "string"},
+            "reasoning": {"type": "string"},
+        },
+        "required": [
+            "project_knowledge_lookup_intent",
+            "grounded_answer_required",
+            "input_language",
+            "english_retrieval_query",
+            "native_retrieval_query",
+            "reasoning",
+        ],
+    }
+    try:
+        parsed = run_structured_agent_prompt(
+            prompt=prompt,
+            output_schema=output_schema,
+            workspace_id=str(workspace_id or "").strip() or None,
+            session_key=(
+                f"{_CHAT_KNOWLEDGE_QUERY_NORMALIZER_VERSION}:{_CHAT_KNOWLEDGE_QUERY_NORMALIZER_SCHEMA_VERSION}:"
+                f"{str(workspace_id or '').strip()}:{str(project_id or '').strip()}:{str(session_id or '').strip()}:"
+                f"{hashlib.sha256(normalized_instruction.encode('utf-8')).hexdigest()[:16]}"
+            ),
+            actor_user_id=str(actor_user_id or "").strip() or None,
+            mcp_servers=[],
+            use_cache=True,
+        )
+    except Exception:
+        parsed = {}
+    normalized = _normalize_chat_knowledge_query_payload(parsed if isinstance(parsed, dict) else {})
+    _CHAT_KNOWLEDGE_QUERY_NORMALIZER_CACHE.set(cache_key, normalized)
+    return normalized
+
+
+def _augment_chat_intents_with_knowledge_lookup(
+    *,
+    instruction: str,
+    workspace_id: str,
+    project_id: str | None,
+    session_id: str | None,
+    actor_user_id: str | None,
+    intent_flags: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return dict(intent_flags), None
+
+    if bool(intent_flags.get("execution_intent")) or bool(intent_flags.get("project_creation_intent")):
+        return dict(intent_flags), None
+
+    normalization = _normalize_chat_knowledge_lookup_query(
+        instruction=instruction,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        session_id=session_id,
+        actor_user_id=actor_user_id,
+    )
+    if not bool(normalization.get("project_knowledge_lookup_intent")):
+        return dict(intent_flags), normalization
+
+    merged = dict(intent_flags)
+    merged["project_knowledge_lookup_intent"] = True
+    merged["grounded_answer_required"] = bool(normalization.get("grounded_answer_required")) or bool(
+        intent_flags.get("grounded_answer_required")
+    )
+    if not str(merged.get("reason") or "").strip():
+        merged["reason"] = str(normalization.get("reasoning") or "").strip()
+    return merged, normalization
+
+
+def _normalize_chat_knowledge_text(value: str) -> str:
+    return re.sub(r"[^\w\s]+", " ", str(value or "").lower()).strip()
+
+
+def _chat_knowledge_query_tokens(query: str) -> list[str]:
+    normalized = _normalize_chat_knowledge_text(query)
+    if not normalized:
+        return []
+    return [token for token in normalized.split() if len(token) >= 3]
+
+
+def _filter_chat_knowledge_items(*, query: str, items: list[dict[str, object]]) -> list[dict[str, object]]:
+    candidates: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
+    query_tokens = _chat_knowledge_query_tokens(query)
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        final_score = float(item.get("final_score") or 0.0)
+        vector_similarity = item.get("vector_similarity")
+        vector_value = float(vector_similarity or 0.0) if vector_similarity is not None else None
+        if final_score < _CHAT_KNOWLEDGE_MIN_FINAL_SCORE:
+            continue
+        if vector_value is not None and vector_value < _CHAT_KNOWLEDGE_MIN_VECTOR_SIMILARITY:
+            continue
+        key = (
+            str(item.get("entity_type") or "").strip(),
+            str(item.get("entity_id") or "").strip(),
+            str(item.get("source_type") or "").strip(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        snippet = _normalize_chat_knowledge_text(str(item.get("snippet") or ""))
+        overlap_count = sum(1 for token in query_tokens if token in snippet)
+        item_copy = dict(item)
+        item_copy["_chat_overlap_count"] = overlap_count
+        item_copy["_chat_query"] = str(query)
+        candidates.append(item_copy)
+    if not candidates:
+        return []
+
+    max_overlap = max(int(item.get("_chat_overlap_count") or 0) for item in candidates)
+    if max_overlap > 0:
+        candidates = [item for item in candidates if int(item.get("_chat_overlap_count") or 0) > 0]
+    candidates.sort(
+        key=lambda item: (
+            -int(item.get("_chat_overlap_count") or 0),
+            -float(item.get("vector_similarity") or 0.0),
+            -float(item.get("final_score") or 0.0),
+            str(item.get("source_type") or ""),
+        )
+    )
+    trimmed = candidates[:_CHAT_KNOWLEDGE_EVIDENCE_LIMIT]
+    for item in trimmed:
+        item.pop("_chat_overlap_count", None)
+    return trimmed
+
+
+def _maybe_build_chat_project_knowledge_context(
+    *,
+    instruction: str,
+    workspace_id: str,
+    project_id: str | None,
+    session_id: str | None,
+    actor_user_id: str | None,
+    intent_flags: dict[str, object],
+    query_normalization: dict[str, object] | None = None,
+) -> tuple[str | None, dict[str, object]]:
+    normalized_instruction = str(instruction or "").strip()
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_instruction or not normalized_project_id:
+        return None, {
+            "knowledge_lookup_triggered": False,
+            "knowledge_lookup_used": False,
+            "knowledge_lookup_hits": 0,
+        }
+
+    if not bool(intent_flags.get("project_knowledge_lookup_intent")):
+        return None, {
+            "knowledge_lookup_triggered": False,
+            "knowledge_lookup_used": False,
+            "knowledge_lookup_hits": 0,
+        }
+
+    normalized_query_payload = query_normalization or _normalize_chat_knowledge_lookup_query(
+        instruction=normalized_instruction,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        session_id=session_id,
+        actor_user_id=actor_user_id,
+    )
+    retrieval_queries: list[str] = []
+    for candidate in [
+        normalized_instruction,
+        str(normalized_query_payload.get("native_retrieval_query") or "").strip(),
+        str(normalized_query_payload.get("english_retrieval_query") or "").strip(),
+    ]:
+        if candidate and candidate not in retrieval_queries:
+            retrieval_queries.append(candidate)
+
+    merged_items: list[dict[str, object]] = []
+    first_mode = ""
+    try:
+        for retrieval_query in retrieval_queries:
+            payload = search_project_knowledge_query(
+                project_id=normalized_project_id,
+                query=retrieval_query,
+                limit=max(_CHAT_KNOWLEDGE_EVIDENCE_LIMIT * 2, 8),
+            )
+            if not first_mode:
+                first_mode = str(payload.get("mode") or "")
+            for item in list(payload.get("items") or []):
+                if not isinstance(item, dict):
+                    continue
+                item_copy = dict(item)
+                item_copy["_retrieval_query"] = retrieval_query
+                merged_items.append(item_copy)
+    except Exception as exc:
+        logger.warning("Chat project knowledge lookup failed for project=%s: %s", normalized_project_id, exc)
+        if bool(intent_flags.get("grounded_answer_required")):
+            return (
+                "Project knowledge lookup was attempted for this question but no verified evidence could be loaded. "
+                "Do not invent the answer. Say that you could not verify it from project knowledge.",
+                {
+                    "knowledge_lookup_triggered": True,
+                    "knowledge_lookup_used": False,
+                    "knowledge_lookup_hits": 0,
+                    "knowledge_lookup_error": str(exc),
+                },
+            )
+        return None, {
+            "knowledge_lookup_triggered": True,
+            "knowledge_lookup_used": False,
+            "knowledge_lookup_hits": 0,
+            "knowledge_lookup_error": str(exc),
+        }
+
+    effective_filter_query = str(normalized_query_payload.get("english_retrieval_query") or "").strip() or normalized_instruction
+    items = _filter_chat_knowledge_items(query=effective_filter_query, items=merged_items)
+    if not items:
+        if bool(intent_flags.get("grounded_answer_required")):
+            return (
+                "No grounded project knowledge evidence was found for this question. "
+                "If the user is asking for a factual project answer, say that you could not verify it from project knowledge.",
+                {
+                    "knowledge_lookup_triggered": True,
+                    "knowledge_lookup_used": False,
+                    "knowledge_lookup_hits": 0,
+                    "knowledge_lookup_mode": first_mode,
+                    "knowledge_lookup_language": str(normalized_query_payload.get("input_language") or ""),
+                    "knowledge_lookup_english_query": str(normalized_query_payload.get("english_retrieval_query") or ""),
+                },
+            )
+        return None, {
+            "knowledge_lookup_triggered": True,
+            "knowledge_lookup_used": False,
+            "knowledge_lookup_hits": 0,
+            "knowledge_lookup_mode": first_mode,
+            "knowledge_lookup_language": str(normalized_query_payload.get("input_language") or ""),
+            "knowledge_lookup_english_query": str(normalized_query_payload.get("english_retrieval_query") or ""),
+        }
+
+    return (
+        _format_chat_knowledge_evidence_block(
+            query=normalized_instruction,
+            items=items,
+            grounded_answer_required=bool(intent_flags.get("grounded_answer_required")),
+        ),
+        {
+            "knowledge_lookup_triggered": True,
+            "knowledge_lookup_used": True,
+            "knowledge_lookup_hits": len(items),
+            "knowledge_lookup_mode": first_mode,
+            "knowledge_lookup_language": str(normalized_query_payload.get("input_language") or ""),
+            "knowledge_lookup_english_query": str(normalized_query_payload.get("english_retrieval_query") or ""),
+        },
+    )
+
+
+def _build_chat_history_compaction_instruction(*, history_lines: str) -> str:
+    return _render_prompt_template(
+        "chat_history_compaction_instruction.md",
+        {"history_lines": history_lines},
+    )
+
+
+def _build_chat_history_compaction_description(*, workspace_id: str, project_id: str | None) -> str:
+    return _render_prompt_template(
+        "chat_history_compaction_description.md",
+        {
+            "workspace_id": workspace_id,
+            "project_id": project_id or "",
+        },
+    )
+
+
+def _build_execution_evidence_contract_comment(*, existing_comment: str | None, details: str) -> str:
+    existing = str(existing_comment or "").strip()
+    body = _render_prompt_template(
+        "chat_execution_evidence_contract_comment.md",
+        {"details": details},
+    )
+    if existing:
+        return f"{existing}\n\n{body}"
+    return body
+
+
+def _build_chat_timeout_comment() -> str:
+    return _render_prompt_template("chat_timeout_comment.md", {}).strip()
+
+
+def _build_chat_error_summary() -> str:
+    return _render_prompt_template("chat_error_summary.md", {}).strip()
+
+
+def _extract_missing_setup_question(error_text: str) -> str | None:
+    raw = str(error_text or "").strip()
+    if not raw:
+        return None
+
+    def _extract_from_dict(payload: dict[str, object]) -> str | None:
+        code = str(payload.get("code") or "").strip().lower()
+        if code != "missing_setup_inputs":
+            return None
+        question = str(payload.get("next_question") or "").strip()
+        if question:
+            return question
+        missing = payload.get("missing_inputs")
+        if isinstance(missing, list):
+            for item in missing:
+                if not isinstance(item, dict):
+                    continue
+                question_text = str(item.get("question") or "").strip()
+                if question_text:
+                    return question_text
+        return None
+
+    try:
+        parsed_direct = json.loads(raw)
+    except Exception:
+        parsed_direct = None
+    if isinstance(parsed_direct, dict):
+        extracted = _extract_from_dict(parsed_direct)
+        if extracted:
+            return extracted
+
+    decoder = json.JSONDecoder()
+    for index in range(len(raw)):
+        if raw[index] != "{":
+            continue
+        try:
+            candidate, _ = decoder.raw_decode(raw[index:])
+        except Exception:
+            continue
+        if isinstance(candidate, dict):
+            extracted = _extract_from_dict(candidate)
+            if extracted:
+                return extracted
+
+    match = re.search(r'"next_question"\s*:\s*"([^"]+)"', raw)
+    if match:
+        fallback_question = str(match.group(1) or "").strip()
+        if fallback_question:
+            return fallback_question
+    return None
+
+
+def _map_chat_exception_to_response(exc: Exception) -> tuple[bool, str, str | None]:
+    missing_setup_question = _extract_missing_setup_question(str(exc))
+    if missing_setup_question:
+        return True, missing_setup_question, None
+    return False, _build_chat_error_summary(), str(exc).strip()[:500]
+
+
+def _build_team_lead_kickoff_instruction(*, project_id: str, requester_user_id: str) -> str:
+    return _render_prompt_template(
+        "team_mode_kickoff_instruction.md",
+        {
+            "project_id": project_id,
+            "requester_user_id": requester_user_id,
+        },
+    )
+
+
+def _extract_runtime_deploy_target_from_text(text: str) -> tuple[str | None, int | None, str | None]:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return None, None, None
+
+    stack_match = _DOCKER_COMPOSE_STACK_RE.search(normalized) or _DEPLOY_STACK_RE.search(normalized)
+    stack = str(stack_match.group(1) or "").strip() if stack_match else None
+
+    port: int | None = None
+    port_match = _DEPLOY_PORT_RE.search(normalized) or _HOST_PORT_RE.search(normalized)
+    if port_match:
+        try:
+            candidate = int(str(port_match.group(1) or "").strip())
+            if 1 <= candidate <= 65535:
+                port = candidate
+        except Exception:
+            port = None
+
+    health_path_match = _HEALTH_PATH_RE.search(normalized)
+    health_path = str(health_path_match.group(1) or "").strip() if health_path_match else None
+    if health_path and not health_path.startswith("/"):
+        health_path = f"/{health_path}"
+    return stack, port, health_path
+
+
+def _resolve_runtime_deploy_target_from_project_artifacts(
+    *,
+    db: Session,
+    workspace_id: str,
+    project_id: str,
+) -> tuple[str | None, int | None, str | None]:
+    tasks = db.execute(
+        select(Task).where(
+            Task.workspace_id == workspace_id,
+            Task.project_id == project_id,
+            Task.is_deleted == False,  # noqa: E712
+        )
+    ).scalars().all()
+    deploy_tasks = [task for task in tasks if "deploy" in str(task.title or "").strip().lower()]
+    if not deploy_tasks:
+        return None, None, None
+
+    task_ids = [str(task.id) for task in deploy_tasks if str(task.id or "").strip()]
+    notes_by_task: dict[str, list[Note]] = {}
+    comments_by_task: dict[str, list[ActivityLog]] = {}
+    if task_ids:
+        notes = db.execute(
+            select(Note).where(
+                Note.workspace_id == workspace_id,
+                Note.project_id == project_id,
+                Note.is_deleted == False,  # noqa: E712
+                Note.task_id.in_(task_ids),
+            )
+        ).scalars().all()
+        for note in notes:
+            key = str(note.task_id or "").strip()
+            if not key:
+                continue
+            notes_by_task.setdefault(key, []).append(note)
+
+        comments = db.execute(
+            select(ActivityLog).where(
+                ActivityLog.workspace_id == workspace_id,
+                ActivityLog.project_id == project_id,
+                ActivityLog.task_id.in_(task_ids),
+            )
+        ).scalars().all()
+        for comment in comments:
+            key = str(comment.task_id or "").strip()
+            if not key:
+                continue
+            comments_by_task.setdefault(key, []).append(comment)
+
+    project_notes = db.execute(
+        select(Note).where(
+            Note.workspace_id == workspace_id,
+            Note.project_id == project_id,
+            Note.is_deleted == False,  # noqa: E712
+        )
+    ).scalars().all()
+
+    resolved_stack: str | None = None
+    resolved_port: int | None = None
+    resolved_health_path: str | None = None
+
+    for task in deploy_tasks:
+        task_id = str(task.id or "").strip()
+        corpus_parts = [str(task.title or ""), str(task.description or ""), str(task.instruction or "")]
+        for note in notes_by_task.get(task_id, []):
+            corpus_parts.extend([str(note.title or ""), str(note.body or "")])
+        for comment in comments_by_task.get(task_id, []):
+            corpus_parts.append(str(comment.details or ""))
+        corpus = "\n".join(corpus_parts)
+        stack, port, health_path = _extract_runtime_deploy_target_from_text(corpus)
+        if not resolved_stack and stack:
+            resolved_stack = stack
+        if resolved_port is None and port is not None:
+            resolved_port = port
+        if not resolved_health_path and health_path:
+            resolved_health_path = health_path
+        if resolved_stack and resolved_port is not None and resolved_health_path:
+            break
+
+    if not (resolved_stack and resolved_port is not None and resolved_health_path):
+        for note in project_notes:
+            corpus = "\n".join([str(note.title or ""), str(note.body or "")])
+            stack, port, health_path = _extract_runtime_deploy_target_from_text(corpus)
+            if not resolved_stack and stack:
+                resolved_stack = stack
+            if resolved_port is None and port is not None:
+                resolved_port = port
+            if not resolved_health_path and health_path:
+                resolved_health_path = health_path
+            if resolved_stack and resolved_port is not None and resolved_health_path:
+                break
+
+    return resolved_stack, resolved_port, resolved_health_path
+
+
+def _promote_plugin_policy_to_execution_mode_if_needed(
+    *,
+    db: Session,
+    user: User,
+    workspace_id: str,
+    project_id: str,
+    command_id: str | None,
+) -> None:
+    plugin_rows = db.execute(
+        select(ProjectPluginConfig).where(
+            ProjectPluginConfig.workspace_id == workspace_id,
+            ProjectPluginConfig.project_id == project_id,
+            ProjectPluginConfig.plugin_key.in_(["team_mode", "git_delivery", "docker_compose"]),
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).scalars().all()
+    row_by_key = {
+        str(getattr(row, "plugin_key", "") or "").strip().lower(): row
+        for row in plugin_rows
+        if str(getattr(row, "plugin_key", "") or "").strip()
+    }
+    team_mode_enabled = bool(getattr(row_by_key.get("team_mode"), "enabled", False))
+    git_delivery_enabled = bool(getattr(row_by_key.get("git_delivery"), "enabled", False))
+    if not (team_mode_enabled or git_delivery_enabled):
+        return
+
+    git_delivery_config: dict[str, object] = {}
+    git_delivery_row = row_by_key.get("git_delivery")
+    if git_delivery_row is not None:
+        try:
+            parsed = json.loads(str(getattr(git_delivery_row, "config_json", "") or "").strip() or "{}")
+            if isinstance(parsed, dict):
+                git_delivery_config = dict(parsed)
+        except Exception:
+            git_delivery_config = {}
+
+    detected_stack, detected_port, detected_health_path = _resolve_runtime_deploy_target_from_project_artifacts(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    required_checks_cfg = (
+        dict(git_delivery_config.get("required_checks"))
+        if isinstance(git_delivery_config.get("required_checks"), dict)
+        else {}
+    )
+    delivery_checks_raw = required_checks_cfg.get("delivery")
+    delivery_checks = (
+        [str(item or "").strip() for item in delivery_checks_raw if str(item or "").strip()]
+        if isinstance(delivery_checks_raw, list)
+        else []
+    )
+    normalized_delivery_checks = normalize_delivery_required_checks(
+        delivery_checks if delivery_checks else default_required_delivery_checks(team_mode_enabled=team_mode_enabled),
+        team_mode_enabled=team_mode_enabled,
+    )
+    required_checks_cfg["delivery"] = normalized_delivery_checks
+    git_delivery_config["required_checks"] = required_checks_cfg
+    build_ui_gateway(actor_user_id=user.id).apply_project_plugin_config(
+        project_id=project_id,
+        workspace_id=workspace_id,
+        plugin_key="git_delivery",
+        config=git_delivery_config,
+        enabled=True,
+    )
+
+    docker_compose_config: dict[str, object] = {}
+    docker_compose_row = row_by_key.get("docker_compose")
+    if docker_compose_row is not None:
+        try:
+            parsed = json.loads(str(getattr(docker_compose_row, "config_json", "") or "").strip() or "{}")
+            if isinstance(parsed, dict):
+                docker_compose_config = dict(parsed)
+        except Exception:
+            docker_compose_config = {}
+    runtime_cfg = (
+        dict(docker_compose_config.get("runtime_deploy_health"))
+        if isinstance(docker_compose_config.get("runtime_deploy_health"), dict)
+        else {}
+    )
+    if "required" not in runtime_cfg:
+        runtime_cfg["required"] = bool(team_mode_enabled)
+    if not str(runtime_cfg.get("stack") or "").strip() and detected_stack:
+        runtime_cfg["stack"] = detected_stack
+    if not str(runtime_cfg.get("host") or "").strip():
+        runtime_cfg["host"] = "gateway"
+    runtime_port_raw = runtime_cfg.get("port")
+    has_valid_port = isinstance(runtime_port_raw, int) and 1 <= int(runtime_port_raw) <= 65535
+    if not has_valid_port and detected_port is not None:
+        runtime_cfg["port"] = int(detected_port)
+    if not str(runtime_cfg.get("health_path") or "").strip() and detected_health_path:
+        runtime_cfg["health_path"] = detected_health_path
+    docker_compose_config["runtime_deploy_health"] = runtime_cfg
+    build_ui_gateway(actor_user_id=user.id).apply_project_plugin_config(
+        project_id=project_id,
+        workspace_id=workspace_id,
+        plugin_key="docker_compose",
+        config=docker_compose_config,
+        enabled=True,
+    )
+
+
+def _sync_plugin_runtime_target_if_needed(
+    *,
+    db: Session,
+    user: User,
+    workspace_id: str,
+    project_id: str,
+    command_id: str | None,
+) -> bool:
+    row = db.execute(
+        select(ProjectPluginConfig).where(
+            ProjectPluginConfig.workspace_id == workspace_id,
+            ProjectPluginConfig.project_id == project_id,
+            ProjectPluginConfig.plugin_key == "docker_compose",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return False
+    config: dict[str, object] = {}
+    try:
+        parsed = json.loads(str(getattr(row, "config_json", "") or "").strip() or "{}")
+        if isinstance(parsed, dict):
+            config = dict(parsed)
+    except Exception:
+        config = {}
+
+    runtime_cfg = dict(config.get("runtime_deploy_health")) if isinstance(config.get("runtime_deploy_health"), dict) else {}
+    runtime_stack = str(runtime_cfg.get("stack") or "").strip() or None
+    runtime_host = str(runtime_cfg.get("host") or "").strip() or None
+    runtime_port_raw = runtime_cfg.get("port")
+    runtime_health_path = str(runtime_cfg.get("health_path") or "").strip() or None
+    has_valid_port = isinstance(runtime_port_raw, int) and 1 <= int(runtime_port_raw) <= 65535
+
+    detected_stack, detected_port, detected_health_path = _resolve_runtime_deploy_target_from_project_artifacts(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    changed = False
+    if not runtime_stack and detected_stack:
+        runtime_cfg["stack"] = detected_stack
+        changed = True
+    if not runtime_host:
+        runtime_cfg["host"] = "gateway"
+        changed = True
+    if not has_valid_port and detected_port is not None:
+        runtime_cfg["port"] = int(detected_port)
+        changed = True
+    if not runtime_health_path and detected_health_path:
+        runtime_cfg["health_path"] = detected_health_path
+        changed = True
+    if not changed:
+        return False
+
+    config["runtime_deploy_health"] = runtime_cfg
+    build_ui_gateway(actor_user_id=user.id).apply_project_plugin_config(
+        project_id=project_id,
+        workspace_id=workspace_id,
+        plugin_key="docker_compose",
+        config=config,
+        enabled=True,
+    )
+    return True
+
+
+def _resolve_effective_chat_project_id(
+    *,
+    db: Session,
+    workspace_id: str,
+    user_id: str,
+    project_id: str | None,
+    session_id: str | None,
+    instruction: str,
+) -> str | None:
+    normalized_project_id = str(project_id or "").strip()
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_project_id and normalized_session_id:
+        session = db.execute(
+            select(ChatSession).where(
+                ChatSession.workspace_id == workspace_id,
+                ChatSession.session_key == normalized_session_id,
+                ChatSession.created_by == str(user_id),
+            )
+        ).scalar_one_or_none()
+        session_project_id = str(getattr(session, "project_id", "") or "").strip()
+        if session_project_id:
+            normalized_project_id = session_project_id
+    if not normalized_project_id:
+        return None
+    exists = db.execute(
+        select(Project.id).where(
+            Project.id == normalized_project_id,
+            Project.workspace_id == workspace_id,
+            Project.is_deleted == False,  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if exists is not None:
+        return normalized_project_id
+    intent_flags = _classify_chat_instruction_intents(
+        instruction=instruction,
+        workspace_id=workspace_id,
+        project_id=None,
+        session_id=None,
+    )
+    if bool(intent_flags.get("project_creation_intent")):
+        return None
+    raise HTTPException(status_code=404, detail="Project not found")
+
+
+def _collect_execution_evidence_violations(
+    *,
+    db: Session,
+    user_id: str,
+    project_id: str,
+    run_started_at: datetime,
+) -> list[dict[str, str]]:
+    rows = db.execute(
+        select(CommandExecution.response_json)
+        .where(
+            CommandExecution.user_id == str(user_id),
+            CommandExecution.command_name.in_(("Task.Patch", "Task.Create")),
+            CommandExecution.created_at >= run_started_at,
+        )
+        .order_by(CommandExecution.created_at.asc())
+    ).all()
+    latest_by_task: dict[str, dict[str, object]] = {}
+    for (response_json,) in rows:
+        try:
+            payload = json.loads(str(response_json or "{}"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("project_id") or "").strip() != str(project_id):
+            continue
+        task_id = str(payload.get("id") or "").strip()
+        if not task_id:
+            continue
+        latest_by_task[task_id] = payload
+
+    violations: list[dict[str, str]] = []
+    task_ids = list(latest_by_task.keys())
+    note_task_ids: set[str] = set()
+    if task_ids:
+        note_rows = db.execute(
+            select(Note.task_id).where(
+                Note.task_id.in_(task_ids),
+                Note.is_deleted == False,  # noqa: E712
+            )
+        ).all()
+        note_task_ids = {
+            str(task_id).strip()
+            for (task_id,) in note_rows
+            if str(task_id or "").strip()
+        }
+
+    def _has_valid_external_ref(external_refs: object) -> bool:
+        if not isinstance(external_refs, list):
+            return False
+        for item in external_refs:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            title = str(item.get("title") or "").strip()
+            lower_url = url.lower()
+            if lower_url.startswith("http://") or lower_url.startswith("https://"):
+                return True
+            text_blob = f"{url} {title}".strip()
+            if _COMMIT_SHA_RE.search(text_blob):
+                return True
+        return False
+
+    for task_id, payload in latest_by_task.items():
+        status = str(payload.get("status") or "").strip()
+        semantic_key = semantic_status_key(status=status)
+        if semantic_key not in {"in_review", "awaiting_decision", "completed"}:
+            continue
+        external_refs = payload.get("external_refs") or []
+        has_note_evidence = task_id in note_task_ids
+        has_external_evidence = _has_valid_external_ref(external_refs)
+        if has_note_evidence or has_external_evidence:
+            continue
+        violations.append(
+            {
+                "task_id": task_id,
+                "title": str(payload.get("title") or "").strip() or task_id,
+                "status": status,
+            }
+        )
+    return violations
+
+
+def _apply_execution_evidence_contract(
+    *,
+    db: Session,
+    user_id: str,
+    project_id: str | None,
+    execution_intent: bool,
+    allow_mutations: bool,
+    run_started_at: datetime,
+    summary: str,
+    comment: str | None,
+) -> tuple[bool, str, str | None]:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id or not allow_mutations:
+        return True, summary, comment
+    if not bool(execution_intent):
+        return True, summary, comment
+    violations = _collect_execution_evidence_violations(
+        db=db,
+        user_id=user_id,
+        project_id=normalized_project_id,
+        run_started_at=run_started_at,
+    )
+    if not violations:
+        return True, summary, comment
+    details = "\n".join(
+        f"- {item['title']} ({item['task_id']}) -> status `{item['status']}` has no external links"
+        for item in violations
+    )
+    contract_summary = "Execution incomplete: task evidence is missing."
+    contract_comment = _build_execution_evidence_contract_comment(
+        existing_comment=comment,
+        details=details,
+    )
+    return False, contract_summary, contract_comment
+
+
 def _compact_history_with_codex(
     *,
     history: list[dict[str, str]],
@@ -949,19 +2272,17 @@ def _compact_history_with_codex(
     if not history:
         return None
     lines = [f"{item['role'].upper()}: {item['content']}" for item in history[-80:]]
-    compact_instruction = (
-        "Compact this conversation history for continuation in one concise summary.\n"
-        "Include: current goals, decisions made, constraints, and open items.\n"
-        "Do not call tools and do not mutate any data.\n"
-        "Write plain text summary only."
-        "\n\nConversation history:\n"
-        + "\n".join(lines)
+    compact_instruction = _build_chat_history_compaction_instruction(
+        history_lines="\n".join(lines),
     )
     outcome = execute_task_automation(
         task_id="",
         title="General Codex Chat History Compaction",
-        description=f"Compacting chat context. workspace_id={workspace_id}; project_id={project_id or ''}",
-        status="To do",
+        description=_build_chat_history_compaction_description(
+            workspace_id=workspace_id,
+            project_id=project_id,
+        ),
+        status="To Do",
         instruction=compact_instruction,
         workspace_id=workspace_id,
         project_id=project_id,
@@ -1017,7 +2338,15 @@ def _prepare_chat_instruction(
     user: User,
     resume_codex_session_id: str | None = None,
     resume_last_succeeded: bool | None = None,
-) -> tuple[str, list[dict[str, str]], bool, list[dict[str, object]], list[dict[str, object]]]:
+) -> tuple[
+    str,
+    list[dict[str, str]],
+    bool,
+    list[dict[str, object]],
+    list[dict[str, object]],
+    dict[str, bool],
+    dict[str, object],
+]:
     raw_instruction = (payload.instruction or "").strip()
     force_compact, instruction = _parse_compact_command(raw_instruction)
     if not raw_instruction:
@@ -1066,7 +2395,29 @@ def _prepare_chat_instruction(
             summary = "Chat history compacted."
         else:
             summary = "Chat history compaction skipped."
-        return summary, compacted_history, True, [], []
+        return (
+            summary,
+            compacted_history,
+            True,
+            [],
+            [],
+            {
+                "execution_intent": False,
+                "execution_kickoff_intent": False,
+                "project_creation_intent": False,
+                "project_knowledge_lookup_intent": False,
+                "grounded_answer_required": False,
+                "workflow_scope": "unknown",
+                "execution_mode": "unknown",
+                "deploy_requested": False,
+                "docker_compose_requested": False,
+                "requested_port": None,
+                "code_review_required": False,
+                "project_name_provided": False,
+                "task_completion_requested": False,
+            },
+            {"prompt_instruction_segments": {"user_instruction": len(instruction)}},
+        )
     if not instruction:
         raise HTTPException(status_code=400, detail="instruction is required")
 
@@ -1074,10 +2425,62 @@ def _prepare_chat_instruction(
         payload=payload_for_attachments,
         db=db,
         user=user,
+        reuse_session_extracted_context=resume_active,
     )
     instruction_with_context = instruction
+    instruction_segments: dict[str, int] = {"user_instruction": len(instruction)}
     if attachment_context:
         instruction_with_context = f"{instruction}\n\n{attachment_context}"
+        instruction_segments["attachment_context"] = len(attachment_context)
+    intent_flags = {
+        "execution_intent": False,
+        "execution_kickoff_intent": False,
+        "project_creation_intent": False,
+        "project_knowledge_lookup_intent": False,
+        "grounded_answer_required": False,
+        "workflow_scope": "unknown",
+        "execution_mode": "unknown",
+        "deploy_requested": False,
+        "docker_compose_requested": False,
+        "requested_port": None,
+        "code_review_required": False,
+        "project_name_provided": False,
+        "task_completion_requested": False,
+    }
+    mandate_text = ""
+    intent_flags = _classify_chat_instruction_intents(
+        instruction=instruction,
+        workspace_id=payload.workspace_id,
+        project_id=payload.project_id,
+        session_id=payload.session_id,
+        actor_user_id=user.id,
+    )
+    intent_flags, knowledge_query_normalization = _augment_chat_intents_with_knowledge_lookup(
+        instruction=instruction,
+        workspace_id=payload.workspace_id,
+        project_id=payload.project_id,
+        session_id=payload.session_id,
+        actor_user_id=user.id,
+        intent_flags=intent_flags,
+    )
+    if payload.allow_mutations and bool(intent_flags.get("execution_intent")) and str(payload.project_id or "").strip():
+        mandate_text = _build_execution_intent_mandate()
+        instruction_with_context = f"{instruction_with_context}\n\n{mandate_text}"
+        instruction_segments["intent_mandate"] = len(mandate_text)
+    knowledge_context, knowledge_usage = _maybe_build_chat_project_knowledge_context(
+        instruction=instruction,
+        workspace_id=payload.workspace_id,
+        project_id=payload.project_id,
+        session_id=payload.session_id,
+        actor_user_id=user.id,
+        intent_flags=intent_flags,
+        query_normalization=knowledge_query_normalization,
+    )
+    if knowledge_context:
+        instruction_with_context = f"{instruction_with_context}\n\n{knowledge_context}"
+        instruction_segments["project_knowledge_context"] = len(knowledge_context)
+    usage_metadata: dict[str, object] = {"prompt_instruction_segments": instruction_segments}
+    usage_metadata.update(knowledge_usage)
     if resume_active:
         # For resumed Codex threads, avoid resending stitched history on every turn.
         # Instead, inject only small fresh deltas from other project chat sessions so stale
@@ -1089,7 +2492,38 @@ def _prepare_chat_instruction(
             project_id=payload.project_id,
             session_id=payload.session_id,
         )
-        cross_session_updates_text = _compose_cross_session_updates_text(cross_session_updates)
+        already_sent_update_ids_list = _load_sent_cross_session_update_ids(
+            db=db,
+            user=user,
+            workspace_id=payload.workspace_id,
+            session_id=payload.session_id,
+        )
+        already_sent_update_ids = set(already_sent_update_ids_list)
+        if already_sent_update_ids_list:
+            # Preserve dedupe memory across turns even when there are no new
+            # cross-session updates in the current turn.
+            usage_metadata["sent_cross_session_update_ids"] = already_sent_update_ids_list[-160:]
+        cross_session_updates_filtered = [
+            item
+            for item in cross_session_updates
+            if str(item.get("update_id") or "").strip() not in already_sent_update_ids
+        ]
+        cross_session_updates_text = _compose_cross_session_updates_text(cross_session_updates_filtered)
+        if cross_session_updates_text:
+            instruction_segments["cross_session_updates"] = len(cross_session_updates_text)
+        if cross_session_updates_filtered:
+            combined_ids = [
+                *list(already_sent_update_ids),
+                *[str(item.get("update_id") or "").strip() for item in cross_session_updates_filtered],
+            ]
+            deduped_ids: list[str] = []
+            seen_ids: set[str] = set()
+            for update_id in combined_ids:
+                if not update_id or update_id in seen_ids:
+                    continue
+                seen_ids.add(update_id)
+                deduped_ids.append(update_id)
+            usage_metadata["sent_cross_session_update_ids"] = deduped_ids[-160:]
         effective_instruction = (
             f"{instruction_with_context}\n\n{cross_session_updates_text}"
             if cross_session_updates_text
@@ -1097,7 +2531,108 @@ def _prepare_chat_instruction(
         )
     else:
         effective_instruction = _compose_chat_instruction(instruction_with_context, compacted_history)
-    return effective_instruction, compacted_history, False, prepared_attachment_refs, prepared_session_attachment_refs
+        history_stitch_chars = max(0, len(effective_instruction) - len(instruction_with_context))
+        if history_stitch_chars > 0:
+            instruction_segments["history_stitch"] = history_stitch_chars
+    return (
+        effective_instruction,
+        compacted_history,
+        False,
+        prepared_attachment_refs,
+        prepared_session_attachment_refs,
+        intent_flags,
+        usage_metadata,
+    )
+
+
+@router.get("/api/agents/codex-auth")
+def codex_auth_status(
+    user: User = Depends(get_current_user),
+):
+    return get_codex_auth_status(user.id)
+
+
+@router.post("/api/agents/codex-auth/device/start")
+def codex_auth_device_start(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="codex")
+    try:
+        return start_device_auth_session(user.id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Failed to start Codex authentication.") from exc
+
+
+@router.post("/api/agents/codex-auth/device/cancel")
+def codex_auth_device_cancel(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="codex")
+    return cancel_device_auth_session(user.id)
+
+
+@router.delete("/api/agents/codex-auth/override")
+def codex_auth_override_delete(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="codex")
+    return delete_system_override_auth(user.id)
+
+
+@router.get("/api/agents/claude-auth")
+def claude_auth_status(
+    user: User = Depends(get_current_user),
+):
+    return get_claude_auth_status(user.id)
+
+
+@router.post("/api/agents/claude-auth/device/start")
+def claude_auth_device_start(
+    payload: dict[str, object] | None = Body(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="claude")
+    try:
+        login_method = str((payload or {}).get("login_method") or "").strip() or None
+        return start_claude_device_auth_session(user.id, login_method=login_method)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Failed to start Claude authentication.") from exc
+
+
+@router.post("/api/agents/claude-auth/device/cancel")
+def claude_auth_device_cancel(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="claude")
+    return cancel_claude_device_auth_session(user.id)
+
+
+@router.post("/api/agents/claude-auth/device/submit")
+def claude_auth_device_submit(
+    payload: dict[str, object] | None = Body(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="claude")
+    try:
+        code = str((payload or {}).get("code") or "").strip()
+        return submit_claude_device_auth_code(code, user.id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Failed to submit Claude authentication code.") from exc
+
+
+@router.delete("/api/agents/claude-auth/override")
+def claude_auth_override_delete(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="claude")
+    return delete_claude_system_override_auth(user.id)
 
 
 @router.post("/api/agents/chat")
@@ -1108,21 +2643,79 @@ def agent_chat(
     command_id: str | None = Depends(get_command_id),
 ):
     ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
-    model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
-    mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
     session_id = _resolve_chat_session_id(payload.session_id)
+    effective_project_id = _resolve_effective_chat_project_id(
+        db=db,
+        workspace_id=payload.workspace_id,
+        user_id=user.id,
+        project_id=payload.project_id,
+        session_id=session_id,
+        instruction=payload.instruction,
+    )
+    mcp_servers = _normalize_chat_mcp_servers(
+        payload.mcp_servers,
+        project_id=effective_project_id,
+    )
+    model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
+    execution_provider = resolve_execution_provider(model)
+    if resolve_provider_effective_auth_source(execution_provider) == "none":
+        alternate_provider = "claude" if execution_provider == "codex" else "codex"
+        if resolve_provider_effective_auth_source(alternate_provider) == "none":
+            alternate_provider = None
+        attachment_refs = [item.model_dump() for item in payload.attachment_refs or []]
+        session_attachment_refs = [item.model_dump() for item in payload.session_attachment_refs or []]
+        ChatApplicationService(
+            db,
+            user,
+            command_id=_command_id_with_suffix(command_id, "chat-user"),
+        ).append_user_message(
+            AppendUserMessagePayload(
+                workspace_id=payload.workspace_id,
+                project_id=effective_project_id,
+                session_id=session_id,
+                message_id=None,
+                content=(payload.instruction or "").strip(),
+                usage={},
+                mcp_servers=mcp_servers,
+                attachment_refs=attachment_refs,
+                session_attachment_refs=session_attachment_refs,
+            )
+        )
+        response = _build_auth_required_response(
+            session_id=session_id,
+            provider=execution_provider,
+            alternate_provider=alternate_provider,
+        )
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=effective_project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=_assistant_text(
+                str(response.get("summary") or ""),
+                str(response.get("comment") or ""),
+            ),
+            usage={},
+            codex_session_id=None,
+        )
+        return response
     existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
         db=db,
         workspace_id=payload.workspace_id,
         session_id=session_id,
     )
-    payload_with_session = payload.model_copy(update={"session_id": session_id})
+    payload_with_session = payload.model_copy(update={"session_id": session_id, "project_id": effective_project_id})
     (
         effective_instruction,
         _,
         compact_only,
         prepared_attachment_refs,
         prepared_session_attachment_refs,
+        intent_flags,
+        chat_usage_metadata,
     ) = _prepare_chat_instruction(
         payload=payload_with_session,
         db=db,
@@ -1143,15 +2736,43 @@ def agent_chat(
     ).append_user_message(
         AppendUserMessagePayload(
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             session_id=session_id,
             message_id=None,
             content=(payload.instruction or "").strip(),
+            usage={"intent_flags": intent_flags},
             mcp_servers=mcp_servers,
             attachment_refs=attachment_refs,
             session_attachment_refs=session_attachment_refs,
         )
     )
+
+    if _should_prompt_for_project_setup_name(intent_flags=intent_flags, project_id=effective_project_id):
+        summary = _PROJECT_SETUP_STARTER_NEXT_QUESTION
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=effective_project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=summary,
+            usage={},
+            codex_session_id=None,
+        )
+        return {
+            "ok": True,
+            "action": "comment",
+            "summary": summary,
+            "comment": None,
+            "session_id": session_id,
+            "codex_session_id": None,
+            "usage": None,
+            "resume_attempted": False,
+            "resume_succeeded": False,
+            "resume_fallback_used": False,
+        }
 
     if compact_only:
         _persist_assistant_message_with_links(
@@ -1159,11 +2780,11 @@ def agent_chat(
             user=user,
             command_id=command_id,
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             session_id=session_id,
             mcp_servers=mcp_servers,
             content=effective_instruction,
-            usage={},
+            usage=dict(chat_usage_metadata or {}),
             codex_session_id=None,
         )
         return {
@@ -1179,17 +2800,68 @@ def agent_chat(
             "resume_fallback_used": False,
         }
 
-    description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={payload.project_id or ''}"
+    kickoff_result = plugin_api_policy.maybe_dispatch_execution_kickoff(
+        db=db,
+        user=user,
+        workspace_id=payload.workspace_id,
+        project_id=effective_project_id,
+        intent_flags=intent_flags,
+        allow_mutations=bool(payload.allow_mutations),
+        command_id=command_id,
+        promote_plugin_policy_to_execution_mode_if_needed=_promote_plugin_policy_to_execution_mode_if_needed,
+        build_team_lead_kickoff_instruction=_build_team_lead_kickoff_instruction,
+        command_id_with_suffix=_command_id_with_suffix,
+    )
+    if bool(payload.allow_mutations) and str(effective_project_id or "").strip():
+        try:
+            _sync_plugin_runtime_target_if_needed(
+                db=db,
+                user=user,
+                workspace_id=payload.workspace_id,
+                project_id=str(effective_project_id),
+                command_id=command_id,
+            )
+        except Exception:
+            logger.exception("Failed to sync plugin runtime deploy target for project %s", effective_project_id)
+    if kickoff_result is not None:
+        summary = str(kickoff_result.get("summary") or "").strip() or "Team Mode kickoff dispatched."
+        comment = str(kickoff_result.get("comment") or "").strip() or None
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=effective_project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=_assistant_text(summary, comment),
+            usage={},
+            codex_session_id=None,
+        )
+        return {
+            "ok": bool(kickoff_result.get("ok")),
+            "action": "comment",
+            "summary": summary,
+            "comment": comment,
+            "session_id": session_id,
+            "codex_session_id": None,
+            "usage": None,
+            "resume_attempted": False,
+            "resume_succeeded": False,
+            "resume_fallback_used": False,
+        }
+
+    description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={effective_project_id or ''}"
     run_started_at = datetime.now(timezone.utc)
     try:
         outcome = execute_task_automation(
             task_id="",
             title="General Codex Chat",
             description=description,
-            status="To do",
+            status="To Do",
             instruction=effective_instruction,
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             chat_session_id=session_id,
             codex_session_id=existing_codex_session_id,
             actor_user_id=user.id,
@@ -1197,26 +2869,55 @@ def agent_chat(
             mcp_servers=mcp_servers,
             model=model,
             reasoning_effort=reasoning_effort,
+            prompt_instruction_segments=(
+                chat_usage_metadata.get("prompt_instruction_segments")
+                if isinstance(chat_usage_metadata, dict)
+                else None
+            ),
             timeout_seconds=0,
         )
+        ok_by_contract, final_summary, final_comment = _apply_execution_evidence_contract(
+            db=db,
+            user_id=user.id,
+            project_id=effective_project_id,
+            execution_intent=bool(intent_flags.get("execution_intent")),
+            allow_mutations=bool(payload.allow_mutations),
+            run_started_at=run_started_at,
+            summary=outcome.summary,
+            comment=outcome.comment,
+        )
+        if bool(payload.allow_mutations) and str(effective_project_id or "").strip():
+            try:
+                _sync_plugin_runtime_target_if_needed(
+                    db=db,
+                    user=user,
+                    workspace_id=payload.workspace_id,
+                    project_id=str(effective_project_id),
+                    command_id=command_id,
+                )
+            except Exception:
+                logger.exception("Failed to sync plugin runtime deploy target for project %s", effective_project_id)
         _persist_assistant_message_with_links(
             db=db,
             user=user,
             command_id=command_id,
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             session_id=session_id,
             mcp_servers=mcp_servers,
-            content=_assistant_text(outcome.summary, outcome.comment),
-            usage=_build_usage_with_resume_metadata(outcome),
+            content=_assistant_text(final_summary, final_comment),
+            usage=_build_usage_with_resume_metadata(
+                outcome,
+                extra_usage=(chat_usage_metadata if isinstance(chat_usage_metadata, dict) else None),
+            ),
             codex_session_id=outcome.codex_session_id,
             run_started_at=run_started_at,
         )
         return {
-            "ok": True,
+            "ok": bool(ok_by_contract),
             "action": outcome.action,
-            "summary": outcome.summary,
-            "comment": outcome.comment,
+            "summary": final_summary,
+            "comment": final_comment,
             "session_id": session_id,
             "codex_session_id": outcome.codex_session_id,
             "usage": outcome.usage,
@@ -1226,13 +2927,13 @@ def agent_chat(
         }
     except TimeoutError:
         timeout_summary = _chat_timeout_summary()
-        timeout_comment = "Try a narrower request (e.g. one project at a time) or run again."
+        timeout_comment = _build_chat_timeout_comment()
         _persist_assistant_message_with_links(
             db=db,
             user=user,
             command_id=command_id,
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             session_id=session_id,
             mcp_servers=mcp_servers,
             content=_assistant_text(timeout_summary, timeout_comment),
@@ -1254,27 +2955,25 @@ def agent_chat(
         }
     except Exception as exc:
         # Avoid bubbling internal exceptions to the client as 500 errors.
-        msg = str(exc)
-        error_summary = "Codex failed to complete the request."
-        error_comment = msg[:500]
+        mapped_ok, mapped_summary, mapped_comment = _map_chat_exception_to_response(exc)
         _persist_assistant_message_with_links(
             db=db,
             user=user,
             command_id=command_id,
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             session_id=session_id,
             mcp_servers=mcp_servers,
-            content=_assistant_text(error_summary, error_comment),
+            content=_assistant_text(mapped_summary, mapped_comment),
             usage={},
             codex_session_id=None,
             run_started_at=run_started_at,
         )
         return {
-            "ok": False,
+            "ok": bool(mapped_ok),
             "action": "comment",
-            "summary": error_summary,
-            "comment": error_comment,
+            "summary": mapped_summary,
+            "comment": mapped_comment,
             "session_id": session_id,
             "codex_session_id": None,
             "usage": None,
@@ -1287,55 +2986,156 @@ def agent_chat(
 @router.post("/api/agents/chat/stream")
 def agent_chat_stream(
     payload: AgentChatRun,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user_detached),
     command_id: str | None = Depends(get_command_id),
 ):
-    ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
-    model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
-    mcp_servers = _normalize_chat_mcp_servers(payload.mcp_servers)
     session_id = _resolve_chat_session_id(payload.session_id)
-    existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
-        db=db,
-        workspace_id=payload.workspace_id,
-        session_id=session_id,
-    )
-    payload_with_session = payload.model_copy(update={"session_id": session_id})
-    (
-        effective_instruction,
-        _,
-        compact_only,
-        prepared_attachment_refs,
-        prepared_session_attachment_refs,
-    ) = _prepare_chat_instruction(
-        payload=payload_with_session,
-        db=db,
-        user=user,
-        resume_codex_session_id=existing_codex_session_id,
-        resume_last_succeeded=resume_last_succeeded,
-    )
-
-    attachment_refs = prepared_attachment_refs or [item.model_dump() for item in payload.attachment_refs or []]
-    session_attachment_refs = (
-        prepared_session_attachment_refs
-        or [item.model_dump() for item in payload.session_attachment_refs or []]
-    )
-    ChatApplicationService(
-        db,
-        user,
-        command_id=_command_id_with_suffix(command_id, "chat-user"),
-    ).append_user_message(
-        AppendUserMessagePayload(
+    with SessionLocal() as db:
+        ensure_role(db, payload.workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+        effective_project_id = _resolve_effective_chat_project_id(
+            db=db,
             workspace_id=payload.workspace_id,
+            user_id=user.id,
             project_id=payload.project_id,
             session_id=session_id,
-            message_id=None,
-            content=(payload.instruction or "").strip(),
-            mcp_servers=mcp_servers,
-            attachment_refs=attachment_refs,
-            session_attachment_refs=session_attachment_refs,
+            instruction=payload.instruction,
         )
+    mcp_servers = _normalize_chat_mcp_servers(
+        payload.mcp_servers,
+        project_id=effective_project_id,
     )
+    stream_headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
+    execution_provider = resolve_execution_provider(model)
+    if resolve_provider_effective_auth_source(execution_provider) == "none":
+        alternate_provider = "claude" if execution_provider == "codex" else "codex"
+        if resolve_provider_effective_auth_source(alternate_provider) == "none":
+            alternate_provider = None
+        attachment_refs = [item.model_dump() for item in payload.attachment_refs or []]
+        session_attachment_refs = [item.model_dump() for item in payload.session_attachment_refs or []]
+        ChatApplicationService(
+            db,
+            user,
+            command_id=_command_id_with_suffix(command_id, "chat-user"),
+        ).append_user_message(
+            AppendUserMessagePayload(
+                workspace_id=payload.workspace_id,
+                project_id=effective_project_id,
+                session_id=session_id,
+                message_id=None,
+                content=(payload.instruction or "").strip(),
+                usage={},
+                mcp_servers=mcp_servers,
+                attachment_refs=attachment_refs,
+                session_attachment_refs=session_attachment_refs,
+            )
+        )
+        response = _build_auth_required_response(
+            session_id=session_id,
+            provider=execution_provider,
+            alternate_provider=alternate_provider,
+        )
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=effective_project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=_assistant_text(
+                str(response.get("summary") or ""),
+                str(response.get("comment") or ""),
+            ),
+            usage={},
+            codex_session_id=None,
+        )
+
+        def _auth_required_stream():
+            yield json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
+
+        return StreamingResponse(_auth_required_stream(), media_type="application/x-ndjson", headers=stream_headers)
+    with SessionLocal() as db:
+        existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
+            db=db,
+            workspace_id=payload.workspace_id,
+            session_id=session_id,
+        )
+        payload_with_session = payload.model_copy(update={"session_id": session_id, "project_id": effective_project_id})
+        (
+            effective_instruction,
+            _,
+            compact_only,
+            prepared_attachment_refs,
+            prepared_session_attachment_refs,
+            intent_flags,
+            chat_usage_metadata,
+        ) = _prepare_chat_instruction(
+            payload=payload_with_session,
+            db=db,
+            user=user,
+            resume_codex_session_id=existing_codex_session_id,
+            resume_last_succeeded=resume_last_succeeded,
+        )
+
+        attachment_refs = prepared_attachment_refs or [item.model_dump() for item in payload.attachment_refs or []]
+        session_attachment_refs = (
+            prepared_session_attachment_refs
+            or [item.model_dump() for item in payload.session_attachment_refs or []]
+        )
+        ChatApplicationService(
+            db,
+            user,
+            command_id=_command_id_with_suffix(command_id, "chat-user"),
+        ).append_user_message(
+            AppendUserMessagePayload(
+                workspace_id=payload.workspace_id,
+                project_id=effective_project_id,
+                session_id=session_id,
+                message_id=None,
+                content=(payload.instruction or "").strip(),
+                usage={"intent_flags": intent_flags},
+                mcp_servers=mcp_servers,
+                attachment_refs=attachment_refs,
+                session_attachment_refs=session_attachment_refs,
+            )
+        )
+
+    if _should_prompt_for_project_setup_name(intent_flags=intent_flags, project_id=effective_project_id):
+        summary = _PROJECT_SETUP_STARTER_NEXT_QUESTION
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=effective_project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=summary,
+            usage={},
+            codex_session_id=None,
+        )
+        starter_response = {
+            "ok": True,
+            "action": "comment",
+            "summary": summary,
+            "comment": None,
+            "session_id": session_id,
+            "codex_session_id": None,
+            "usage": None,
+            "resume_attempted": False,
+            "resume_succeeded": False,
+            "resume_fallback_used": False,
+        }
+
+        def _starter_stream():
+            yield json.dumps({"type": "final", "response": starter_response}, ensure_ascii=True) + "\n"
+
+        return StreamingResponse(_starter_stream(), media_type="application/x-ndjson", headers=stream_headers)
 
     if compact_only:
         _persist_assistant_message_with_links(
@@ -1343,11 +3143,11 @@ def agent_chat_stream(
             user=user,
             command_id=command_id,
             workspace_id=payload.workspace_id,
-            project_id=payload.project_id,
+            project_id=effective_project_id,
             session_id=session_id,
             mcp_servers=mcp_servers,
             content=effective_instruction,
-            usage={},
+            usage=dict(chat_usage_metadata or {}),
             codex_session_id=None,
         )
         compact_response = {
@@ -1366,16 +3166,97 @@ def agent_chat_stream(
         def _compact_stream():
             yield json.dumps({"type": "final", "response": compact_response}, ensure_ascii=True) + "\n"
 
-        return StreamingResponse(_compact_stream(), media_type="application/x-ndjson")
+        return StreamingResponse(_compact_stream(), media_type="application/x-ndjson", headers=stream_headers)
 
-    description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={payload.project_id or ''}"
+    with SessionLocal() as db:
+        kickoff_result = plugin_api_policy.maybe_dispatch_execution_kickoff(
+            db=db,
+            user=user,
+            workspace_id=payload.workspace_id,
+            project_id=effective_project_id,
+            intent_flags=intent_flags,
+            allow_mutations=bool(payload.allow_mutations),
+            command_id=command_id,
+            promote_plugin_policy_to_execution_mode_if_needed=_promote_plugin_policy_to_execution_mode_if_needed,
+            build_team_lead_kickoff_instruction=_build_team_lead_kickoff_instruction,
+            command_id_with_suffix=_command_id_with_suffix,
+        )
+    if kickoff_result is not None:
+        summary = str(kickoff_result.get("summary") or "").strip() or "Team Mode kickoff dispatched."
+        comment = str(kickoff_result.get("comment") or "").strip() or None
+        _persist_assistant_message_with_links(
+            db=db,
+            user=user,
+            command_id=command_id,
+            workspace_id=payload.workspace_id,
+            project_id=effective_project_id,
+            session_id=session_id,
+            mcp_servers=mcp_servers,
+            content=_assistant_text(summary, comment),
+            usage={},
+            codex_session_id=None,
+        )
+        kickoff_response = {
+            "ok": bool(kickoff_result.get("ok")),
+            "action": "comment",
+            "summary": summary,
+            "comment": comment,
+            "session_id": session_id,
+            "codex_session_id": None,
+            "usage": None,
+            "resume_attempted": False,
+            "resume_succeeded": False,
+            "resume_fallback_used": False,
+        }
+
+        def _kickoff_stream():
+            yield json.dumps({"type": "final", "response": kickoff_response}, ensure_ascii=True) + "\n"
+
+        return StreamingResponse(_kickoff_stream(), media_type="application/x-ndjson", headers=stream_headers)
+
+    description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={effective_project_id or ''}"
     run_started_at = datetime.now(timezone.utc)
+    stream_key = _chat_stream_key(workspace_id=payload.workspace_id, session_id=session_id)
+    run_id = _create_chat_stream_run(
+        stream_key=stream_key,
+        preferred_run_id=str(command_id or "").strip() or None,
+    )
+    _set_chat_stream_stop_requested(stream_key=stream_key, value=False)
+    cancel_event = _register_chat_stream_cancel_event(stream_key=stream_key, run_id=run_id)
 
     def _stream() -> object:
-        event_queue: queue.Queue[dict[str, object] | None] = queue.Queue()
+        subscriber_queue, replay_events, _ = _subscribe_chat_stream_run(
+            stream_key=stream_key,
+            run_id=run_id,
+            since_seq=0,
+        )
+        done_event = threading.Event()
+        outcome_holder: dict[str, object] = {}
+        error_holder: dict[str, Exception] = {}
+        finalize_lock = threading.Lock()
+        finalized_response: dict[str, object] = {}
+        streamed_assistant_text_parts: list[str] = []
+        streamed_parts_lock = threading.Lock()
+
+        _publish_chat_stream_event(
+            stream_key=stream_key,
+            event={"type": "stream_run", "run_id": run_id},
+        )
+        _publish_chat_stream_event(
+            stream_key=stream_key,
+            event={"type": "status", "message": "Agent started processing the request."},
+        )
 
         def _on_event(event: dict[str, object]) -> None:
-            event_queue.put(event)
+            if cancel_event.is_set() or _is_chat_stream_stop_requested(stream_key=stream_key):
+                return
+            item_type = str(event.get("type") or "").strip().lower()
+            if item_type == "assistant_text":
+                delta = str(event.get("delta") or "")
+                if delta:
+                    with streamed_parts_lock:
+                        streamed_assistant_text_parts.append(delta)
+            _publish_chat_stream_event(stream_key=stream_key, event=dict(event))
 
         def _worker() -> None:
             try:
@@ -1383,10 +3264,10 @@ def agent_chat_stream(
                     task_id="",
                     title="General Codex Chat",
                     description=description,
-                    status="To do",
+                    status="To Do",
                     instruction=effective_instruction,
                     workspace_id=payload.workspace_id,
-                    project_id=payload.project_id,
+                    project_id=effective_project_id,
                     chat_session_id=session_id,
                     codex_session_id=existing_codex_session_id,
                     actor_user_id=user.id,
@@ -1395,92 +3276,289 @@ def agent_chat_stream(
                     on_event=_on_event,
                     model=model,
                     reasoning_effort=reasoning_effort,
+                    prompt_instruction_segments=(
+                        chat_usage_metadata.get("prompt_instruction_segments")
+                        if isinstance(chat_usage_metadata, dict)
+                        else None
+                    ),
                     timeout_seconds=0,
+                    stream_plain_text=True,
+                    cancel_event=cancel_event,
                 )
-                final_payload = {
-                    "ok": True,
-                    "action": outcome.action,
-                    "summary": outcome.summary,
-                    "comment": outcome.comment,
-                    "session_id": session_id,
-                    "codex_session_id": outcome.codex_session_id,
-                    "usage": outcome.usage,
-                    "resume_attempted": bool(outcome.resume_attempted),
-                    "resume_succeeded": bool(outcome.resume_succeeded),
-                    "resume_fallback_used": bool(outcome.resume_fallback_used),
-                }
-                event_queue.put({"type": "final", "response": final_payload})
+                outcome_holder["value"] = outcome
             except TimeoutError:
-                timeout_payload = {
-                    "ok": False,
-                    "action": "comment",
-                    "summary": _chat_timeout_summary(),
-                    "comment": "Try a narrower request (e.g. one project at a time) or run again.",
-                    "session_id": session_id,
-                    "codex_session_id": None,
-                    "usage": None,
-                    "resume_attempted": False,
-                    "resume_succeeded": False,
-                    "resume_fallback_used": False,
-                }
-                event_queue.put({"type": "final", "response": timeout_payload})
+                error_holder["value"] = TimeoutError(_chat_timeout_summary())
             except Exception as exc:
-                error_payload = {
-                    "ok": False,
-                    "action": "comment",
-                    "summary": "Codex failed to complete the request.",
-                    "comment": str(exc)[:500],
-                    "session_id": session_id,
-                    "codex_session_id": None,
-                    "usage": None,
-                    "resume_attempted": False,
-                    "resume_succeeded": False,
-                    "resume_fallback_used": False,
-                }
-                event_queue.put({"type": "final", "response": error_payload})
+                logger.exception("Agent chat stream worker failed.")
+                error_holder["value"] = exc
             finally:
-                event_queue.put(None)
+                done_event.set()
+
+        def _finalize_once() -> dict[str, object]:
+            with finalize_lock:
+                existing = finalized_response.get("value")
+                if isinstance(existing, dict):
+                    return existing
+
+                if "value" in error_holder:
+                    exc = error_holder["value"]
+                    if isinstance(exc, TimeoutError):
+                        response = {
+                            "ok": False,
+                            "action": "comment",
+                            "summary": _chat_timeout_summary(),
+                            "comment": _build_chat_timeout_comment(),
+                            "session_id": session_id,
+                            "codex_session_id": None,
+                            "usage": None,
+                            "resume_attempted": False,
+                            "resume_succeeded": False,
+                            "resume_fallback_used": False,
+                        }
+                    else:
+                        mapped_ok, mapped_summary, mapped_comment = _map_chat_exception_to_response(exc)
+                        response = {
+                            "ok": bool(mapped_ok),
+                            "action": "comment",
+                            "summary": mapped_summary,
+                            "comment": mapped_comment,
+                            "session_id": session_id,
+                            "codex_session_id": None,
+                            "usage": None,
+                            "resume_attempted": False,
+                            "resume_succeeded": False,
+                            "resume_fallback_used": False,
+                            "_force_summary_only": bool(mapped_ok and mapped_comment is None),
+                        }
+                else:
+                    outcome = outcome_holder.get("value")
+                    if outcome is None:
+                        response = {
+                            "ok": False,
+                            "action": "comment",
+                            "summary": _build_chat_error_summary(),
+                            "comment": "Missing automation outcome.",
+                            "session_id": session_id,
+                            "codex_session_id": None,
+                            "usage": None,
+                            "resume_attempted": False,
+                            "resume_succeeded": False,
+                            "resume_fallback_used": False,
+                        }
+                    else:
+                        outcome_obj = outcome  # type: ignore[assignment]
+                        response = {
+                            "ok": True,
+                            "action": getattr(outcome_obj, "action", "comment"),
+                            "summary": getattr(outcome_obj, "summary", ""),
+                            "comment": getattr(outcome_obj, "comment", ""),
+                            "session_id": session_id,
+                            "codex_session_id": getattr(outcome_obj, "codex_session_id", None),
+                            "usage": getattr(outcome_obj, "usage", None),
+                            "resume_attempted": bool(getattr(outcome_obj, "resume_attempted", False)),
+                            "resume_succeeded": bool(getattr(outcome_obj, "resume_succeeded", False)),
+                            "resume_fallback_used": bool(getattr(outcome_obj, "resume_fallback_used", False)),
+                        }
+
+                if cancel_event.is_set() or _is_chat_stream_stop_requested(stream_key=stream_key):
+                    response = {
+                        "ok": True,
+                        "action": "comment",
+                        "summary": "Stopped.",
+                        "comment": "Run cancelled by user.",
+                        "session_id": session_id,
+                        "codex_session_id": None,
+                        "usage": None,
+                        "resume_attempted": False,
+                        "resume_succeeded": False,
+                        "resume_fallback_used": False,
+                    }
+
+                if isinstance(chat_usage_metadata, dict):
+                    merged_usage = {
+                        **(response.get("usage") if isinstance(response.get("usage"), dict) else {}),
+                        **chat_usage_metadata,
+                    }
+                    response["usage"] = merged_usage
+
+                ok_by_contract, final_summary, final_comment = _apply_execution_evidence_contract(
+                    db=db,
+                    user_id=user.id,
+                    project_id=effective_project_id,
+                    execution_intent=bool(intent_flags.get("execution_intent")),
+                    allow_mutations=bool(payload.allow_mutations),
+                    run_started_at=run_started_at,
+                    summary=str(response.get("summary") or ""),
+                    comment=str(response.get("comment") or "") or None,
+                )
+                response["ok"] = bool(ok_by_contract) and bool(response.get("ok"))
+                response["summary"] = final_summary
+                response["comment"] = final_comment
+
+                with streamed_parts_lock:
+                    assistant_content = "".join(streamed_assistant_text_parts).strip()
+                if bool(response.get("_force_summary_only")):
+                    assistant_content = str(response.get("summary") or "").strip()
+                if assistant_content and not bool(response.get("ok")):
+                    assistant_content = _assistant_text(
+                        assistant_content,
+                        _assistant_text(final_summary, str(final_comment or "")),
+                    )
+                elif not assistant_content:
+                    assistant_content = _assistant_text(
+                        final_summary,
+                        str(final_comment or ""),
+                    )
+
+                _persist_assistant_message_with_links(
+                    db=db,
+                    user=user,
+                    command_id=command_id,
+                    workspace_id=payload.workspace_id,
+                    project_id=effective_project_id,
+                    session_id=session_id,
+                    mcp_servers=mcp_servers,
+                    content=assistant_content,
+                    usage=(
+                        {
+                            **(response.get("usage") if isinstance(response.get("usage"), dict) else {}),
+                            "codex_resume_attempted": bool(response.get("resume_attempted")),
+                            "codex_resume_succeeded": bool(response.get("resume_succeeded")),
+                            "codex_resume_fallback_used": bool(response.get("resume_fallback_used")),
+                        }
+                    ),
+                    codex_session_id=str(response.get("codex_session_id") or "").strip() or None,
+                    run_started_at=run_started_at,
+                )
+
+                _publish_chat_stream_event(
+                    stream_key=stream_key,
+                    event={"type": "final", "response": response},
+                )
+                _finish_chat_stream_run(stream_key=stream_key)
+                _clear_chat_stream_cancel_event(stream_key=stream_key, run_id=run_id)
+                _set_chat_stream_stop_requested(stream_key=stream_key, value=False)
+                response.pop("_force_summary_only", None)
+                finalized_response["value"] = response
+                return response
+
+        def _background_finalize() -> None:
+            done_event.wait()
+            _finalize_once()
 
         worker = threading.Thread(target=_worker, daemon=True)
         worker.start()
-        streamed_assistant_text_parts: list[str] = []
+        finalizer = threading.Thread(target=_background_finalize, daemon=True)
+        finalizer.start()
 
-        while True:
-            item = event_queue.get()
-            if item is None:
-                break
-            item_type = str(item.get("type") or "").strip().lower()
-            if item_type == "assistant_text":
-                streamed_assistant_text_parts.append(str(item.get("delta") or ""))
-            if item_type == "final":
-                response = item.get("response")
-                if isinstance(response, dict):
-                    assistant_content = "".join(streamed_assistant_text_parts).strip()
-                    if not assistant_content:
-                        assistant_content = _assistant_text(
-                            str(response.get("summary") or ""),
-                            str(response.get("comment") or ""),
-                        )
-                    _persist_assistant_message_with_links(
-                        db=db,
-                        user=user,
-                        command_id=command_id,
-                        workspace_id=payload.workspace_id,
-                        project_id=payload.project_id,
-                        session_id=session_id,
-                        mcp_servers=mcp_servers,
-                        content=assistant_content,
-                        usage=(
-                            {
-                                **(response.get("usage") if isinstance(response.get("usage"), dict) else {}),
-                                "codex_resume_attempted": bool(response.get("resume_attempted")),
-                                "codex_resume_succeeded": bool(response.get("resume_succeeded")),
-                                "codex_resume_fallback_used": bool(response.get("resume_fallback_used")),
-                            }
-                        ),
-                        codex_session_id=str(response.get("codex_session_id") or "").strip() or None,
-                        run_started_at=run_started_at,
-                    )
-            yield json.dumps(item, ensure_ascii=True) + "\n"
+        try:
+            saw_final = False
+            for event in replay_events:
+                yield json.dumps(event, ensure_ascii=True) + "\n"
+                if str(event.get("type") or "").strip().lower() == "final":
+                    saw_final = True
+            while True:
+                try:
+                    event = subscriber_queue.get(timeout=0.25)
+                except queue.Empty:
+                    if done_event.is_set():
+                        break
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                yield json.dumps(event, ensure_ascii=True) + "\n"
+                if str(event.get("type") or "").strip().lower() == "final":
+                    saw_final = True
+                    break
+            response = _finalize_once()
+            if not saw_final and bool(response):
+                yield json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
+        finally:
+            _unsubscribe_chat_stream_run(stream_key=stream_key, subscriber_queue=subscriber_queue)
+            if done_event.is_set():
+                _clear_chat_stream_cancel_event(stream_key=stream_key, run_id=run_id)
+                _set_chat_stream_stop_requested(stream_key=stream_key, value=False)
 
-    return StreamingResponse(_stream(), media_type="application/x-ndjson")
+    return StreamingResponse(_stream(), media_type="application/x-ndjson", headers=stream_headers)
+
+
+@router.get("/api/agents/chat/stream")
+def resume_agent_chat_stream(
+    workspace_id: str,
+    session_id: str,
+    run_id: str,
+    since_seq: int = 0,
+    user: User = Depends(get_current_user_detached),
+):
+    with SessionLocal() as db:
+        ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    normalized_session_id = _resolve_chat_session_id(session_id)
+    stream_key = _chat_stream_key(workspace_id=workspace_id, session_id=normalized_session_id)
+    subscriber_queue, replay_events, done = _subscribe_chat_stream_run(
+        stream_key=stream_key,
+        run_id=run_id,
+        since_seq=since_seq,
+    )
+    if not replay_events and done:
+        raise HTTPException(status_code=404, detail="Chat stream run is not available")
+
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Accel-Buffering": "no",
+    }
+
+    def _stream():
+        try:
+            for event in replay_events:
+                yield json.dumps(event, ensure_ascii=True) + "\n"
+            if done:
+                return
+            while True:
+                try:
+                    event = subscriber_queue.get(timeout=0.5)
+                except queue.Empty:
+                    broker = _CHAT_STREAM_BROKER.current_state(key=stream_key)
+                    if not isinstance(broker, dict):
+                        break
+                    if str(broker.get("run_id") or "").strip() != str(run_id).strip():
+                        break
+                    if bool(broker.get("done")):
+                        break
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                yield json.dumps(event, ensure_ascii=True) + "\n"
+                if str(event.get("type") or "").strip().lower() == "final":
+                    break
+        finally:
+            _unsubscribe_chat_stream_run(stream_key=stream_key, subscriber_queue=subscriber_queue)
+
+    return StreamingResponse(_stream(), media_type="application/x-ndjson", headers=headers)
+
+
+@router.post("/api/agents/chat/stop")
+def stop_agent_chat_stream(
+    payload: dict[str, object] = Body(...),
+    user: User = Depends(get_current_user_detached),
+):
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    session_id = str(payload.get("session_id") or "").strip()
+    run_id = str(payload.get("run_id") or "").strip()
+    if not workspace_id or not session_id:
+        raise HTTPException(status_code=400, detail="workspace_id and session_id are required")
+    with SessionLocal() as db:
+        ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    stream_key = _chat_stream_key(workspace_id=workspace_id, session_id=_resolve_chat_session_id(session_id))
+    _set_chat_stream_stop_requested(stream_key=stream_key, value=True)
+    effective_run_id = run_id
+    if not effective_run_id:
+        state = _CHAT_STREAM_BROKER.current_state(key=stream_key)
+        if isinstance(state, dict):
+            effective_run_id = str(state.get("run_id") or "").strip()
+    cancelled = _request_chat_stream_cancel(stream_key=stream_key, run_id=effective_run_id)
+    if cancelled:
+        _publish_chat_stream_event(
+            stream_key=stream_key,
+            event={"type": "status", "message": "Stop requested."},
+        )
+    return {"ok": True, "cancel_requested": bool(cancelled), "run_id": effective_run_id}

@@ -1,7 +1,11 @@
-from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+import json
 
-from shared.core import get_current_user, get_db, load_events_after, metrics_snapshot
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.orm import Session
+from sqlalchemy import select
+
+from shared.core import ensure_project_access, ensure_role, get_current_user, get_db, load_events_after, metrics_snapshot
+from shared.models import ChatMessage, ChatSession, StoredEvent
 from shared.settings import (
     GRAPH_RAG_CANARY_PROJECT_IDS,
     GRAPH_RAG_CANARY_WORKSPACE_IDS,
@@ -95,4 +99,163 @@ def graph_rag_metrics(_user=Depends(get_current_user)):
             "workspace_ids": sorted(GRAPH_RAG_CANARY_WORKSPACE_IDS),
         },
         "slo_breaches": breaches,
+    }
+
+
+@router.get("/api/metrics/chat-prompt-segments")
+def chat_prompt_segment_metrics(
+    *,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+    workspace_id: str | None = Query(default=None),
+    project_id: str | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=5000),
+):
+    query = (
+        select(ChatMessage.usage_json)
+        .join(ChatSession, ChatMessage.session_id == ChatSession.id)
+        .where(
+            ChatMessage.role == "assistant",
+            ChatMessage.is_deleted == False,  # noqa: E712
+            ChatSession.created_by == user.id,
+            ChatSession.is_archived == False,  # noqa: E712
+        )
+        .order_by(ChatMessage.created_at.desc())
+        .limit(max(1, int(limit)))
+    )
+    if workspace_id:
+        query = query.where(ChatSession.workspace_id == str(workspace_id).strip())
+    if project_id:
+        query = query.where(ChatSession.project_id == str(project_id).strip())
+    rows = db.execute(query).all()
+
+    mode_counts: dict[str, int] = {"full": 0, "resume": 0}
+    segment_totals: dict[str, int] = {}
+    segment_presence_counts: dict[str, int] = {}
+    runs_analyzed = 0
+
+    for (usage_json_raw,) in rows:
+        raw = str(usage_json_raw or "").strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        prompt_mode = str(payload.get("prompt_mode") or "").strip().lower()
+        if prompt_mode in {"full", "resume"}:
+            mode_counts[prompt_mode] = int(mode_counts.get(prompt_mode, 0)) + 1
+        segment_chars = payload.get("prompt_segment_chars")
+        if not isinstance(segment_chars, dict):
+            continue
+        runs_analyzed += 1
+        for key_raw, value_raw in segment_chars.items():
+            key = str(key_raw or "").strip()
+            if not key:
+                continue
+            try:
+                value = max(0, int(value_raw))
+            except Exception:
+                continue
+            segment_totals[key] = int(segment_totals.get(key, 0)) + value
+            segment_presence_counts[key] = int(segment_presence_counts.get(key, 0)) + 1
+
+    segment_averages = {
+        key: int(round(total / max(1, segment_presence_counts.get(key, 1))))
+        for key, total in segment_totals.items()
+    }
+
+    return {
+        "runs_analyzed": runs_analyzed,
+        "runs_scanned": len(rows),
+        "prompt_mode_counts": mode_counts,
+        "segment_totals_chars": dict(sorted(segment_totals.items(), key=lambda item: item[1], reverse=True)),
+        "segment_avg_chars_when_present": dict(
+            sorted(segment_averages.items(), key=lambda item: item[1], reverse=True)
+        ),
+    }
+
+
+@router.get("/api/metrics/task-automation-prompt-segments")
+def task_automation_prompt_segment_metrics(
+    *,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+    workspace_id: str = Query(...),
+    project_id: str | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=5000),
+):
+    ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+    if project_id:
+        ensure_project_access(db, workspace_id, project_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+
+    query = (
+        select(StoredEvent.payload, StoredEvent.meta)
+        .where(
+            StoredEvent.aggregate_type == "Task",
+            StoredEvent.event_type == "TaskAutomationCompleted",
+        )
+        .order_by(StoredEvent.occurred_at.desc())
+        .limit(max(1, int(limit)))
+    )
+    rows = db.execute(query).all()
+
+    mode_counts: dict[str, int] = {"full": 0, "resume": 0}
+    segment_totals: dict[str, int] = {}
+    segment_presence_counts: dict[str, int] = {}
+    runs_analyzed = 0
+    runs_scanned = 0
+
+    for payload_raw, meta_raw in rows:
+        try:
+            meta = json.loads(str(meta_raw or "{}"))
+        except Exception:
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        if str(meta.get("workspace_id") or "").strip() != str(workspace_id).strip():
+            continue
+        if project_id and str(meta.get("project_id") or "").strip() != str(project_id).strip():
+            continue
+        runs_scanned += 1
+
+        try:
+            payload = json.loads(str(payload_raw or "{}"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        prompt_mode = str(payload.get("prompt_mode") or "").strip().lower()
+        if prompt_mode in {"full", "resume"}:
+            mode_counts[prompt_mode] = int(mode_counts.get(prompt_mode, 0)) + 1
+        segment_chars = payload.get("prompt_segment_chars")
+        if not isinstance(segment_chars, dict):
+            continue
+        runs_analyzed += 1
+        for key_raw, value_raw in segment_chars.items():
+            key = str(key_raw or "").strip()
+            if not key:
+                continue
+            try:
+                value = max(0, int(value_raw))
+            except Exception:
+                continue
+            segment_totals[key] = int(segment_totals.get(key, 0)) + value
+            segment_presence_counts[key] = int(segment_presence_counts.get(key, 0)) + 1
+
+    segment_averages = {
+        key: int(round(total / max(1, segment_presence_counts.get(key, 1))))
+        for key, total in segment_totals.items()
+    }
+
+    return {
+        "runs_analyzed": runs_analyzed,
+        "runs_scanned": runs_scanned,
+        "prompt_mode_counts": mode_counts,
+        "segment_totals_chars": dict(sorted(segment_totals.items(), key=lambda item: item[1], reverse=True)),
+        "segment_avg_chars_when_present": dict(
+            sorted(segment_averages.items(), key=lambda item: item[1], reverse=True)
+        ),
     }

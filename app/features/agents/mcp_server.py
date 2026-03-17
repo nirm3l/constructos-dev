@@ -4,6 +4,7 @@ import os
 from typing import Any
 
 from .gateway import build_mcp_gateway
+from shared.settings import AGENT_ENABLED_PLUGINS, MCP_AUTH_TOKEN
 
 MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED = True
 MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE = "KG_AND_VECTOR"
@@ -11,24 +12,35 @@ MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE = "METADATA_ONLY"
 
 TASK_CREATE_TOOL_DESCRIPTION = (
     "Create a task in a workspace/project. "
+    "For Team Mode, route via structured fields: assignee_id (project-member UUID) and assigned_agent_code (team slot). "
+    "Do not encode agent slot in labels/tags (tm.agent:* is deprecated). "
+    "Use tm.role:<Developer|QA|Lead> labels only for role semantics when needed. "
+    "Use agent slots already defined in the project's Team Mode configuration; avoid hardcoded mappings. "
+    "Keep titles neutral; do not encode role/agent in title. "
     "Set status to choose an initial task status at creation time. "
     "execution_triggers accepts JSON string, array, or object. "
+    "If execution_triggers includes non-manual triggers (status_change with scope='external' or schedule), "
+    "provide non-empty instruction in the same create call. "
     "For status watchers use kind='status_change' with scope='self' or scope='external'. "
     "Use selector.task_ids or source_task_ids to listen to specific source tasks. "
     "External without selector.task_ids listens to all source tasks in workspace scope; "
     "add selector.project_id to constrain to one project. "
     "status_change requires at least one to_statuses value. "
-    "For recurring schedules set recurring_rule with canonical format every:<number><m|h|d> (for example every:1m)."
+    'For recurring schedules set recurring_rule with canonical format every:<number><m|h|d> (for example every:1m), and set task_type="scheduled_instruction" with scheduled_instruction and scheduled_at_utc.'
 )
 
 TASK_UPDATE_TOOL_DESCRIPTION = (
     "Patch a task. Accepts the same fields as TaskPatch. "
+    "For Team Mode, update routing with assignee_id + assigned_agent_code (+ optional tm.role labels for role semantics), not by renaming titles. "
+    "Do not set tm.agent:* labels. "
+    "Use agent slots already defined in the project's Team Mode configuration; avoid hardcoded mappings. "
     "execution_triggers accepts JSON string, array, or object. "
+    "If patch.execution_triggers includes non-manual triggers (status_change with scope='external' or schedule), "
+    "include non-empty patch.instruction in the same patch call. "
     "For status watchers in patch.execution_triggers: "
     "kind='status_change', scope='self'|'external', match_mode='any'|'all', "
     "to_statuses (required), optional selector.task_ids/source_task_ids, and optional selector.project_id. "
-    "For recurring schedules set recurring_rule with canonical format every:<number><m|h|d> (for example every:1m), "
-    "then verify scheduled_at_utc and recurring_rule by reading the task."
+    'For recurring schedules set recurring_rule with canonical format every:<number><m|h|d> (for example every:1m), set patch.task_type="scheduled_instruction", and provide patch.scheduled_instruction plus patch.scheduled_at_utc; then verify scheduled_at_utc and recurring_rule by reading the task.'
 )
 
 THEME_TOGGLE_TOOL_DESCRIPTION = (
@@ -66,7 +78,25 @@ CREATE_PROJECT_TOOL_DESCRIPTION = (
     "Create a project in a workspace for manual/custom setup (no template). "
     "Use when required fields are known and template seeding is not requested. "
     "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
-    "chat_attachment_ingestion_mode=METADATA_ONLY."
+    "chat_attachment_ingestion_mode=METADATA_ONLY. "
+    "custom_statuses must be an array of strings (for example [\"To Do\",\"In Progress\",\"In Review\",\"Awaiting Decision\",\"Blocked\",\"Completed\"]). "
+    "automation_max_parallel_tasks sets per-project concurrent automation cap (default 4)."
+)
+
+UPDATE_PROJECT_TOOL_DESCRIPTION = (
+    "Patch a project in a workspace/project scope. "
+    "Use this to update project metadata and flags such as event_storming_enabled."
+)
+
+CREATE_PROJECT_RULE_TOOL_DESCRIPTION = (
+    "Create a project rule in a workspace/project. "
+    "Body is free-form project guidance text (Markdown or JSON)."
+)
+
+UPDATE_PROJECT_RULE_TOOL_DESCRIPTION = (
+    "Patch a project rule. Patch accepts only title and/or body. "
+    "Body is free-form project guidance text (Markdown or JSON). "
+    "If patch.body is sent as an object it will be JSON-serialized."
 )
 
 LIST_PROJECT_TEMPLATES_TOOL_DESCRIPTION = (
@@ -81,14 +111,78 @@ PREVIEW_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION = (
     "Preview project creation from a template without writing data. "
     "Use after parameters are known to validate what would be created. "
     "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
-    "chat_attachment_ingestion_mode=METADATA_ONLY."
+    "chat_attachment_ingestion_mode=METADATA_ONLY. "
+    "custom_statuses must be an array of strings when provided."
 )
 
 CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION = (
     "Create a project and seed specifications/tasks/rules from a project template. "
     "Recommended flow: list_project_templates -> get_project_template -> preview_project_from_template -> create_project_from_template. "
     "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
-    "chat_attachment_ingestion_mode=METADATA_ONLY."
+    "chat_attachment_ingestion_mode=METADATA_ONLY. "
+    "custom_statuses must be an array of strings when provided."
+)
+
+VERIFY_TEAM_MODE_WORKFLOW_TOOL_DESCRIPTION = (
+    "Verify Team Mode workflow wiring for a project (role coverage + required topology). "
+    "Use this before final success claims for Team Mode setup."
+)
+VERIFY_DELIVERY_WORKFLOW_TOOL_DESCRIPTION = (
+    "Verify delivery contract wiring for a project (Git evidence + QA artifacts). "
+    "Checks include repo_context_present, git_contract_ok, qa_has_verifiable_artifacts, "
+    "deploy_execution_evidence_present, and runtime_deploy_health_ok when required."
+)
+
+ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION = (
+    "[DEPRECATED] Legacy Team Mode setup fallback. "
+    "Use setup_project_orchestration for all new setup flows. "
+    "This tool remains for backward compatibility only."
+)
+
+SETUP_PROJECT_ORCHESTRATION_TOOL_DESCRIPTION = (
+    "Run staged project setup in one call with strict backend enforcement: "
+    "project create/resolve, plugin toggles, plugin config apply, optional Team Mode task seeding, and workflow verification. "
+    "Set kickoff_after_setup=true to dispatch Team Mode kickoff as part of the same call. "
+    "Supports Team Mode, Git Delivery, and Docker Compose setup while returning a stable per-step result contract. "
+    "For incomplete new-project inputs, this tool returns HTTP 422 with structured `missing_inputs` and `next_question`."
+)
+
+SEND_IN_APP_NOTIFICATION_TOOL_DESCRIPTION = (
+    "Create an in-app notification for a target user. "
+    "Use this when the user asks to send a direct in-app notification message. "
+    "The `message` field is Markdown content (CommonMark/GFM style) and can include links, emphasis, and lists. "
+    "Provide optional scope references (workspace/project/task/note/specification) to deep-link context."
+)
+
+GET_PROJECT_PLUGIN_CONFIG_TOOL_DESCRIPTION = (
+    "Get project plugin configuration for a plugin key (`team_mode`, `git_delivery`, `docker_compose`)."
+)
+
+VALIDATE_PROJECT_PLUGIN_CONFIG_TOOL_DESCRIPTION = (
+    "Validate draft project plugin config with strict schema and cross-field checks. "
+    "Returns blocking errors/warnings and compiled policy preview. "
+    "This tool does not accept command_id."
+)
+
+APPLY_PROJECT_PLUGIN_CONFIG_TOOL_DESCRIPTION = (
+    "Apply validated project plugin config with optimistic version check (`expected_version`). "
+    "Rejects invalid config. "
+    "This tool does not accept command_id."
+)
+
+SET_PROJECT_PLUGIN_ENABLED_TOOL_DESCRIPTION = (
+    "Enable or disable a project plugin (`team_mode`, `git_delivery`, `docker_compose`). "
+    "This tool does not accept command_id."
+)
+
+DIFF_PROJECT_PLUGIN_CONFIG_TOOL_DESCRIPTION = (
+    "Diff current vs draft project plugin config and compiled policy. "
+    "Returns structured JSON pointer changes plus blocking validation errors/warnings. "
+    "This tool does not accept command_id."
+)
+
+GET_PROJECT_CAPABILITIES_TOOL_DESCRIPTION = (
+    "Get derived project capabilities and plugin enablement snapshot for context/tool gating."
 )
 
 
@@ -100,7 +194,13 @@ def create_mcp():
 
     mcp = FastMCP(name="task-management-mcp")
     service = build_mcp_gateway()
-    default_tool_token = os.getenv("MCP_TOOL_AUTH_TOKEN", "").strip() or None
+    default_tool_token = str(MCP_AUTH_TOKEN or "").strip() or None
+    enabled_plugins = {str(item or "").strip().lower() for item in (AGENT_ENABLED_PLUGINS or []) if str(item or "").strip()}
+    if not enabled_plugins:
+        enabled_plugins = {"team_mode", "git_delivery", "docker_compose"}
+
+    def plugin_enabled(key: str) -> bool:
+        return str(key or "").strip().lower() in enabled_plugins
 
     @mcp.tool(description="List tasks in a workspace with optional filters.")
     def list_tasks(
@@ -366,6 +466,29 @@ def create_mcp():
             offset=offset,
         )
 
+    @mcp.tool(description="List project members in a workspace/project, including UUID user ids used for assignee_id.")
+    def list_project_members(
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None = None,
+        q: str | None = None,
+        role: str | None = None,
+        user_type: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.list_project_members(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            auth_token=auth_token,
+            q=q,
+            role=role,
+            user_type=user_type,
+            limit=limit,
+            offset=offset,
+        )
+
     @mcp.tool(description="List project skills in a workspace/project.")
     def list_project_skills(
         workspace_id: str,
@@ -379,6 +502,23 @@ def create_mcp():
         return service.list_project_skills(
             workspace_id=workspace_id,
             project_id=project_id,
+            auth_token=auth_token,
+            q=q,
+            limit=limit,
+            offset=offset,
+        )
+
+    @mcp.tool(description="List workspace skill catalog entries for a workspace.")
+    def list_workspace_skills(
+        workspace_id: str,
+        auth_token: str | None = None,
+        q: str | None = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.list_workspace_skills(
+            workspace_id=workspace_id,
             auth_token=auth_token,
             q=q,
             limit=limit,
@@ -453,6 +593,106 @@ def create_mcp():
     def get_project_skill(skill_id: str, auth_token: str | None = None) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
         return service.get_project_skill(skill_id=skill_id, auth_token=auth_token)
+
+    @mcp.tool(description=GET_PROJECT_PLUGIN_CONFIG_TOOL_DESCRIPTION)
+    def get_project_plugin_config(
+        project_id: str,
+        plugin_key: str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.get_project_plugin_config(
+            project_id=project_id,
+            plugin_key=plugin_key,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+        )
+
+    @mcp.tool(description=VALIDATE_PROJECT_PLUGIN_CONFIG_TOOL_DESCRIPTION)
+    def validate_project_plugin_config(
+        project_id: str,
+        plugin_key: str,
+        draft_config: dict[str, Any] | str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.validate_project_plugin_config(
+            project_id=project_id,
+            plugin_key=plugin_key,
+            draft_config=draft_config,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+        )
+
+    @mcp.tool(description=APPLY_PROJECT_PLUGIN_CONFIG_TOOL_DESCRIPTION)
+    def apply_project_plugin_config(
+        project_id: str,
+        plugin_key: str,
+        config: dict[str, Any] | str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+        expected_version: int | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.apply_project_plugin_config(
+            project_id=project_id,
+            plugin_key=plugin_key,
+            config=config,
+            workspace_id=workspace_id,
+            expected_version=expected_version,
+            enabled=enabled,
+            auth_token=auth_token,
+        )
+
+    @mcp.tool(description=SET_PROJECT_PLUGIN_ENABLED_TOOL_DESCRIPTION)
+    def set_project_plugin_enabled(
+        project_id: str,
+        plugin_key: str,
+        enabled: bool,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.set_project_plugin_enabled(
+            project_id=project_id,
+            plugin_key=plugin_key,
+            enabled=enabled,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+        )
+
+    @mcp.tool(description=DIFF_PROJECT_PLUGIN_CONFIG_TOOL_DESCRIPTION)
+    def diff_project_plugin_config(
+        project_id: str,
+        plugin_key: str,
+        draft_config: dict[str, Any] | str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.diff_project_plugin_config(
+            project_id=project_id,
+            plugin_key=plugin_key,
+            draft_config=draft_config,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+        )
+
+    @mcp.tool(description=GET_PROJECT_CAPABILITIES_TOOL_DESCRIPTION)
+    def get_project_capabilities(
+        project_id: str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.get_project_capabilities(
+            project_id=project_id,
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+        )
 
     @mcp.tool(description="Get one specification by id.")
     def get_specification(specification_id: str, auth_token: str | None = None) -> dict[str, Any]:
@@ -655,10 +895,15 @@ def create_mcp():
         scheduled_at_utc: str | None = None,
         schedule_timezone: str | None = None,
         assignee_id: str | None = None,
+        assigned_agent_code: str | None = None,
         labels: str | list[str] | None = None,
         command_id: str | None = None,
     ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
+        normalized_task_type = str(task_type or "").strip().lower()
+        if normalized_task_type == "scheduled_instruction":
+            if not str(scheduled_instruction or "").strip() and str(instruction or "").strip():
+                scheduled_instruction = instruction
         return service.create_task(
             workspace_id=workspace_id,
             title=title,
@@ -678,6 +923,7 @@ def create_mcp():
             scheduled_at_utc=scheduled_at_utc,
             schedule_timezone=schedule_timezone,
             assignee_id=assignee_id,
+            assigned_agent_code=assigned_agent_code,
             labels=labels,
             command_id=command_id,
         )
@@ -752,12 +998,15 @@ def create_mcp():
         workspace_id: str | None = None,
         auth_token: str | None = None,
         description: str = "",
-        custom_statuses: list[str] | None = None,
+        custom_statuses: list[str] | str | None = None,
         embedding_enabled: bool = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        automation_max_parallel_tasks: int = 4,
         chat_index_mode: str = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE,
         chat_attachment_ingestion_mode: str = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE,
+        vector_index_distill_enabled: bool = False,
+        event_storming_enabled: bool = True,
         command_id: str | None = None,
     ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
@@ -770,8 +1019,66 @@ def create_mcp():
             embedding_enabled=embedding_enabled,
             embedding_model=embedding_model,
             context_pack_evidence_top_k=context_pack_evidence_top_k,
+            automation_max_parallel_tasks=automation_max_parallel_tasks,
             chat_index_mode=chat_index_mode,
             chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
+            vector_index_distill_enabled=vector_index_distill_enabled,
+            event_storming_enabled=event_storming_enabled,
+            command_id=command_id,
+        )
+
+    if plugin_enabled("team_mode") or plugin_enabled("git_delivery") or plugin_enabled("docker_compose"):
+        @mcp.tool(description=SETUP_PROJECT_ORCHESTRATION_TOOL_DESCRIPTION)
+        def setup_project_orchestration(
+            name: str | None = None,
+            short_description: str = "",
+            project_id: str | None = None,
+            workspace_id: str | None = None,
+            auth_token: str | None = None,
+            enable_team_mode: bool | None = None,
+            enable_git_delivery: bool | None = None,
+            enable_docker_compose: bool | None = None,
+            docker_port: int | None = None,
+            team_mode_config: dict[str, Any] | str | None = None,
+            git_delivery_config: dict[str, Any] | str | None = None,
+            docker_compose_config: dict[str, Any] | str | None = None,
+            expected_event_storming_enabled: bool | None = None,
+            seed_team_tasks: bool = True,
+            kickoff_after_setup: bool = False,
+            command_id: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.setup_project_orchestration(
+                name=name,
+                short_description=short_description,
+                project_id=project_id,
+                workspace_id=workspace_id,
+                auth_token=auth_token,
+                enable_team_mode=enable_team_mode,
+                enable_git_delivery=enable_git_delivery,
+                enable_docker_compose=enable_docker_compose,
+                docker_port=docker_port,
+                team_mode_config=team_mode_config,
+                git_delivery_config=git_delivery_config,
+                docker_compose_config=docker_compose_config,
+                expected_event_storming_enabled=expected_event_storming_enabled,
+                seed_team_tasks=seed_team_tasks,
+                kickoff_after_setup=kickoff_after_setup,
+                command_id=command_id,
+            )
+
+    @mcp.tool(description=UPDATE_PROJECT_TOOL_DESCRIPTION)
+    def update_project(
+        project_id: str,
+        patch: dict[str, Any],
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.update_project(
+            project_id=project_id,
+            patch=patch,
+            auth_token=auth_token,
             command_id=command_id,
         )
 
@@ -800,7 +1107,7 @@ def create_mcp():
         auth_token: str | None = None,
         name: str = "",
         description: str = "",
-        custom_statuses: list[str] | None = None,
+        custom_statuses: list[str] | str | None = None,
         member_user_ids: list[str] | None = None,
         embedding_enabled: bool | None = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED,
         embedding_model: str | None = None,
@@ -833,7 +1140,7 @@ def create_mcp():
         workspace_id: str | None = None,
         auth_token: str | None = None,
         description: str = "",
-        custom_statuses: list[str] | None = None,
+        custom_statuses: list[str] | str | None = None,
         member_user_ids: list[str] | None = None,
         embedding_enabled: bool | None = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED,
         embedding_model: str | None = None,
@@ -861,7 +1168,57 @@ def create_mcp():
             command_id=command_id,
         )
 
-    @mcp.tool(description="Create a project rule in a workspace/project.")
+    if plugin_enabled("team_mode"):
+        @mcp.tool(description=VERIFY_TEAM_MODE_WORKFLOW_TOOL_DESCRIPTION)
+        def verify_team_mode_workflow(
+            project_id: str,
+            workspace_id: str | None = None,
+            auth_token: str | None = None,
+            expected_event_storming_enabled: bool | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.verify_team_mode_workflow(
+                project_id=project_id,
+                workspace_id=workspace_id,
+                auth_token=auth_token,
+                expected_event_storming_enabled=expected_event_storming_enabled,
+            )
+
+    if plugin_enabled("git_delivery"):
+        @mcp.tool(description=VERIFY_DELIVERY_WORKFLOW_TOOL_DESCRIPTION)
+        def verify_delivery_workflow(
+            project_id: str,
+            workspace_id: str | None = None,
+            auth_token: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.verify_delivery_workflow(
+                project_id=project_id,
+                workspace_id=workspace_id,
+                auth_token=auth_token,
+            )
+
+    if plugin_enabled("team_mode"):
+        @mcp.tool(description=ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION)
+        def ensure_team_mode_project(
+            project_id: str | None = None,
+            project_ref: str | None = None,
+            workspace_id: str | None = None,
+            auth_token: str | None = None,
+            expected_event_storming_enabled: bool | None = None,
+            command_id: str | None = None,
+        ) -> dict[str, Any]:
+            auth_token = auth_token or default_tool_token
+            return service.ensure_team_mode_project(
+                project_id=project_id,
+                project_ref=project_ref,
+                workspace_id=workspace_id,
+                auth_token=auth_token,
+                expected_event_storming_enabled=expected_event_storming_enabled,
+                command_id=command_id,
+            )
+
+    @mcp.tool(description=CREATE_PROJECT_RULE_TOOL_DESCRIPTION)
     def create_project_rule(
         title: str,
         project_id: str,
@@ -914,6 +1271,23 @@ def create_mcp():
         auth_token = auth_token or default_tool_token
         return service.apply_project_skill(
             skill_id=skill_id,
+            auth_token=auth_token,
+            command_id=command_id,
+        )
+
+    @mcp.tool(description="Attach a workspace catalog skill to a project.")
+    def attach_workspace_skill_to_project(
+        workspace_skill_id: str,
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.attach_workspace_skill_to_project(
+            workspace_skill_id=workspace_skill_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
             auth_token=auth_token,
             command_id=command_id,
         )
@@ -1078,7 +1452,7 @@ def create_mcp():
             command_id=command_id,
         )
 
-    @mcp.tool(description="Patch a project rule. Accepts the same fields as ProjectRulePatch.")
+    @mcp.tool(description=UPDATE_PROJECT_RULE_TOOL_DESCRIPTION)
     def update_project_rule(
         rule_id: str,
         patch: dict[str, Any],
@@ -1139,9 +1513,52 @@ def create_mcp():
         return service.complete_task(task_id=task_id, auth_token=auth_token, command_id=command_id)
 
     @mcp.tool(description="Add a comment to a task.")
-    def add_task_comment(task_id: str, body: str, auth_token: str | None = None, command_id: str | None = None) -> dict[str, Any]:
+    def add_task_comment(
+        task_id: str,
+        body: str,
+        auth_token: str | None = None,
+        command_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        # `workspace_id` is accepted for compatibility with model-generated tool calls.
+        _ = workspace_id
         auth_token = auth_token or default_tool_token
         return service.add_task_comment(task_id=task_id, body=body, auth_token=auth_token, command_id=command_id)
+
+    @mcp.tool(description=SEND_IN_APP_NOTIFICATION_TOOL_DESCRIPTION)
+    def send_in_app_notification(
+        user_id: str,
+        message: str,
+        auth_token: str | None = None,
+        workspace_id: str | None = None,
+        project_id: str | None = None,
+        task_id: str | None = None,
+        note_id: str | None = None,
+        specification_id: str | None = None,
+        notification_type: str | None = "ManualMessage",
+        severity: str | None = "info",
+        dedupe_key: str | None = None,
+        payload: dict[str, Any] | str | None = None,
+        source_event: str | None = "mcp.manual_notification",
+        command_id: str | None = None,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.send_in_app_notification(
+            user_id=user_id,
+            message=message,
+            auth_token=auth_token,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=task_id,
+            note_id=note_id,
+            specification_id=specification_id,
+            notification_type=notification_type,
+            severity=severity,
+            dedupe_key=dedupe_key,
+            payload=payload,
+            source_event=source_event,
+            command_id=command_id,
+        )
 
     @mcp.tool(description="Queue Codex automation run for a task.")
     def run_task_with_codex(

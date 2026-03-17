@@ -1,15 +1,18 @@
 import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import * as Accordion from '@radix-ui/react-accordion'
+import * as Dialog from '@radix-ui/react-dialog'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
 import * as Select from '@radix-ui/react-select'
 import { getNotes, getTasks } from '../../api'
 import type { Note, Specification, Task } from '../../types'
+import type { ProjectGitRepositoryTarget } from '../../utils/gitRepositoryLinks'
+import { parseProjectGitRepositoryExternalRef } from '../../utils/gitRepositoryLinks'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { parseCommaTags } from '../../utils/ui'
+import { ProjectGitRepositoryDialog } from '../projects/ProjectGitRepositoryDialog'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
-import { VirtualizedList } from '../shared/VirtualizedList'
 import {
   AttachmentRefList,
   ExternalRefEditor,
@@ -34,6 +37,11 @@ export function SpecificationsPanel({ state }: { state: any }) {
   const [showSpecTagPicker, setShowSpecTagPicker] = React.useState(false)
   const [specTagQuery, setSpecTagQuery] = React.useState('')
   const [specResourceSections, setSpecResourceSections] = React.useState<string[]>(['external-links', 'file-attachments'])
+  const [specificationPreviewDialog, setSpecificationPreviewDialog] = React.useState<{ title: string, body: string } | null>(null)
+  const [gitRepositoryDialogState, setGitRepositoryDialogState] = React.useState<{
+    projectId: string
+    target: ProjectGitRepositoryTarget | null
+  } | null>(null)
 
   React.useEffect(() => {
     setNewTaskTitle('')
@@ -48,6 +56,14 @@ export function SpecificationsPanel({ state }: { state: any }) {
     setSpecTagQuery('')
     setSpecResourceSections(['external-links', 'file-attachments'])
   }, [selectedSpecificationId])
+  const openGitRepositoryFromRef = React.useCallback((projectId: string, ref: Specification['external_refs'][number]) => {
+    const target = parseProjectGitRepositoryExternalRef(ref)
+    const normalizedProjectId = String(projectId || '').trim()
+    if (!target || !normalizedProjectId) return false
+    setGitRepositoryDialogState({ projectId: normalizedProjectId, target })
+    return true
+  }, [])
+
 
   const taskLinkCandidates = useQuery({
     queryKey: [
@@ -156,7 +172,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
   const specificationStatuses: Array<Specification['status']> = [
     'Draft',
     'Ready',
-    'In progress',
+    'In Progress',
     'Implemented',
     'Archived',
   ]
@@ -203,8 +219,18 @@ export function SpecificationsPanel({ state }: { state: any }) {
     setSpecResourceSections((prev) => (prev.includes(value) ? prev : [...prev, value]))
   }, [])
 
+  const openSpecificationPreviewDialog = React.useCallback((specification: Specification) => {
+    const isSelected = String(state.selectedSpecificationId || '').trim() === String(specification.id || '').trim()
+    setSpecificationPreviewDialog({
+      title: isSelected
+        ? String(state.editSpecificationTitle || '').trim() || 'Untitled spec'
+        : String(specification.title || '').trim() || 'Untitled spec',
+      body: isSelected ? String(state.editSpecificationBody || '') : String(specification.body || ''),
+    })
+  }, [state])
+
   return (
-    <section className="card">
+    <section className="card" data-tour-id="specifications-panel">
       <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
         <h2 style={{ margin: 0 }}>Specifications ({state.specifications.data?.total ?? 0})</h2>
         <div className="row wrap specs-create-actions" style={{ gap: 6 }}>
@@ -215,6 +241,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
             disabled={state.createSpecificationMutation.isPending}
             title="Create specification"
             aria-label="Create specification"
+            data-tour-id="spec-new"
           >
             <Icon path="M12 5v14M5 12h14" />
             <span>{state.createSpecificationMutation.isPending ? 'Creating...' : 'Spec'}</span>
@@ -249,24 +276,21 @@ export function SpecificationsPanel({ state }: { state: any }) {
               </Select.Content>
             </Select.Portal>
           </Select.Root>
-          <PopularTagFilters
-            tags={state.taskTagSuggestions ?? []}
-            selectedTags={state.specificationTags}
-            onToggleTag={state.toggleSpecificationFilterTag}
-            onClear={() => state.clearSpecificationFilterTags()}
-            idPrefix="spec-filter"
-          />
+          {(state.taskTagSuggestions?.length ?? 0) > 0 && (
+            <PopularTagFilters
+              tags={state.taskTagSuggestions ?? []}
+              selectedTags={state.specificationTags}
+              onToggleTag={state.toggleSpecificationFilterTag}
+              onClear={() => state.clearSpecificationFilterTags()}
+              idPrefix="spec-filter"
+            />
+          )}
         </div>
 
         <div className="task-list">
           {state.specifications.isLoading && <div className="notice">Loading specifications...</div>}
           {!state.specifications.isLoading && items.length > 0 && (
-            <VirtualizedList
-              items={items}
-              estimateSize={280}
-              overscan={8}
-              itemKey={(specification) => specification.id}
-              renderItem={(specification) => {
+            items.map((specification) => {
                 const isOpen = state.selectedSpecificationId === specification.id
                 const status = isOpen ? state.editSpecificationStatus : specification.status
                 const displayTitle = isOpen ? state.editSpecificationTitle || 'Untitled spec' : specification.title || 'Untitled spec'
@@ -274,6 +298,26 @@ export function SpecificationsPanel({ state }: { state: any }) {
                 const attachmentRefCount = specification.attachment_refs?.length ?? 0
                 const editorExternalRefs = state.parseExternalRefsText(state.editSpecificationExternalRefsText)
                 const editorAttachmentRefs = state.parseAttachmentRefsText(state.editSpecificationAttachmentRefsText)
+                const specChangedFields = (() => {
+                  if (!isOpen) return [] as string[]
+                  const changed: string[] = []
+                  const baselineTitle = String(specification.title || '')
+                  const baselineStatus = String(specification.status || 'Draft')
+                  const baselineBody = String(specification.body || '')
+                  const baselineTags = parseCommaTags((specification.tags ?? []).join(',')).map((tag) => tag.toLowerCase()).join(',')
+                  const editorTags = parseCommaTags(state.editSpecificationTags ?? '').map((tag) => tag.toLowerCase()).join(',')
+                  const baselineExternalRefs = JSON.stringify(specification.external_refs ?? [])
+                  const editorExternalRefsJson = JSON.stringify(editorExternalRefs)
+                  const baselineAttachmentRefs = JSON.stringify(specification.attachment_refs ?? [])
+                  const editorAttachmentRefsJson = JSON.stringify(editorAttachmentRefs)
+                  if (String(state.editSpecificationTitle || '') !== baselineTitle) changed.push('Title')
+                  if (String(state.editSpecificationStatus || 'Draft') !== baselineStatus) changed.push('Status')
+                  if (String(state.editSpecificationBody || '') !== baselineBody) changed.push('Body')
+                  if (editorTags !== baselineTags) changed.push('Tags')
+                  if (editorExternalRefsJson !== baselineExternalRefs) changed.push('External links')
+                  if (editorAttachmentRefsJson !== baselineAttachmentRefs) changed.push('Attachments')
+                  return changed
+                })()
                 const editorExternalLinksMeta = editorExternalRefs.length > 0
                   ? `${editorExternalRefs.length} linked`
                   : 'No links added'
@@ -294,8 +338,11 @@ export function SpecificationsPanel({ state }: { state: any }) {
                 return (
                   <div
                     key={specification.id}
+                    id={`spec-row-${specification.id}`}
                     className={`note-row ${isOpen ? 'open selected' : ''}`}
-                    onClick={() => state.toggleSpecificationEditor(specification.id)}
+                    onClick={() => {
+                      state.toggleSpecificationEditor(specification.id)
+                    }}
                     role="button"
                   >
                 <div className="note-title">
@@ -303,21 +350,40 @@ export function SpecificationsPanel({ state }: { state: any }) {
                     {specification.archived && <span className="badge">Archived</span>}
                     <strong>{displayTitle}</strong>
                   </div>
-                  <div className="note-row-actions" onClick={(event) => event.stopPropagation()}>
+                  <div
+                    className="note-row-actions"
+                    onClick={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
                     <button
                       className="action-icon note-row-actions-trigger"
                       type="button"
                       title="Copy specification link"
                       aria-label="Copy specification link"
-                      onClick={() =>
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation()
                         state.copyShareLink({
                           tab: 'specifications',
                           projectId: specification.project_id,
                           specificationId: specification.id,
                         })
-                      }
+                      }}
                     >
                       <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
+                    </button>
+                    <button
+                      className="action-icon note-row-actions-trigger"
+                      type="button"
+                      title="Open preview popup"
+                      aria-label="Open preview popup"
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        openSpecificationPreviewDialog(specification)
+                      }}
+                    >
+                      <Icon path="M8 3H5a2 2 0 0 0-2 2v3m16 0V5a2 2 0 0 0-2-2h-3M8 21H5a2 2 0 0 1-2-2v-3m16 0v3a2 2 0 0 1-2 2h-3" />
                     </button>
                     <DropdownMenu.Root>
                       <DropdownMenu.Trigger asChild>
@@ -332,9 +398,28 @@ export function SpecificationsPanel({ state }: { state: any }) {
                       </DropdownMenu.Trigger>
                       <DropdownMenu.Portal>
                         <DropdownMenu.Content className="task-group-menu-content note-row-menu-content" sideOffset={8} align="end">
-                          <DropdownMenu.Item className="task-group-menu-item" onSelect={openSpecificationFromMenu} disabled={isOpen}>
+                          <DropdownMenu.Item
+                            className="task-group-menu-item"
+                            onSelect={(event) => {
+                              event.preventDefault()
+                              event.stopPropagation()
+                              openSpecificationFromMenu()
+                            }}
+                            disabled={isOpen}
+                          >
                             <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
                             <span>{isOpen ? 'Editor open' : 'Open editor'}</span>
+                          </DropdownMenu.Item>
+                          <DropdownMenu.Item
+                            className="task-group-menu-item"
+                            onSelect={(event) => {
+                              event.preventDefault()
+                              event.stopPropagation()
+                              openSpecificationPreviewDialog(specification)
+                            }}
+                          >
+                            <Icon path="M8 3H5a2 2 0 0 0-2 2v3m16 0V5a2 2 0 0 0-2-2h-3M8 21H5a2 2 0 0 1-2-2v-3m16 0v3a2 2 0 0 1-2 2h-3" />
+                            <span>Preview popup</span>
                           </DropdownMenu.Item>
                           <DropdownMenu.Separator className="task-group-menu-separator" />
                           <DropdownMenu.Item className="task-group-menu-item" onSelect={toggleArchiveFromMenu}>
@@ -402,7 +487,12 @@ export function SpecificationsPanel({ state }: { state: any }) {
                 </div>
 
                 {isOpen && (
-                  <div className="note-accordion" onClick={(e) => e.stopPropagation()} role="region" aria-label="Specification editor">
+                  <div
+                    className="note-accordion"
+                    onClick={(e) => e.stopPropagation()}
+                    role="region"
+                    aria-label="Specification editor"
+                  >
                     <div className="note-editor-head">
                       <input
                         className="note-title-input"
@@ -410,18 +500,6 @@ export function SpecificationsPanel({ state }: { state: any }) {
                         onChange={(e) => state.setEditSpecificationTitle(e.target.value)}
                         placeholder="Title"
                       />
-                      <div className="note-actions">
-                        {state.specificationIsDirty && <span className="badge unsaved-badge">Unsaved</span>}
-                        <button
-                          className="action-icon primary"
-                          onClick={() => state.saveSpecificationMutation.mutate()}
-                          disabled={state.saveSpecificationMutation.isPending || !state.specificationIsDirty}
-                          title="Save specification"
-                          aria-label="Save specification"
-                        >
-                          <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
-                        </button>
-                      </div>
                     </div>
 
                     <div className="row" style={{ marginBottom: 8 }}>
@@ -483,10 +561,10 @@ export function SpecificationsPanel({ state }: { state: any }) {
                                 className="status-chip"
                                 type="button"
                                 onClick={() => setShowSpecTagPicker(false)}
-                                title="Done"
-                                aria-label="Done"
+                                title="Close"
+                                aria-label="Close"
                               >
-                                Done
+                                Close
                               </button>
                             </div>
                             <div className="tag-picker-input-row">
@@ -540,7 +618,11 @@ export function SpecificationsPanel({ state }: { state: any }) {
                       </Popover.Root>
                     </div>
 
-                    <div className="md-editor-surface">
+                    <div
+                      className="md-editor-surface"
+                      onClick={(event) => event.stopPropagation()}
+                      onPointerDown={(event) => event.stopPropagation()}
+                    >
                       <MarkdownModeToggle
                         view={state.specificationEditorView}
                         onChange={state.setSpecificationEditorView}
@@ -634,6 +716,7 @@ export function SpecificationsPanel({ state }: { state: any }) {
                                 state.removeExternalRefByIndex(prev, idx)
                               )
                             }
+                            onOpenRef={(ref) => openGitRepositoryFromRef(specification.project_id, ref)}
                             onAdd={(ref) =>
                               state.setEditSpecificationExternalRefsText((prev: string) =>
                                 state.externalRefsToText([...state.parseExternalRefsText(prev), ref])
@@ -883,12 +966,34 @@ export function SpecificationsPanel({ state }: { state: any }) {
                         </Accordion.Content>
                       </Accordion.Item>
                     </Accordion.Root>
+                    {(state.specificationIsDirty || state.saveSpecificationMutation.isPending) && (
+                      <div className="project-editor-savebar spec-editor-savebar">
+                        <div className="project-editor-savebar-meta">
+                          <span className="badge unsaved-badge">1 unsaved section</span>
+                          <span className="meta">
+                            Changed: {specChangedFields.length > 0 ? specChangedFields.join(', ') : 'Specification'}
+                          </span>
+                        </div>
+                        <button
+                          className="status-chip on project-editor-savebar-btn"
+                          type="button"
+                          onClick={() => state.saveSpecificationMutation.mutate()}
+                          disabled={state.saveSpecificationMutation.isPending || !state.specificationIsDirty}
+                          title="Save all specification changes"
+                          aria-label="Save all specification changes"
+                        >
+                          <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                          <span className="project-editor-savebar-btn-label">
+                            {state.saveSpecificationMutation.isPending ? 'Saving...' : 'Save all changes'}
+                          </span>
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
                   </div>
                 )
-              }}
-            />
+              })
           )}
           {!state.specifications.isLoading && state.canLoadMoreSpecifications && (
             <div className="row" style={{ justifyContent: 'center', marginTop: 12 }}>
@@ -905,6 +1010,39 @@ export function SpecificationsPanel({ state }: { state: any }) {
           )}
         </div>
       </div>
+
+      <Dialog.Root open={specificationPreviewDialog !== null} onOpenChange={(open) => {
+        if (!open) setSpecificationPreviewDialog(null)
+      }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="codex-chat-alert-overlay" />
+          <Dialog.Content className="codex-chat-alert-content docker-runtime-dialog markdown-preview-dialog">
+            <div className="notification-markdown-header">
+              <div>
+                <Dialog.Title className="codex-chat-alert-title notification-markdown-title">
+                  {specificationPreviewDialog?.title || 'Untitled spec'}
+                </Dialog.Title>
+                <Dialog.Description className="codex-chat-alert-description">
+                  Specification preview.
+                </Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  className="action-icon docker-runtime-dialog-close notification-preview-close"
+                  aria-label="Close specification preview"
+                  title="Close"
+                >
+                  <Icon path="M6 6l12 12M18 6L6 18" />
+                </button>
+              </Dialog.Close>
+            </div>
+            <div className="md-editor-content notification-markdown-content markdown-preview-body">
+              <MarkdownView value={specificationPreviewDialog?.body || ''} />
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
       {taskLinkOpen && (
         <div className="drawer open" onClick={() => setTaskLinkOpen(false)}>
@@ -985,6 +1123,15 @@ export function SpecificationsPanel({ state }: { state: any }) {
           </div>
         </div>
       )}
+      <ProjectGitRepositoryDialog
+        open={gitRepositoryDialogState !== null}
+        onOpenChange={(open) => {
+          if (!open) setGitRepositoryDialogState(null)
+        }}
+        userId={state.userId}
+        projectId={gitRepositoryDialogState?.projectId || ''}
+        target={gitRepositoryDialogState?.target || null}
+      />
     </section>
   )
 }

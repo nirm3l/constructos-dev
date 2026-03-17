@@ -7,6 +7,9 @@ import * as Select from '@radix-ui/react-select'
 import * as ToggleGroup from '@radix-ui/react-toggle-group'
 import * as Tooltip from '@radix-ui/react-tooltip'
 import type { Note } from '../../types'
+import type { ProjectGitRepositoryTarget } from '../../utils/gitRepositoryLinks'
+import { parseProjectGitRepositoryExternalRef } from '../../utils/gitRepositoryLinks'
+import { ProjectGitRepositoryDialog } from '../projects/ProjectGitRepositoryDialog'
 import { AttachmentRefList, ExternalRefEditor, Icon } from '../shared/uiHelpers'
 import { TaskDrawerInsights } from './TaskDrawerInsights'
 
@@ -153,6 +156,7 @@ function TaskDrawerSelect({
   ariaLabel,
   options,
   triggerClassName,
+  disabled,
 }: {
   value: string
   onValueChange: (value: string) => void
@@ -160,10 +164,15 @@ function TaskDrawerSelect({
   ariaLabel: string
   options: TaskSelectOption[]
   triggerClassName?: string
+  disabled?: boolean
 }) {
   return (
-    <Select.Root value={value} onValueChange={onValueChange}>
-      <Select.Trigger className={triggerClassName || 'quickadd-project-trigger taskdrawer-select-trigger'} aria-label={ariaLabel}>
+    <Select.Root value={value} onValueChange={onValueChange} disabled={disabled}>
+      <Select.Trigger
+        className={triggerClassName || 'quickadd-project-trigger taskdrawer-select-trigger'}
+        aria-label={ariaLabel}
+        disabled={disabled}
+      >
         <Select.Value placeholder={placeholder} />
         <Select.Icon asChild>
           <span className="quickadd-project-trigger-icon" aria-hidden="true">
@@ -294,6 +303,7 @@ export function TaskDrawer({ state }: { state: any }) {
   const [openSections, setOpenSections] = React.useState<string[]>([])
   const [confirmDiscardOpen, setConfirmDiscardOpen] = React.useState(false)
   const [externalTaskPickerQuery, setExternalTaskPickerQuery] = React.useState('')
+  const [gitRepositoryDialogTarget, setGitRepositoryDialogTarget] = React.useState<ProjectGitRepositoryTarget | null>(null)
   const pendingPostDiscardActionRef = React.useRef<(() => void) | null>(null)
 
   const forceCloseTaskEditor = React.useCallback(() => {
@@ -336,6 +346,13 @@ export function TaskDrawer({ state }: { state: any }) {
     setExternalTaskPickerQuery('')
   }, [state.selectedTask?.id])
 
+  const openGitRepositoryFromRef = React.useCallback((ref: { url: string; title?: string; source?: string }) => {
+    const target = parseProjectGitRepositoryExternalRef(ref)
+    if (!target) return false
+    setGitRepositoryDialogTarget(target)
+    return true
+  }, [])
+
   if (!state.selectedTask) return null
   const linkedNotes: Note[] = state.taskNotes?.data?.items ?? []
   const taskGroups: Array<{ id: string; name: string }> = state.taskGroups ?? []
@@ -345,7 +362,14 @@ export function TaskDrawer({ state }: { state: any }) {
     : true
   const statusOptions: string[] = (state.taskStatusOptions ?? []).length > 0
     ? state.taskStatusOptions
-    : ['To do', 'In progress', 'Done']
+    : ['To Do', 'In Progress', 'In Review', 'Awaiting Decision', 'Blocked', 'Completed']
+  const completedStatusOption =
+    statusOptions.find((status) => String(status || '').trim().toLowerCase() === 'completed')
+    || statusOptions.find((status) => String(status || '').trim().toLowerCase() === 'done')
+    || 'Completed'
+  const isSelectedTaskInReview = String(state.selectedTask.status || '').trim().toLowerCase() === 'in review'
+  const isSelectedTaskCompleted = String(state.selectedTask.status || '').trim().toLowerCase() === String(completedStatusOption).trim().toLowerCase()
+    || String(state.selectedTask.status || '').trim().toLowerCase() === 'done'
   const localTimezone = detectLocalTimezone()
 
   const statusSelectOptions = (() => {
@@ -377,7 +401,70 @@ export function TaskDrawer({ state }: { state: any }) {
   })()
 
   const groupSelectValue = selectedTaskGroupId || '__none__'
-  const statusSelectValue = String(state.editStatus || '').trim() || statusSelectOptions[0]?.value || 'To do'
+  const assigneeSelectOptions = (() => {
+    const out: TaskSelectOption[] = [{ value: '__none__', label: 'Unassigned' }]
+    const users: any[] = Array.isArray(state.workspaceUsers) ? state.workspaceUsers : []
+    const userById = new Map<string, any>(users.map((user) => [String(user?.id || '').trim(), user]))
+    const projectMemberIds: string[] = Array.from(
+      new Set<string>(
+        (Array.isArray(state.projectMembers) ? state.projectMembers : [])
+          .filter((member: any) => String(member?.project_id || '').trim() === String(state.selectedTask.project_id || '').trim())
+          .map((member: any) => String(member?.user_id || '').trim())
+          .filter(Boolean)
+      )
+    )
+    const sourceUsers: any[] =
+      projectMemberIds.length > 0
+        ? projectMemberIds.map((userId) => userById.get(userId)).filter(Boolean)
+        : users
+    const selectedAssigneeId = String(state.editAssigneeId || '').trim()
+    if (selectedAssigneeId && !sourceUsers.some((user: any) => String(user?.id || '').trim() === selectedAssigneeId)) {
+      out.push({
+        value: selectedAssigneeId,
+        label: `Missing user (${selectedAssigneeId.slice(0, 8)})`,
+      })
+    }
+    const normalizedUsers = sourceUsers
+      .map((user: any) => {
+        const userId = String(user?.id || '').trim()
+        if (!userId) return null
+        const fullName = String(user?.full_name || '').trim()
+        const username = String(user?.username || '').trim()
+        const label = username && username !== fullName
+          ? `${fullName || username} (${username})`
+          : (fullName || username || userId)
+        return { value: userId, label }
+      })
+      .filter(Boolean) as TaskSelectOption[]
+    normalizedUsers.sort((a, b) => a.label.localeCompare(b.label))
+    out.push(...normalizedUsers)
+    return out
+  })()
+  const assigneeSelectValue = (() => {
+    const current = String(state.editAssigneeId || '').trim()
+    if (!current) return '__none__'
+    return assigneeSelectOptions.some((option) => option.value === current) ? current : '__none__'
+  })()
+  const teamAgentOptions = (() => {
+    const out: TaskSelectOption[] = [{ value: '__none__', label: 'No team agent' }]
+    const configuredAgents = Array.isArray(state.taskTeamAgents) ? state.taskTeamAgents : []
+    for (const item of configuredAgents) {
+      const id = String(item?.id || '').trim()
+      if (!id) continue
+      const name = String(item?.name || '').trim()
+      const role = String(item?.authority_role || '').trim()
+      const labelBase = name || id
+      const roleSuffix = role ? ` • ${role}` : ''
+      out.push({ value: id, label: `${labelBase} (${id})${roleSuffix}` })
+    }
+    return out
+  })()
+  const teamAgentSelectValue = (() => {
+    const current = String(state.editAssignedAgentCode || '').trim()
+    if (!current) return '__none__'
+    return teamAgentOptions.some((option) => option.value === current) ? current : '__none__'
+  })()
+  const statusSelectValue = String(state.editStatus || '').trim() || statusSelectOptions[0]?.value || 'To Do'
   const prioritySelectValue = (() => {
     const normalized = String(state.editPriority || '').trim()
     if (normalized === 'Low' || normalized === 'Med' || normalized === 'High') return normalized
@@ -395,7 +482,7 @@ export function TaskDrawer({ state }: { state: any }) {
   const scheduleRunOnStatusesValue = (() => {
     const current = normalizeStatusList(Array.isArray(state.editScheduleRunOnStatuses) ? state.editScheduleRunOnStatuses : [])
     if (current.length > 0) return current
-    return ['In progress']
+    return ['In Progress']
   })()
   const scheduleRunStatusOptions = (() => {
     const ordered = [...statusOptions, ...scheduleRunOnStatusesValue].map((item) => String(item || '').trim())
@@ -537,7 +624,11 @@ export function TaskDrawer({ state }: { state: any }) {
   return (
     <Tooltip.Provider delayDuration={180}>
       <div className="drawer open" onClick={() => requestTaskClose()}>
-        <div className="drawer-body task-drawer-body" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="drawer-body task-drawer-body"
+          onClick={(e) => e.stopPropagation()}
+          onChangeCapture={() => state.setTaskEditorTouched?.(true)}
+        >
         <div className="drawer-header">
           <div className="task-header-main">
             <h3 className="drawer-title">{state.selectedTask.title}</h3>
@@ -581,14 +672,32 @@ export function TaskDrawer({ state }: { state: any }) {
               </TaskDrawerTooltip>
               <DropdownMenu.Portal>
                 <DropdownMenu.Content className="taskdrawer-actions-menu-content" sideOffset={8} align="end">
+                  {isSelectedTaskInReview ? (
+                    <>
+                      <DropdownMenu.Item
+                        className="taskdrawer-actions-menu-item"
+                        disabled={Boolean(state.reviewTaskMutation?.isPending) || Boolean(state.taskIsDirty)}
+                        onSelect={() => state.reviewTaskMutation?.mutate({ taskId: state.selectedTask.id, action: 'approve' })}
+                      >
+                        Approve review
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Item
+                        className="taskdrawer-actions-menu-item"
+                        disabled={Boolean(state.reviewTaskMutation?.isPending) || Boolean(state.taskIsDirty)}
+                        onSelect={() => state.reviewTaskMutation?.mutate({ taskId: state.selectedTask.id, action: 'request_changes' })}
+                      >
+                        Request changes
+                      </DropdownMenu.Item>
+                    </>
+                  ) : null}
                   <DropdownMenu.Item
                     className="taskdrawer-actions-menu-item"
                     onSelect={() => {
-                      if (state.selectedTask.status === 'Done') state.reopenTaskMutation.mutate(state.selectedTask.id)
+                      if (isSelectedTaskCompleted) state.reopenTaskMutation.mutate(state.selectedTask.id)
                       else state.completeTaskMutation.mutate(state.selectedTask.id)
                     }}
                   >
-                    {state.selectedTask.status === 'Done' ? 'Reopen task' : 'Complete task'}
+                    {isSelectedTaskCompleted ? 'Reopen task' : 'Complete task'}
                   </DropdownMenu.Item>
                   <DropdownMenu.Item
                     className="taskdrawer-actions-menu-item"
@@ -683,6 +792,45 @@ export function TaskDrawer({ state }: { state: any }) {
               options={TASK_PRIORITY_OPTIONS}
             />
           </label>
+          <label className="field-control task-field-half">
+            <span className="field-label">Assignee</span>
+            <TaskDrawerSelect
+              value={assigneeSelectValue}
+              onValueChange={(value) => {
+                if (value === '__none__') {
+                  state.setEditAssigneeId('')
+                  state.setEditAssignedAgentCode('')
+                  return
+                }
+                state.setEditAssigneeId(value)
+              }}
+              placeholder="Unassigned"
+              ariaLabel="Task assignee"
+              options={assigneeSelectOptions}
+            />
+          </label>
+          <label className="field-control task-field-half">
+            <span className="field-label">Team agent</span>
+            <TaskDrawerSelect
+              value={teamAgentSelectValue}
+              onValueChange={(value) => state.setEditAssignedAgentCode(value === '__none__' ? '' : value)}
+              placeholder="No team agent"
+              ariaLabel="Task team agent"
+              options={teamAgentOptions}
+              triggerClassName="quickadd-project-trigger taskdrawer-select-trigger"
+              disabled={!String(state.editAssigneeId || '').trim() || teamAgentOptions.length <= 1}
+            />
+            {!String(state.editAssigneeId || '').trim() && (
+              <span className="meta" style={{ marginTop: 6, display: 'inline-block' }}>
+                Assign a user first to enable team agent routing.
+              </span>
+            )}
+            {String(state.editAssigneeId || '').trim() && teamAgentOptions.length <= 1 && (
+              <span className="meta" style={{ marginTop: 6, display: 'inline-block' }}>
+                No Team Mode agents are configured for this project.
+              </span>
+            )}
+          </label>
           <label className="field-control task-field-full">
             <span className="field-label">Due date</span>
             <TaskDueInputWithPresets
@@ -731,10 +879,10 @@ export function TaskDrawer({ state }: { state: any }) {
                     className="status-chip"
                     type="button"
                     onClick={() => state.setShowTaskTagPicker(false)}
-                    title="Done"
-                    aria-label="Done"
+                    title="Close"
+                    aria-label="Close"
                   >
-                    Done
+                    Close
                   </button>
                 </div>
                 <div className="tag-picker-input-row">
@@ -857,7 +1005,7 @@ export function TaskDrawer({ state }: { state: any }) {
               <input
                 value={state.editStatusTriggerSelfFromStatusesText}
                 onChange={(e) => state.setEditStatusTriggerSelfFromStatusesText(e.target.value)}
-                placeholder="To do, In progress"
+                placeholder="To Do, In Progress"
               />
             </label>
             <label className="field-control">
@@ -865,7 +1013,7 @@ export function TaskDrawer({ state }: { state: any }) {
               <input
                 value={state.editStatusTriggerSelfToStatusesText}
                 onChange={(e) => state.setEditStatusTriggerSelfToStatusesText(e.target.value)}
-                placeholder="Done"
+                placeholder={completedStatusOption}
               />
             </label>
           </div>
@@ -983,7 +1131,7 @@ export function TaskDrawer({ state }: { state: any }) {
                 <input
                   value={state.editStatusTriggerExternalFromStatusesText}
                   onChange={(e) => state.setEditStatusTriggerExternalFromStatusesText(e.target.value)}
-                  placeholder="To do, In progress"
+                  placeholder="To Do, In Progress"
                 />
               </label>
               <label className="field-control">
@@ -991,7 +1139,7 @@ export function TaskDrawer({ state }: { state: any }) {
                 <input
                   value={state.editStatusTriggerExternalToStatusesText}
                   onChange={(e) => state.setEditStatusTriggerExternalToStatusesText(e.target.value)}
-                  placeholder="Done"
+                  placeholder={completedStatusOption}
                 />
               </label>
             </div>
@@ -1144,6 +1292,7 @@ export function TaskDrawer({ state }: { state: any }) {
               <ExternalRefEditor
                 refs={externalRefs}
                 onRemoveIndex={(idx) => state.setEditTaskExternalRefsText((prev: string) => state.removeExternalRefByIndex(prev, idx))}
+                onOpenRef={openGitRepositoryFromRef}
                 onAdd={(ref) => state.setEditTaskExternalRefsText((prev: string) => state.externalRefsToText([...state.parseExternalRefsText(prev), ref]))}
               />
             </Accordion.Content>
@@ -1306,6 +1455,15 @@ export function TaskDrawer({ state }: { state: any }) {
           </AlertDialog.Content>
         </AlertDialog.Portal>
       </AlertDialog.Root>
+      <ProjectGitRepositoryDialog
+        open={gitRepositoryDialogTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setGitRepositoryDialogTarget(null)
+        }}
+        userId={state.userId}
+        projectId={state.selectedTask?.project_id || ''}
+        target={gitRepositoryDialogTarget}
+      />
     </Tooltip.Provider>
   )
 }

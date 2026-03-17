@@ -9,9 +9,9 @@ from typing import Any
 import httpx
 from sqlalchemy import select
 
-from shared.licensing import resolve_license_installation_id
-from shared.models import LicenseEntitlement, LicenseInstallation, LicenseValidationLog, SessionLocal
+from shared.models import LicenseEntitlement, LicenseInstallation, LicenseValidationLog, Notification, SessionLocal, User
 from shared.realtime import realtime_hub
+from shared.licensing import resolve_license_installation_id
 from shared.settings import (
     APP_VERSION,
     LICENSE_HEARTBEAT_SECONDS,
@@ -150,6 +150,73 @@ def _append_validation_log(db, *, installation_db_id: int, result: str, reason: 
     )
 
 
+def _materialize_license_notifications(
+    db,
+    *,
+    installation: LicenseInstallation,
+) -> list[str]:
+    payload = license_status_read_model(db)
+    items = payload.get("notifications")
+    if not isinstance(items, list):
+        return []
+
+    user_ids = [
+        str(value)
+        for value in db.execute(
+            select(User.id).where(
+                User.is_active == True,  # noqa: E712
+                User.notifications_enabled == True,  # noqa: E712
+            )
+        ).scalars().all()
+    ]
+    if not user_ids:
+        return []
+
+    created_for_users: set[str] = set()
+    workspace_id = str(installation.workspace_id or "").strip() or None
+    installation_id = str(installation.installation_id or "").strip()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        notification_id = str(item.get("id") or "").strip()
+        if not notification_id:
+            continue
+        message = str(item.get("message") or "").strip() or "Notification"
+        notification_type = str(item.get("notification_type") or "LicenseInfo").strip() or "LicenseInfo"
+        severity = str(item.get("severity") or "info").strip() or "info"
+        source_event = str(item.get("source_event") or "license.status").strip() or "license.status"
+        dedupe_suffix = str(item.get("dedupe_key") or notification_id).strip() or notification_id
+        dedupe_key = f"license-notification:{installation_id}:{dedupe_suffix}"
+        raw_payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        notification_payload = dict(raw_payload)
+        notification_payload.setdefault("license_installation_id", installation_id)
+
+        for user_id in user_ids:
+            existing = db.execute(
+                select(Notification.id).where(
+                    Notification.user_id == user_id,
+                    Notification.dedupe_key == dedupe_key,
+                ).limit(1)
+            ).scalar_one_or_none()
+            if existing is not None:
+                continue
+            db.add(
+                Notification(
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    message=message,
+                    notification_type=notification_type,
+                    severity=severity,
+                    dedupe_key=dedupe_key,
+                    payload_json=_json_dumps(notification_payload),
+                    source_event=source_event,
+                    is_read=False,
+                )
+            )
+            created_for_users.add(user_id)
+    return sorted(created_for_users)
+
+
 def _get_or_create_installation(db, installation_id: str) -> tuple[LicenseInstallation, bool]:
     installation = db.execute(
         select(LicenseInstallation).where(LicenseInstallation.installation_id == installation_id)
@@ -196,6 +263,9 @@ def _apply_entitlement_payload(db, installation: LicenseInstallation, payload: d
     if not isinstance(current_metadata, dict):
         current_metadata = {}
     current_metadata.update(metadata_payload)
+    server_notifications = payload.get("notifications")
+    if isinstance(server_notifications, list):
+        current_metadata["control_plane_notifications"] = server_notifications
     installation.metadata_json = _json_dumps(current_metadata)
 
     latest = db.execute(
@@ -324,7 +394,9 @@ def _resolve_verified_entitlement_payload(server_payload: dict[str, Any]) -> dic
         if not isinstance(token_payload, dict):
             raise LicenseTokenError("Signed entitlement token is required when LICENSE_PUBLIC_KEY is configured")
         verified = verify_entitlement_token(token_payload, public_key)
-        return {"entitlement": verified}
+        resolved_payload = dict(server_payload)
+        resolved_payload["entitlement"] = verified
+        return resolved_payload
 
     # Development fallback: when no public key is configured, accept plain payload.
     return server_payload
@@ -360,7 +432,13 @@ def sync_license_once() -> bool:
                 raise ValueError("Control-plane response must be a JSON object")
             verified_payload = _resolve_verified_entitlement_payload(payload)
             _apply_entitlement_payload(db, installation, verified_payload)
+            created_notification_user_ids = _materialize_license_notifications(db, installation=installation)
             db.commit()
+            for user_id in created_notification_user_ids:
+                try:
+                    realtime_hub.publish(f"user:{user_id}", reason="license-notification")
+                except Exception as exc:
+                    logger.warning("Unable to publish user notification signal: %s", exc)
             _publish_license_realtime_signal(installation)
             return True
         except httpx.HTTPStatusError as exc:
@@ -457,7 +535,13 @@ def activate_with_code_once(activation_code: str) -> dict[str, Any]:
 
             verified_payload = _resolve_verified_entitlement_payload(payload)
             _apply_entitlement_payload(db, installation, verified_payload)
+            created_notification_user_ids = _materialize_license_notifications(db, installation=installation)
             db.commit()
+            for user_id in created_notification_user_ids:
+                try:
+                    realtime_hub.publish(f"user:{user_id}", reason="license-notification")
+                except Exception as exc:
+                    logger.warning("Unable to publish user notification signal: %s", exc)
             _publish_license_realtime_signal(installation)
             return {
                 "license": license_status_read_model(db),

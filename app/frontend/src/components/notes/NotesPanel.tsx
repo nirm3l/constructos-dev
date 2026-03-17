@@ -1,13 +1,16 @@
 import React from 'react'
 import * as AlertDialog from '@radix-ui/react-alert-dialog'
 import * as Accordion from '@radix-ui/react-accordion'
+import * as Dialog from '@radix-ui/react-dialog'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
 import * as Select from '@radix-ui/react-select'
 import type { Note, NoteGroup } from '../../types'
+import type { ProjectGitRepositoryTarget } from '../../utils/gitRepositoryLinks'
+import { parseProjectGitRepositoryExternalRef } from '../../utils/gitRepositoryLinks'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
-import { VirtualizedList } from '../shared/VirtualizedList'
+import { ProjectGitRepositoryDialog } from '../projects/ProjectGitRepositoryDialog'
 import {
   AttachmentRefList,
   ExternalRefEditor,
@@ -121,6 +124,11 @@ export function NotesPanel({
   const [dropTargetKey, setDropTargetKey] = React.useState<string | null>(null)
   const [openSectionKeys, setOpenSectionKeys] = React.useState<string[]>([])
   const [noteEditorOpenSections, setNoteEditorOpenSections] = React.useState<string[]>([])
+  const [notePreviewDialog, setNotePreviewDialog] = React.useState<{ title: string, body: string } | null>(null)
+  const [gitRepositoryDialogState, setGitRepositoryDialogState] = React.useState<{
+    projectId: string
+    target: ProjectGitRepositoryTarget | null
+  } | null>(null)
 
   React.useEffect(() => {
     const allKeys = noteSections.map((section) => section.key)
@@ -136,6 +144,14 @@ export function NotesPanel({
   React.useEffect(() => {
     setNoteEditorOpenSections([])
   }, [state.selectedNote?.id])
+  const openGitRepositoryFromRef = React.useCallback((projectId: string, ref: Note['external_refs'][number]) => {
+    const target = parseProjectGitRepositoryExternalRef(ref)
+    const normalizedProjectId = String(projectId || '').trim()
+    if (!target || !normalizedProjectId) return false
+    setGitRepositoryDialogState({ projectId: normalizedProjectId, target })
+    return true
+  }, [])
+
 
   const createGroupBusy = Boolean(state.createNoteGroupMutation?.isPending)
   const updateGroupBusy = Boolean(state.patchNoteGroupMutation?.isPending)
@@ -258,6 +274,14 @@ export function NotesPanel({
       force_new: true,
     })
   }, [state.createNoteMutation])
+
+  const openNotePreviewDialog = React.useCallback((note: Note) => {
+    const isSelected = String(state.selectedNoteId || '').trim() === String(note.id || '').trim()
+    setNotePreviewDialog({
+      title: isSelected ? String(state.editNoteTitle || '').trim() || 'Untitled' : String(note.title || '').trim() || 'Untitled',
+      body: isSelected ? String(state.editNoteBody || '') : String(note.body || ''),
+    })
+  }, [state])
 
   const onNoteDragStart = React.useCallback((event: React.DragEvent<HTMLDivElement>, noteId: string) => {
     if (moveNoteBusy) return
@@ -401,6 +425,7 @@ export function NotesPanel({
     return (
       <div
         key={n.id}
+        id={`note-row-${n.id}`}
         className={`note-row note-draggable ${isOpen ? 'open selected' : ''}`}
         onClick={() => {
           const changed = state.toggleNoteEditor(n.id)
@@ -424,15 +449,36 @@ export function NotesPanel({
             {n.archived && <span className="badge">Archived</span>}
             <strong>{displayTitle}</strong>
           </div>
-          <div className="note-row-actions" onClick={(event) => event.stopPropagation()}>
+          <div
+            className="note-row-actions"
+            onClick={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
             <button
               className="action-icon note-row-actions-trigger"
               type="button"
               title="Copy note link"
               aria-label="Copy note link"
-              onClick={() => actions.copyShareLink({ tab: 'notes', projectId: n.project_id, noteId: n.id })}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation()
+                actions.copyShareLink({ tab: 'notes', projectId: n.project_id, noteId: n.id })
+              }}
             >
               <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
+            </button>
+            <button
+              className="action-icon note-row-actions-trigger"
+              type="button"
+              title="Open preview popup"
+              aria-label="Open preview popup"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation()
+                openNotePreviewDialog(n)
+              }}
+            >
+              <Icon path="M8 3H5a2 2 0 0 0-2 2v3m16 0V5a2 2 0 0 0-2-2h-3M8 21H5a2 2 0 0 1-2-2v-3m16 0v3a2 2 0 0 1-2 2h-3" />
             </button>
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
@@ -447,9 +493,28 @@ export function NotesPanel({
               </DropdownMenu.Trigger>
               <DropdownMenu.Portal>
                 <DropdownMenu.Content className="task-group-menu-content note-row-menu-content" sideOffset={8} align="end">
-                  <DropdownMenu.Item className="task-group-menu-item" onSelect={openNoteFromMenu} disabled={isOpen}>
+                  <DropdownMenu.Item
+                    className="task-group-menu-item"
+                    onSelect={(event) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      openNoteFromMenu()
+                    }}
+                    disabled={isOpen}
+                  >
                     <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
                     <span>{isOpen ? 'Editor open' : 'Open editor'}</span>
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Item
+                    className="task-group-menu-item"
+                    onSelect={(event) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      openNotePreviewDialog(n)
+                    }}
+                  >
+                    <Icon path="M8 3H5a2 2 0 0 0-2 2v3m16 0V5a2 2 0 0 0-2-2h-3M8 21H5a2 2 0 0 1-2-2v-3m16 0v3a2 2 0 0 1-2 2h-3" />
+                    <span>Preview popup</span>
                   </DropdownMenu.Item>
                   <DropdownMenu.Separator className="task-group-menu-separator" />
                   <DropdownMenu.Item className="task-group-menu-item" onSelect={togglePinFromMenu}>
@@ -532,7 +597,7 @@ export function NotesPanel({
                   <Icon path="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4m2 7a5 5 0 0 0-7.07 0L3.1 13.83a5 5 0 1 0 7.07 7.07L13 18" />
                   <span>Links</span>
                 </span>
-                <ExternalRefList refs={n.external_refs} />
+                <ExternalRefList refs={n.external_refs} onOpenRef={(ref) => openGitRepositoryFromRef(n.project_id, ref)} />
               </div>
             )}
             {attachmentRefCount > 0 && (
@@ -548,7 +613,12 @@ export function NotesPanel({
         )}
 
         {isOpen && isSelected && state.selectedNote && (
-          <div className="note-accordion" onClick={(e) => e.stopPropagation()} role="region" aria-label="Note editor">
+          <div
+            className="note-accordion"
+            onClick={(e) => e.stopPropagation()}
+            role="region"
+            aria-label="Note editor"
+          >
             <div className="note-editor-head">
               <input
                 className="note-title-input"
@@ -556,18 +626,6 @@ export function NotesPanel({
                 onChange={(e) => state.setEditNoteTitle(e.target.value)}
                 placeholder="Title"
               />
-              <div className="note-actions">
-                {state.noteIsDirty && <span className="badge unsaved-badge">Unsaved</span>}
-                <button
-                  className="action-icon primary"
-                  onClick={() => state.saveNoteMutation.mutate()}
-                  disabled={state.saveNoteMutation.isPending || !state.noteIsDirty}
-                  title="Save note"
-                  aria-label="Save note"
-                >
-                  <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
-                </button>
-              </div>
             </div>
 
             <label className="field-control" style={{ marginBottom: 8 }}>
@@ -615,7 +673,11 @@ export function NotesPanel({
               </Select.Root>
             </label>
 
-            <div className="md-editor-surface">
+            <div
+              className="md-editor-surface"
+              onClick={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
               <MarkdownModeToggle
                 view={state.noteEditorView}
                 onChange={state.setNoteEditorView}
@@ -679,10 +741,10 @@ export function NotesPanel({
                         className="status-chip"
                         type="button"
                         onClick={() => state.setShowTagPicker(false)}
-                        title="Done"
-                        aria-label="Done"
+                        title="Close"
+                        aria-label="Close"
                       >
-                        Done
+                        Close
                       </button>
                     </div>
                     <div className="tag-picker-input-row">
@@ -779,6 +841,7 @@ export function NotesPanel({
                   <ExternalRefEditor
                     refs={editorExternalRefs}
                     onRemoveIndex={(idx) => state.setEditNoteExternalRefsText((prev: string) => state.removeExternalRefByIndex(prev, idx))}
+                    onOpenRef={(ref) => openGitRepositoryFromRef(state.selectedNote?.project_id || '', ref)}
                     onAdd={(ref) =>
                       state.setEditNoteExternalRefsText((prev: string) => state.externalRefsToText([...state.parseExternalRefsText(prev), ref]))
                     }
@@ -834,6 +897,27 @@ export function NotesPanel({
               <div className="meta">Created by: {state.selectedNoteCreator}</div>
               {state.selectedNoteTimeMeta && <div className="meta">{state.selectedNoteTimeMeta.label}: {state.toUserDateTime(state.selectedNoteTimeMeta.value, state.userTimezone)}</div>}
             </div>
+            {(state.noteIsDirty || state.saveNoteMutation.isPending) && (
+              <div className="project-editor-savebar note-editor-savebar">
+                <div className="project-editor-savebar-meta">
+                  <span className="badge unsaved-badge">1 unsaved section</span>
+                  <span className="meta">Changed: Note</span>
+                </div>
+                <button
+                  className="status-chip on project-editor-savebar-btn"
+                  type="button"
+                  onClick={() => state.saveNoteMutation.mutate()}
+                  disabled={state.saveNoteMutation.isPending || !state.noteIsDirty}
+                  title="Save all note changes"
+                  aria-label="Save all note changes"
+                >
+                  <Icon path="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zM12 19a3 3 0 1 1 0-6 3 3 0 0 1 0 6zM6 8h9" />
+                  <span className="project-editor-savebar-btn-label">
+                    {state.saveNoteMutation.isPending ? 'Saving...' : 'Save all changes'}
+                  </span>
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -841,7 +925,7 @@ export function NotesPanel({
   }
 
   return (
-    <section className="card">
+    <section className="card" data-tour-id="notes-panel">
       <div className="row wrap" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
         <h2 style={{ margin: 0 }}>Notes ({state.notes.data?.total ?? 0})</h2>
         <div className="row wrap notes-create-actions" style={{ gap: 6 }}>
@@ -921,15 +1005,17 @@ export function NotesPanel({
           </label>
         </div>
 
-        <div className="row wrap notes-tag-filters">
-          <PopularTagFilters
-            tags={state.noteTagSuggestions}
-            selectedTags={state.noteTags}
-            onToggleTag={state.toggleNoteFilterTag}
-            onClear={() => state.clearNoteFilterTags()}
-            idPrefix="note-filter"
-          />
-        </div>
+        {(state.noteTagSuggestions?.length ?? 0) > 0 && (
+          <div className="row wrap notes-tag-filters">
+            <PopularTagFilters
+              tags={state.noteTagSuggestions}
+              selectedTags={state.noteTags}
+              onToggleTag={state.toggleNoteFilterTag}
+              onClear={() => state.clearNoteFilterTags()}
+              idPrefix="note-filter"
+            />
+          </div>
+        )}
 
         <div className="task-list notes-list">
           {state.notes.isLoading && <div className="notice">Loading notes...</div>}
@@ -948,15 +1034,7 @@ export function NotesPanel({
               }}
               onDrop={(event) => onSectionDrop(event, null)}
             >
-              {ungroupedNotes.length > 0 && (
-                <VirtualizedList
-                  items={ungroupedNotes}
-                  estimateSize={240}
-                  overscan={8}
-                  itemKey={(note) => note.id}
-                  renderItem={(note) => renderNoteRow(note)}
-                />
-              )}
+              {ungroupedNotes.length > 0 && ungroupedNotes.map((note) => renderNoteRow(note))}
               {ungroupedNotes.length === 0 && (
                 <div className="meta" style={{ minHeight: 56, display: 'grid', alignItems: 'center' }}>
                   Drop note here to remove it from a group.
@@ -973,12 +1051,7 @@ export function NotesPanel({
               className="tasks-sections-accordion"
             >
               {noteSections.length > 0 && (
-                <VirtualizedList
-                  items={noteSections}
-                  estimateSize={420}
-                  overscan={4}
-                  itemKey={(section) => section.key}
-                  renderItem={(section) => {
+                noteSections.map((section) => {
                     const sectionGroup = section.groupId
                       ? noteGroups.find((group) => group.id === section.groupId) ?? null
                       : null
@@ -1066,21 +1139,14 @@ export function NotesPanel({
                         </Accordion.Content>
                       </Accordion.Item>
                     )
-                  }}
-                />
+                  })
               )}
             </Accordion.Root>
           )}
 
           {!state.notes.isLoading && !hasGroups && filteredNotes.length > 0 && (
             <div className="notes-items-stack">
-              <VirtualizedList
-                items={filteredNotes}
-                estimateSize={240}
-                overscan={8}
-                itemKey={(note) => note.id}
-                renderItem={(note) => renderNoteRow(note)}
-              />
+              {filteredNotes.map((note) => renderNoteRow(note))}
             </div>
           )}
 
@@ -1106,6 +1172,39 @@ export function NotesPanel({
           )}
         </div>
       </div>
+
+      <Dialog.Root open={notePreviewDialog !== null} onOpenChange={(open) => {
+        if (!open) setNotePreviewDialog(null)
+      }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="codex-chat-alert-overlay" />
+          <Dialog.Content className="codex-chat-alert-content docker-runtime-dialog markdown-preview-dialog">
+            <div className="notification-markdown-header">
+              <div>
+                <Dialog.Title className="codex-chat-alert-title notification-markdown-title">
+                  {notePreviewDialog?.title || 'Untitled'}
+                </Dialog.Title>
+                <Dialog.Description className="codex-chat-alert-description">
+                  Note preview.
+                </Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  className="action-icon docker-runtime-dialog-close notification-preview-close"
+                  aria-label="Close note preview"
+                  title="Close"
+                >
+                  <Icon path="M6 6l12 12M18 6L6 18" />
+                </button>
+              </Dialog.Close>
+            </div>
+            <div className="md-editor-content notification-markdown-content markdown-preview-body">
+              <MarkdownView value={notePreviewDialog?.body || ''} />
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
       <AlertDialog.Root
         open={noteGroupDialogOpen}
@@ -1224,6 +1323,15 @@ export function NotesPanel({
           </AlertDialog.Content>
         </AlertDialog.Portal>
       </AlertDialog.Root>
+      <ProjectGitRepositoryDialog
+        open={gitRepositoryDialogState !== null}
+        onOpenChange={(open) => {
+          if (!open) setGitRepositoryDialogState(null)
+        }}
+        userId={state.userId}
+        projectId={gitRepositoryDialogState?.projectId || ''}
+        target={gitRepositoryDialogState?.target || null}
+      />
     </section>
   )
 }

@@ -40,6 +40,20 @@ def build_client(tmp_path: Path, installation_id: str | None = TEST_INSTALLATION
     return client
 
 
+def _login_as_user(client: TestClient, *, username: str, password: str) -> None:
+    response = client.post("/api/auth/login", json={"username": username, "password": password})
+    assert response.status_code == 200
+
+
+def _activate_user_password(client: TestClient, *, username: str, temporary_password: str, new_password: str) -> None:
+    _login_as_user(client, username=username, password=temporary_password)
+    changed = client.post(
+        "/api/auth/change-password",
+        json={"current_password": temporary_password, "new_password": new_password},
+    )
+    assert changed.status_code == 200
+
+
 def test_license_status_defaults_to_trial(tmp_path: Path):
     client = build_client(tmp_path)
 
@@ -165,6 +179,85 @@ def test_license_status_hides_legacy_public_beta_metadata_for_non_beta_subscript
     assert "public_beta_free_until" not in metadata
 
 
+def test_license_status_includes_update_notification_with_stable_id_and_type(tmp_path: Path):
+    client = build_client(tmp_path)
+    from shared.models import LicenseInstallation, SessionLocal
+
+    with SessionLocal() as db:
+        installation = db.execute(
+            select(LicenseInstallation).where(LicenseInstallation.installation_id == TEST_INSTALLATION_ID)
+        ).scalar_one()
+        installation.metadata_json = json.dumps(
+            {
+                "latest_app_version": "v9.9.9",
+                "latest_image_tag": "v9.9.9",
+                "latest_release_at": "2026-03-01T12:00:00+00:00",
+            }
+        )
+        db.commit()
+
+    res = client.get("/api/license/status")
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["ok"] is True
+    license_payload = payload["license"]
+    notifications = license_payload.get("notifications") or []
+    assert isinstance(notifications, list)
+    assert len(notifications) >= 1
+    update_notifications = [n for n in notifications if n.get("notification_type") == "AppUpdateAvailable"]
+    assert len(update_notifications) == 1
+    item = update_notifications[0]
+    assert str(item.get("id") or "").startswith("license-app-update:")
+    assert item.get("dedupe_key") == item.get("id")
+    assert isinstance(item.get("payload"), dict)
+    assert item["payload"].get("action") == "auto_update_app_images"
+    assert item["payload"].get("target_image_tag") == "v9.9.9"
+
+
+def test_license_status_includes_control_plane_notifications_from_metadata(tmp_path: Path):
+    client = build_client(tmp_path)
+    from shared.models import LicenseInstallation, SessionLocal
+
+    with SessionLocal() as db:
+        installation = db.execute(
+            select(LicenseInstallation).where(LicenseInstallation.installation_id == TEST_INSTALLATION_ID)
+        ).scalar_one()
+        installation.metadata_json = json.dumps(
+            {
+                "control_plane_notifications": [
+                    {
+                        "id": "cpn-release-001",
+                        "message": "ConstructOS v0.1.1660 is available.",
+                        "created_at": "2026-03-01T12:00:00+00:00",
+                        "notification_type": "AppUpdateAvailable",
+                        "severity": "info",
+                        "dedupe_key": "cpn-release-001",
+                        "source_event": "control-plane.notification",
+                        "payload": {"action": "auto_update_app_images"},
+                    }
+                ]
+            }
+        )
+        db.commit()
+
+    res = client.get("/api/license/status")
+    assert res.status_code == 200
+    payload = res.json()["license"]
+    assert "control_plane_notifications" not in (payload.get("metadata") or {})
+    notifications = payload["notifications"]
+    item = next(note for note in notifications if note["id"] == "cpn-release-001")
+    assert item["notification_type"] == "AppUpdateAvailable"
+    assert item["payload"]["action"] == "auto_update_app_images"
+
+
+def test_auto_update_endpoint_rejects_invalid_image_tag(tmp_path: Path):
+    client = build_client(tmp_path)
+
+    res = client.post("/api/license/auto-update", json={"image_tag": "bad tag with space"})
+    assert res.status_code == 400
+    assert "Invalid image_tag format" in res.json().get("detail", "")
+
+
 def test_expired_license_blocks_write_endpoints(tmp_path: Path):
     client = build_client(tmp_path)
     from shared.models import LicenseInstallation, SessionLocal
@@ -251,3 +344,53 @@ def test_license_activate_endpoint_surfaces_activation_errors(tmp_path: Path, mo
     res = client.post("/api/license/activate", json={"activation_code": "ACT-TEST-0001-0002-0003"})
     assert res.status_code == 409
     assert "Seat limit exceeded" in res.json()["detail"]
+
+
+def test_license_activate_requires_owner(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+
+    created = client.post(
+        "/api/admin/users",
+        json={"workspace_id": ws_id, "username": "license-admin", "role": "Admin"},
+    )
+    assert created.status_code == 200
+    temp_password = created.json()["temporary_password"]
+
+    client.post("/api/auth/logout")
+    _activate_user_password(
+        client,
+        username="license-admin",
+        temporary_password=temp_password,
+        new_password="license-admin-pass-123",
+    )
+
+    res = client.post("/api/license/activate", json={"activation_code": "ACT-TEST-0001-0002-0003"})
+    assert res.status_code == 403
+    assert res.json()["detail"] == "Only workspace owners can activate a license."
+
+
+def test_license_auto_update_requires_owner(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+
+    created = client.post(
+        "/api/admin/users",
+        json={"workspace_id": ws_id, "username": "auto-update-admin", "role": "Admin"},
+    )
+    assert created.status_code == 200
+    temp_password = created.json()["temporary_password"]
+
+    client.post("/api/auth/logout")
+    _activate_user_password(
+        client,
+        username="auto-update-admin",
+        temporary_password=temp_password,
+        new_password="auto-update-admin-pass-123",
+    )
+
+    res = client.post("/api/license/auto-update")
+    assert res.status_code == 403
+    assert res.json()["detail"] == "Only workspace owners can trigger application auto-update."

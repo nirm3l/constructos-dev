@@ -12,12 +12,14 @@ export function useProjectState() {
   const [projectEmbeddingEnabled, setProjectEmbeddingEnabled] = React.useState(true)
   const [projectEmbeddingModel, setProjectEmbeddingModel] = React.useState('')
   const [projectContextPackEvidenceTopKText, setProjectContextPackEvidenceTopKText] = React.useState('')
+  const [projectAutomationMaxParallelTasksText, setProjectAutomationMaxParallelTasksText] = React.useState('4')
   const [projectChatIndexMode, setProjectChatIndexMode] = React.useState<'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'>(
     'KG_AND_VECTOR'
   )
   const [projectChatAttachmentIngestionMode, setProjectChatAttachmentIngestionMode] = React.useState<
     'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
   >('METADATA_ONLY')
+  const [projectEventStormingEnabled, setProjectEventStormingEnabled] = React.useState(true)
   const [projectTemplateParametersText, setProjectTemplateParametersText] = React.useState('')
   const [projectDescriptionView, setProjectDescriptionView] = React.useState<'write' | 'preview' | 'split'>('split')
   const [showProjectCreateForm, setShowProjectCreateForm] = React.useState(false)
@@ -29,14 +31,18 @@ export function useProjectState() {
   const [editProjectAttachmentRefsText, setEditProjectAttachmentRefsText] = React.useState('')
   const [editProjectEmbeddingEnabled, setEditProjectEmbeddingEnabled] = React.useState(false)
   const [editProjectEmbeddingModel, setEditProjectEmbeddingModel] = React.useState('')
+  const [editProjectVectorIndexDistillEnabled, setEditProjectVectorIndexDistillEnabled] = React.useState(false)
   const [editProjectContextPackEvidenceTopKText, setEditProjectContextPackEvidenceTopKText] = React.useState('')
+  const [editProjectAutomationMaxParallelTasksText, setEditProjectAutomationMaxParallelTasksText] = React.useState('4')
   const [editProjectChatIndexMode, setEditProjectChatIndexMode] = React.useState<'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'>(
     'OFF'
   )
   const [editProjectChatAttachmentIngestionMode, setEditProjectChatAttachmentIngestionMode] = React.useState<
     'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
   >('METADATA_ONLY')
+  const [editProjectEventStormingEnabled, setEditProjectEventStormingEnabled] = React.useState(true)
   const [createProjectMemberIds, setCreateProjectMemberIds] = React.useState<string[]>([])
+  const [createProjectWorkspaceSkillIds, setCreateProjectWorkspaceSkillIds] = React.useState<string[]>([])
   const [editProjectMemberIds, setEditProjectMemberIds] = React.useState<string[]>([])
   const [editProjectDescriptionView, setEditProjectDescriptionView] = React.useState<'write' | 'preview' | 'split'>('split')
   const [selectedProjectRuleId, setSelectedProjectRuleId] = React.useState<string | null>(null)
@@ -58,6 +64,15 @@ export function useProjectState() {
   const [projectsMode, setProjectsMode] = React.useState<'board' | 'list'>(() =>
     parseStoredProjectsMode(localStorage.getItem('ui_projects_mode'))
   )
+  const toggleCreateProjectWorkspaceSkill = React.useCallback((skillIdToToggle: string) => {
+    const normalized = String(skillIdToToggle || '').trim()
+    if (!normalized) return
+    setCreateProjectWorkspaceSkillIds((prev) => {
+      const normalizedPrev = prev.map((item) => String(item || '').trim()).filter(Boolean)
+      if (normalizedPrev.includes(normalized)) return normalizedPrev.filter((item) => item !== normalized)
+      return [...normalizedPrev, normalized]
+    })
+  }, [])
 
   return {
     projectName,
@@ -78,10 +93,14 @@ export function useProjectState() {
     setProjectEmbeddingModel,
     projectContextPackEvidenceTopKText,
     setProjectContextPackEvidenceTopKText,
+    projectAutomationMaxParallelTasksText,
+    setProjectAutomationMaxParallelTasksText,
     projectChatIndexMode,
     setProjectChatIndexMode,
     projectChatAttachmentIngestionMode,
     setProjectChatAttachmentIngestionMode,
+    projectEventStormingEnabled,
+    setProjectEventStormingEnabled,
     projectTemplateParametersText,
     setProjectTemplateParametersText,
     projectDescriptionView,
@@ -104,14 +123,23 @@ export function useProjectState() {
     setEditProjectEmbeddingEnabled,
     editProjectEmbeddingModel,
     setEditProjectEmbeddingModel,
+    editProjectVectorIndexDistillEnabled,
+    setEditProjectVectorIndexDistillEnabled,
     editProjectContextPackEvidenceTopKText,
     setEditProjectContextPackEvidenceTopKText,
+    editProjectAutomationMaxParallelTasksText,
+    setEditProjectAutomationMaxParallelTasksText,
     editProjectChatIndexMode,
     setEditProjectChatIndexMode,
     editProjectChatAttachmentIngestionMode,
     setEditProjectChatAttachmentIngestionMode,
+    editProjectEventStormingEnabled,
+    setEditProjectEventStormingEnabled,
     createProjectMemberIds,
     setCreateProjectMemberIds,
+    createProjectWorkspaceSkillIds,
+    setCreateProjectWorkspaceSkillIds,
+    toggleCreateProjectWorkspaceSkill,
     editProjectMemberIds,
     setEditProjectMemberIds,
     editProjectDescriptionView,

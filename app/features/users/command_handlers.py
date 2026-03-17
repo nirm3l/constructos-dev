@@ -8,15 +8,17 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from features.agents.execution_provider import encode_execution_model, parse_execution_model
 from shared.auth import generate_temporary_password, hash_password, verify_password
 from shared.core import AggregateEventRepository, User, UserPreferencesPatch, WorkspaceMember, allocate_id, coerce_originator_id
-from shared.settings import AGENT_CODEX_REASONING_EFFORT, BOOTSTRAP_WORKSPACE_ID
+from shared.settings import BOOTSTRAP_WORKSPACE_ID, agent_default_reasoning_effort_for_provider
 
 from .domain import (
     UserAggregate,
 )
 
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{3,64}$")
+OWNER_ROLE = "Owner"
 ADMIN_ROLES = {"Owner", "Admin"}
 WORKSPACE_ROLES = {"Owner", "Admin", "Member", "Guest"}
 ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
@@ -52,13 +54,17 @@ def _normalize_workspace_role(raw: str) -> str:
 
 
 def _normalize_chat_model(raw: object) -> str:
-    return str(raw or "").strip()
+    provider, model = parse_execution_model(raw)
+    normalized_model = str(model or "").strip()
+    if not normalized_model:
+        return ""
+    return encode_execution_model(provider=provider, model=normalized_model)
 
 
 def _normalize_reasoning_effort(raw: object) -> str:
     normalized = str(raw or "").strip().lower()
     if not normalized:
-        fallback = str(AGENT_CODEX_REASONING_EFFORT or "").strip().lower()
+        fallback = str(agent_default_reasoning_effort_for_provider("codex") or "").strip().lower()
         return fallback if fallback in ALLOWED_REASONING_EFFORTS else "medium"
     alias_map = {
         "very-high": "xhigh",
@@ -82,6 +88,40 @@ def _require_workspace_admin(db: Session, workspace_id: str, user_id: str) -> Wo
     if not membership or membership.role not in ADMIN_ROLES:
         raise HTTPException(status_code=403, detail="Admin access required")
     return membership
+
+
+def _count_workspace_members(
+    db: Session,
+    *,
+    workspace_id: str,
+    roles: set[str],
+    human_only: bool = False,
+    active_only: bool = False,
+) -> int:
+    stmt = select(func.count()).select_from(WorkspaceMember)
+    if human_only or active_only:
+        stmt = stmt.join(User, User.id == WorkspaceMember.user_id)
+    stmt = stmt.where(
+        WorkspaceMember.workspace_id == workspace_id,
+        WorkspaceMember.role.in_(tuple(sorted(roles))),
+    )
+    if human_only:
+        stmt = stmt.where(User.user_type == "human")
+    if active_only:
+        stmt = stmt.where(User.is_active.is_(True))
+    return int(db.execute(stmt).scalar_one() or 0)
+
+
+def _require_owner_for_admin_role_management(
+    actor_membership: WorkspaceMember,
+    *,
+    target_role: str | None = None,
+    next_role: str | None = None,
+) -> None:
+    if actor_membership.role == OWNER_ROLE:
+        return
+    if str(target_role or "").strip() in ADMIN_ROLES or str(next_role or "").strip() in ADMIN_ROLES:
+        raise HTTPException(status_code=403, detail="Only workspace owners can manage Owner/Admin roles")
 
 
 def _workspace_id_for_actor(db: Session, user_id: str) -> str:
@@ -117,6 +157,10 @@ class PatchUserPreferencesHandler:
             event_payload["agent_chat_reasoning_effort"] = _normalize_reasoning_effort(
                 data.get("agent_chat_reasoning_effort")
             )
+        if "onboarding_quick_tour_completed" in data:
+            event_payload["onboarding_quick_tour_completed"] = bool(data.get("onboarding_quick_tour_completed"))
+        if "onboarding_advanced_tour_completed" in data:
+            event_payload["onboarding_advanced_tour_completed"] = bool(data.get("onboarding_advanced_tour_completed"))
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = repo.load_with_class(
             aggregate_type="User",
@@ -132,19 +176,19 @@ class PatchUserPreferencesHandler:
             },
         )
         self.ctx.db.commit()
+        self.ctx.db.expire_all()
+        user = self.ctx.db.get(User, self.ctx.user.id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="User not found")
         return {
-            "id": self.ctx.user.id,
-            "theme": data.get("theme", self.ctx.user.theme),
-            "timezone": data.get("timezone", self.ctx.user.timezone),
-            "notifications_enabled": bool(data.get("notifications_enabled", self.ctx.user.notifications_enabled)),
-            "agent_chat_model": event_payload.get(
-                "agent_chat_model",
-                self.ctx.user.agent_chat_model,
-            ),
-            "agent_chat_reasoning_effort": event_payload.get(
-                "agent_chat_reasoning_effort",
-                self.ctx.user.agent_chat_reasoning_effort,
-            ),
+            "id": user.id,
+            "theme": str(user.theme or "light"),
+            "timezone": str(user.timezone or "UTC"),
+            "notifications_enabled": bool(user.notifications_enabled),
+            "agent_chat_model": str(user.agent_chat_model or ""),
+            "agent_chat_reasoning_effort": str(user.agent_chat_reasoning_effort or "medium"),
+            "onboarding_quick_tour_completed": bool(user.onboarding_quick_tour_completed),
+            "onboarding_advanced_tour_completed": bool(user.onboarding_advanced_tour_completed),
         }
 
 
@@ -198,9 +242,10 @@ class CreateWorkspaceUserHandler:
     role: str
 
     def __call__(self) -> dict:
-        _require_workspace_admin(self.ctx.db, self.workspace_id, self.ctx.user.id)
+        actor_membership = _require_workspace_admin(self.ctx.db, self.workspace_id, self.ctx.user.id)
         username = _normalize_username(self.username)
         role = _normalize_workspace_role(self.role)
+        _require_owner_for_admin_role_management(actor_membership, next_role=role)
         full_name = str(self.full_name or "").strip() or username
 
         existing_user = self.ctx.db.execute(select(User).where(func.lower(User.username) == username.lower())).scalar_one_or_none()
@@ -260,7 +305,7 @@ class ResetWorkspaceUserPasswordHandler:
     target_user_id: str
 
     def __call__(self) -> dict:
-        _require_workspace_admin(self.ctx.db, self.workspace_id, self.ctx.user.id)
+        actor_membership = _require_workspace_admin(self.ctx.db, self.workspace_id, self.ctx.user.id)
         target_membership = self.ctx.db.execute(
             select(WorkspaceMember).where(
                 WorkspaceMember.workspace_id == self.workspace_id,
@@ -272,6 +317,7 @@ class ResetWorkspaceUserPasswordHandler:
         target_user = self.ctx.db.get(User, self.target_user_id)
         if not target_user or target_user.user_type != "human":
             raise HTTPException(status_code=404, detail="User not found")
+        _require_owner_for_admin_role_management(actor_membership, target_role=target_membership.role)
 
         temp_password = generate_temporary_password(12)
         repo = AggregateEventRepository(self.ctx.db)
@@ -305,7 +351,7 @@ class UpdateWorkspaceUserRoleHandler:
     role: str
 
     def __call__(self) -> dict:
-        _require_workspace_admin(self.ctx.db, self.workspace_id, self.ctx.user.id)
+        actor_membership = _require_workspace_admin(self.ctx.db, self.workspace_id, self.ctx.user.id)
         role = _normalize_workspace_role(self.role)
         target_membership = self.ctx.db.execute(
             select(WorkspaceMember).where(
@@ -319,19 +365,31 @@ class UpdateWorkspaceUserRoleHandler:
         target_user = self.ctx.db.get(User, self.target_user_id)
         if not target_user:
             raise HTTPException(status_code=404, detail="User not found")
-        if target_user.user_type != "human" and role not in ADMIN_ROLES:
-            raise HTTPException(status_code=422, detail="Non-human users must keep admin role")
+        if target_user.user_type != "human" and role != "Admin":
+            raise HTTPException(status_code=422, detail="Non-human users must keep Admin role")
+        _require_owner_for_admin_role_management(
+            actor_membership,
+            target_role=target_membership.role,
+            next_role=role,
+        )
+
+        if target_membership.role == OWNER_ROLE and role != OWNER_ROLE:
+            owner_count = _count_workspace_members(
+                self.ctx.db,
+                workspace_id=self.workspace_id,
+                roles={OWNER_ROLE},
+                human_only=True,
+            )
+            if owner_count <= 1:
+                raise HTTPException(status_code=409, detail="Workspace must have at least one owner")
 
         if target_membership.role in ADMIN_ROLES and role not in ADMIN_ROLES:
-            admin_count = self.ctx.db.execute(
-                select(func.count())
-                .select_from(WorkspaceMember)
-                .where(
-                    WorkspaceMember.workspace_id == self.workspace_id,
-                    WorkspaceMember.role.in_(tuple(ADMIN_ROLES)),
-                )
-            ).scalar_one()
-            if int(admin_count or 0) <= 1:
+            admin_count = _count_workspace_members(
+                self.ctx.db,
+                workspace_id=self.workspace_id,
+                roles=ADMIN_ROLES,
+            )
+            if admin_count <= 1:
                 raise HTTPException(status_code=409, detail="Workspace must have at least one admin")
 
         repo = AggregateEventRepository(self.ctx.db)
@@ -359,7 +417,7 @@ class DeactivateWorkspaceUserHandler:
     target_user_id: str
 
     def __call__(self) -> dict:
-        _require_workspace_admin(self.ctx.db, self.workspace_id, self.ctx.user.id)
+        actor_membership = _require_workspace_admin(self.ctx.db, self.workspace_id, self.ctx.user.id)
         target_membership = self.ctx.db.execute(
             select(WorkspaceMember).where(
                 WorkspaceMember.workspace_id == self.workspace_id,
@@ -378,21 +436,28 @@ class DeactivateWorkspaceUserHandler:
             raise HTTPException(status_code=409, detail="You cannot deactivate your own account")
         if not bool(target_user.is_active):
             return {"ok": True, "workspace_id": self.workspace_id, "user_id": self.target_user_id, "is_active": False}
+        _require_owner_for_admin_role_management(actor_membership, target_role=target_membership.role)
 
         if target_membership.role in ADMIN_ROLES:
-            active_human_admin_count = self.ctx.db.execute(
-                select(func.count())
-                .select_from(WorkspaceMember)
-                .join(User, User.id == WorkspaceMember.user_id)
-                .where(
-                    WorkspaceMember.workspace_id == self.workspace_id,
-                    WorkspaceMember.role.in_(tuple(ADMIN_ROLES)),
-                    User.user_type == "human",
-                    User.is_active.is_(True),
-                )
-            ).scalar_one()
-            if int(active_human_admin_count or 0) <= 1:
+            active_human_admin_count = _count_workspace_members(
+                self.ctx.db,
+                workspace_id=self.workspace_id,
+                roles=ADMIN_ROLES,
+                human_only=True,
+                active_only=True,
+            )
+            if active_human_admin_count <= 1:
                 raise HTTPException(status_code=409, detail="Workspace must have at least one active human admin")
+        if target_membership.role == OWNER_ROLE:
+            active_human_owner_count = _count_workspace_members(
+                self.ctx.db,
+                workspace_id=self.workspace_id,
+                roles={OWNER_ROLE},
+                human_only=True,
+                active_only=True,
+            )
+            if active_human_owner_count <= 1:
+                raise HTTPException(status_code=409, detail="Workspace must have at least one active human owner")
 
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = repo.load_with_class(

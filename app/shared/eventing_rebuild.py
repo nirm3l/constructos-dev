@@ -14,6 +14,7 @@ from .contracts import EventEnvelope
 from features.notifications.domain import (
     EVENT_CREATED as NOTIFICATION_EVENT_CREATED,
     EVENT_MARKED_READ as NOTIFICATION_EVENT_MARKED_READ,
+    EVENT_MARKED_UNREAD as NOTIFICATION_EVENT_MARKED_UNREAD,
 )
 from features.projects.domain import (
     EVENT_CREATED as PROJECT_EVENT_CREATED,
@@ -150,6 +151,8 @@ from .task_automation import (
     derive_legacy_schedule_fields,
     normalize_execution_triggers,
 )
+from .delivery_evidence import derive_deploy_execution_snapshot
+from .task_relationships import normalize_task_relationships
 from .event_upcasters import upcast_event, upcast_snapshot
 from .eventing_store import StreamState, get_kurrent_client, kurrent_read_stream, snapshot_stream_id, stream_id, NotFoundError, serialize_snapshot_event
 
@@ -176,6 +179,7 @@ def _parse_tag_list(raw: str | None) -> list[str]:
 def _normalize_task_row_automation_fields(task: Task) -> None:
     instruction = str(task.instruction or task.scheduled_instruction or "").strip() or None
     execution_triggers = normalize_execution_triggers(task.execution_triggers)
+    task_relationships = normalize_task_relationships(task.task_relationships)
     if str(task.task_type or "").strip().lower() == "manual":
         execution_triggers = [
             trigger
@@ -196,6 +200,7 @@ def _normalize_task_row_automation_fields(task: Task) -> None:
     )
     task.instruction = instruction
     task.execution_triggers = json.dumps(execution_triggers)
+    task.task_relationships = json.dumps(task_relationships)
     task.task_type = str(legacy.get("task_type") or "manual")
     task.scheduled_instruction = legacy.get("scheduled_instruction")
     raw_scheduled_at = legacy.get("scheduled_at_utc")
@@ -365,12 +370,31 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         s_local["automation_pending_requests"] = max(0, pending_requests)
         s_local.setdefault("last_requested_instruction", None)
         s_local.setdefault("last_requested_source", None)
+        s_local.setdefault("last_requested_chat_session_id", None)
         s_local.setdefault("last_requested_trigger_task_id", None)
         s_local.setdefault("last_requested_from_status", None)
         s_local.setdefault("last_requested_to_status", None)
         s_local.setdefault("last_requested_triggered_at", None)
+        s_local.setdefault("last_requested_execution_intent", None)
+        s_local.setdefault("last_requested_execution_kickoff_intent", None)
+        s_local.setdefault("last_requested_project_creation_intent", None)
+        s_local.setdefault("last_requested_workflow_scope", None)
+        s_local.setdefault("last_requested_execution_mode", None)
+        s_local.setdefault("last_requested_task_completion_requested", None)
+        s_local.setdefault("last_requested_classifier_reason", None)
+        s_local.setdefault("last_dispatch_decision", None)
+        s_local.setdefault("last_ignored_request_source", None)
+        s_local.setdefault("last_ignored_request_source_task_id", None)
+        s_local.setdefault("last_ignored_request_reason", None)
+        s_local.setdefault("last_ignored_request_trigger_link", None)
+        s_local.setdefault("last_ignored_request_correlation_id", None)
+        s_local.setdefault("last_ignored_request_trigger_task_id", None)
+        s_local.setdefault("last_ignored_request_from_status", None)
+        s_local.setdefault("last_ignored_request_to_status", None)
+        s_local.setdefault("last_ignored_request_triggered_at", None)
         instruction = str(s_local.get("instruction") or s_local.get("scheduled_instruction") or "").strip() or None
         execution_triggers = normalize_execution_triggers(s_local.get("execution_triggers"))
+        task_relationships = normalize_task_relationships(s_local.get("task_relationships"))
         if str(s_local.get("task_type") or "").strip().lower() == "manual":
             execution_triggers = [
                 trigger
@@ -391,11 +415,17 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         )
         s_local["instruction"] = instruction
         s_local["execution_triggers"] = execution_triggers
+        s_local["task_relationships"] = task_relationships
         s_local["task_type"] = legacy.get("task_type") or "manual"
         s_local["scheduled_instruction"] = legacy.get("scheduled_instruction")
         s_local["scheduled_at_utc"] = legacy.get("scheduled_at_utc")
         s_local["schedule_timezone"] = legacy.get("schedule_timezone")
         s_local["recurring_rule"] = legacy.get("recurring_rule")
+        current_snapshot = s_local.get("last_deploy_execution")
+        s_local["last_deploy_execution"] = derive_deploy_execution_snapshot(
+            refs=s_local.get("external_refs"),
+            current_snapshot=current_snapshot if isinstance(current_snapshot, dict) else {},
+        ) or None
         return s_local
 
     s = dict(state)
@@ -420,10 +450,11 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "specification_id": p.get("specification_id"),
             "title": p["title"],
             "description": p.get("description", ""),
-            "status": p.get("status", "To do"),
+            "status": p.get("status", "To Do"),
             "priority": p.get("priority", "Med"),
             "due_date": p.get("due_date"),
             "assignee_id": p.get("assignee_id"),
+            "assigned_agent_code": p.get("assigned_agent_code"),
             "labels": p.get("labels", []),
             "subtasks": p.get("subtasks", []),
             "attachments": p.get("attachments", []),
@@ -431,6 +462,8 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "attachment_refs": p.get("attachment_refs", p.get("attachments", [])),
             "instruction": instruction,
             "execution_triggers": execution_triggers,
+            "task_relationships": normalize_task_relationships(p.get("task_relationships")),
+            "delivery_mode": p.get("delivery_mode"),
             "recurring_rule": legacy.get("recurring_rule"),
             "task_type": legacy.get("task_type", "manual"),
             "scheduled_instruction": legacy.get("scheduled_instruction"),
@@ -449,19 +482,37 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "last_agent_comment": None,
             "last_requested_instruction": None,
             "last_requested_source": None,
+            "last_requested_chat_session_id": None,
             "last_requested_trigger_task_id": None,
             "last_requested_from_status": None,
             "last_requested_to_status": None,
             "last_requested_triggered_at": None,
+            "last_requested_execution_intent": None,
+            "last_requested_execution_kickoff_intent": None,
+            "last_requested_project_creation_intent": None,
+            "last_requested_workflow_scope": None,
+            "last_requested_execution_mode": None,
+            "last_requested_task_completion_requested": None,
+            "last_requested_classifier_reason": None,
+            "last_dispatch_decision": None,
+            "last_ignored_request_source": None,
+            "last_ignored_request_source_task_id": None,
+            "last_ignored_request_reason": None,
+            "last_ignored_request_trigger_link": None,
+            "last_ignored_request_correlation_id": None,
+            "last_ignored_request_trigger_task_id": None,
+            "last_ignored_request_from_status": None,
+            "last_ignored_request_to_status": None,
+            "last_ignored_request_triggered_at": None,
             "automation_pending_requests": 0,
         }
     elif event.event_type in {TASK_EVENT_UPDATED, TASK_EVENT_REORDERED}:
         s.update(p)
     elif event.event_type == TASK_EVENT_COMPLETED:
-        s["status"] = "Done"
+        s["status"] = p.get("status", "Done")
         s["completed_at"] = p.get("completed_at")
     elif event.event_type == TASK_EVENT_REOPENED:
-        s["status"] = p.get("status", "To do")
+        s["status"] = p.get("status", "To Do")
         s["completed_at"] = None
     elif event.event_type == TASK_EVENT_ARCHIVED:
         s["archived"] = True
@@ -477,10 +528,30 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
         s["last_agent_error"] = None
         s["last_requested_instruction"] = p.get("instruction")
         s["last_requested_source"] = p.get("source")
+        s["last_requested_source_task_id"] = p.get("source_task_id")
+        s["last_requested_chat_session_id"] = p.get("chat_session_id")
+        s["last_requested_reason"] = p.get("reason")
+        s["last_requested_trigger_link"] = p.get("trigger_link")
+        s["last_requested_correlation_id"] = p.get("correlation_id")
         s["last_requested_trigger_task_id"] = p.get("trigger_task_id")
         s["last_requested_from_status"] = p.get("from_status")
         s["last_requested_to_status"] = p.get("to_status")
         s["last_requested_triggered_at"] = p.get("triggered_at")
+        s["last_requested_execution_intent"] = p.get("execution_intent")
+        s["last_requested_execution_kickoff_intent"] = p.get("execution_kickoff_intent")
+        s["last_requested_project_creation_intent"] = p.get("project_creation_intent")
+        s["last_requested_workflow_scope"] = p.get("workflow_scope")
+        s["last_requested_execution_mode"] = p.get("execution_mode")
+        s["last_requested_task_completion_requested"] = p.get("task_completion_requested")
+        s["last_requested_classifier_reason"] = p.get("classifier_reason")
+        if p.get("lead_handoff_token") is not None:
+            s["last_lead_handoff_token"] = p.get("lead_handoff_token")
+        if p.get("lead_handoff_at") is not None:
+            s["last_lead_handoff_at"] = p.get("lead_handoff_at")
+        if p.get("lead_handoff_refs") is not None:
+            s["last_lead_handoff_refs_json"] = p.get("lead_handoff_refs")
+        if p.get("lead_handoff_deploy_execution") is not None:
+            s["last_lead_handoff_deploy_execution"] = p.get("lead_handoff_deploy_execution")
     elif event.event_type == TASK_EVENT_AUTOMATION_STARTED:
         s["automation_state"] = "running"
         s["last_agent_error"] = None
@@ -530,6 +601,21 @@ def apply_task_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
 def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, Any]:
     s = dict(state)
     p = event.payload
+
+    updated_fields_raw = p.get("updated_fields")
+    updated_fields: set[str] | None = None
+    if isinstance(updated_fields_raw, (list, tuple, set)):
+        normalized = {str(item).strip() for item in updated_fields_raw if str(item).strip()}
+        if normalized:
+            updated_fields = normalized
+
+    def touched(field: str) -> bool:
+        if updated_fields is not None:
+            return field in updated_fields
+        # Legacy fallback: if no explicit updated_fields marker exists, ignore nulls
+        # so omitted event args from the serializer do not wipe read-model values.
+        return field in p and p.get(field) is not None
+
     if event.event_type == PROJECT_EVENT_CREATED:
         s = {
             "id": event.aggregate_id,
@@ -543,38 +629,47 @@ def apply_project_event(state: dict[str, Any], event: EventEnvelope) -> dict[str
             "embedding_enabled": bool(p.get("embedding_enabled", False)),
             "embedding_model": p.get("embedding_model"),
             "context_pack_evidence_top_k": p.get("context_pack_evidence_top_k"),
+            "automation_max_parallel_tasks": max(1, int(p.get("automation_max_parallel_tasks") or 4)),
             "chat_index_mode": str(p.get("chat_index_mode") or "OFF"),
             "chat_attachment_ingestion_mode": str(
                 p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
             ),
+            "vector_index_distill_enabled": bool(p.get("vector_index_distill_enabled", False)),
+            "event_storming_enabled": bool(p.get("event_storming_enabled", True)),
             "is_deleted": False,
         }
     elif event.event_type == PROJECT_EVENT_DELETED:
         s["is_deleted"] = True
     elif event.event_type == PROJECT_EVENT_UPDATED:
-        if "name" in p:
+        if touched("name"):
             s["name"] = p.get("name")
-        if "description" in p:
+        if touched("description"):
             s["description"] = p.get("description", "")
-        if "custom_statuses" in p:
+        if touched("custom_statuses"):
             statuses = p.get("custom_statuses")
             s["custom_statuses"] = statuses if statuses else DEFAULT_STATUSES
-        if "external_refs" in p:
+        if touched("external_refs"):
             s["external_refs"] = p.get("external_refs", [])
-        if "attachment_refs" in p:
+        if touched("attachment_refs"):
             s["attachment_refs"] = p.get("attachment_refs", [])
-        if "embedding_enabled" in p:
+        if touched("embedding_enabled"):
             s["embedding_enabled"] = bool(p.get("embedding_enabled", False))
-        if "embedding_model" in p:
+        if touched("embedding_model"):
             s["embedding_model"] = p.get("embedding_model")
-        if "context_pack_evidence_top_k" in p:
+        if touched("context_pack_evidence_top_k"):
             s["context_pack_evidence_top_k"] = p.get("context_pack_evidence_top_k")
-        if "chat_index_mode" in p:
+        if touched("automation_max_parallel_tasks"):
+            s["automation_max_parallel_tasks"] = max(1, int(p.get("automation_max_parallel_tasks") or 4))
+        if touched("chat_index_mode"):
             s["chat_index_mode"] = str(p.get("chat_index_mode") or "OFF")
-        if "chat_attachment_ingestion_mode" in p:
+        if touched("chat_attachment_ingestion_mode"):
             s["chat_attachment_ingestion_mode"] = str(
                 p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
             )
+        if touched("vector_index_distill_enabled"):
+            s["vector_index_distill_enabled"] = bool(p.get("vector_index_distill_enabled", False))
+        if touched("event_storming_enabled"):
+            s["event_storming_enabled"] = bool(p.get("event_storming_enabled", True))
     return s
 
 
@@ -954,6 +1049,20 @@ def maybe_snapshot(db: Session, aggregate_type: str, aggregate_id: str, version:
 def project_event(db: Session, ev: EventEnvelope):
     p, m = upcast_event(ev.event_type, ev.payload, ev.metadata)
 
+    updated_fields_raw = p.get("updated_fields")
+    updated_fields: set[str] | None = None
+    if isinstance(updated_fields_raw, (list, tuple, set)):
+        normalized = {str(item).strip() for item in updated_fields_raw if str(item).strip()}
+        if normalized:
+            updated_fields = normalized
+
+    def touched(field: str) -> bool:
+        if updated_fields is not None:
+            return field in updated_fields
+        # Legacy fallback: if no explicit updated_fields marker exists, ignore nulls
+        # so omitted event args from the serializer do not wipe read-model values.
+        return field in p and p.get(field) is not None
+
     if ev.event_type == PROJECT_EVENT_CREATED:
         project = db.get(Project, ev.aggregate_id)
         if project is None:
@@ -969,10 +1078,13 @@ def project_event(db: Session, ev: EventEnvelope):
         project.embedding_enabled = bool(p.get("embedding_enabled", False))
         project.embedding_model = p.get("embedding_model")
         project.context_pack_evidence_top_k = p.get("context_pack_evidence_top_k")
+        project.automation_max_parallel_tasks = max(1, int(p.get("automation_max_parallel_tasks") or 4))
         project.chat_index_mode = str(p.get("chat_index_mode") or "OFF")
         project.chat_attachment_ingestion_mode = str(
             p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
         )
+        project.vector_index_distill_enabled = bool(p.get("vector_index_distill_enabled", False))
+        project.event_storming_enabled = bool(p.get("event_storming_enabled", True))
     elif ev.event_type == PROJECT_EVENT_DELETED:
         project = db.get(Project, ev.aggregate_id)
         if project:
@@ -983,28 +1095,34 @@ def project_event(db: Session, ev: EventEnvelope):
     elif ev.event_type == PROJECT_EVENT_UPDATED:
         project = db.get(Project, ev.aggregate_id)
         if project:
-            if "name" in p:
+            if touched("name"):
                 project.name = p.get("name") or project.name
-            if "description" in p:
+            if touched("description"):
                 project.description = p.get("description", "") or ""
-            if "custom_statuses" in p:
+            if touched("custom_statuses"):
                 project.custom_statuses = json.dumps(p.get("custom_statuses", DEFAULT_STATUSES) or DEFAULT_STATUSES)
-            if "external_refs" in p:
+            if touched("external_refs"):
                 project.external_refs = json.dumps(p.get("external_refs", []))
-            if "attachment_refs" in p:
+            if touched("attachment_refs"):
                 project.attachment_refs = json.dumps(p.get("attachment_refs", []))
-            if "embedding_enabled" in p:
+            if touched("embedding_enabled"):
                 project.embedding_enabled = bool(p.get("embedding_enabled", False))
-            if "embedding_model" in p:
+            if touched("embedding_model"):
                 project.embedding_model = p.get("embedding_model")
-            if "context_pack_evidence_top_k" in p:
+            if touched("context_pack_evidence_top_k"):
                 project.context_pack_evidence_top_k = p.get("context_pack_evidence_top_k")
-            if "chat_index_mode" in p:
+            if touched("automation_max_parallel_tasks"):
+                project.automation_max_parallel_tasks = max(1, int(p.get("automation_max_parallel_tasks") or 4))
+            if touched("chat_index_mode"):
                 project.chat_index_mode = str(p.get("chat_index_mode") or "OFF")
-            if "chat_attachment_ingestion_mode" in p:
+            if touched("chat_attachment_ingestion_mode"):
                 project.chat_attachment_ingestion_mode = str(
                     p.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
                 )
+            if touched("vector_index_distill_enabled"):
+                project.vector_index_distill_enabled = bool(p.get("vector_index_distill_enabled", False))
+            if touched("event_storming_enabled"):
+                project.event_storming_enabled = bool(p.get("event_storming_enabled", True))
     elif ev.event_type == PROJECT_EVENT_MEMBER_UPSERTED:
         project_id = p.get("project_id") or ev.aggregate_id
         workspace_id = p.get("workspace_id") or m.get("workspace_id")
@@ -1101,6 +1219,7 @@ def project_event(db: Session, ev: EventEnvelope):
             db.add(task)
         instruction = str(p.get("instruction") or p.get("scheduled_instruction") or "").strip() or None
         execution_triggers = normalize_execution_triggers(p.get("execution_triggers"))
+        task_relationships = normalize_task_relationships(p.get("task_relationships"))
         if not execution_triggers:
             legacy_trigger = build_legacy_schedule_trigger(
                 scheduled_at_utc=p.get("scheduled_at_utc"),
@@ -1119,10 +1238,11 @@ def project_event(db: Session, ev: EventEnvelope):
         task.specification_id = p.get("specification_id")
         task.title = p["title"]
         task.description = p.get("description", "") or ""
-        task.status = p.get("status", "To do")
+        task.status = p.get("status", "To Do")
         task.priority = p.get("priority", "Med")
         task.due_date = datetime.fromisoformat(p["due_date"]) if p.get("due_date") else None
         task.assignee_id = p.get("assignee_id")
+        task.assigned_agent_code = p.get("assigned_agent_code")
         task.labels = json.dumps(p.get("labels", []))
         task.subtasks = json.dumps(p.get("subtasks", []))
         task.attachments = json.dumps(p.get("attachments", []))
@@ -1130,6 +1250,9 @@ def project_event(db: Session, ev: EventEnvelope):
         task.attachment_refs = json.dumps(p.get("attachment_refs", p.get("attachments", [])))
         task.instruction = instruction
         task.execution_triggers = json.dumps(execution_triggers)
+        task.task_relationships = json.dumps(task_relationships)
+        if "delivery_mode" in p:
+            setattr(task, "delivery_mode", p.get("delivery_mode"))
         task.recurring_rule = legacy_schedule.get("recurring_rule")
         task.task_type = legacy_schedule.get("task_type", "manual")
         task.scheduled_instruction = legacy_schedule.get("scheduled_instruction")
@@ -1254,8 +1377,8 @@ def project_event(db: Session, ev: EventEnvelope):
         if role == "assistant":
             if "codex_session_id" in p:
                 session.codex_session_id = p.get("codex_session_id")
-            if "usage" in p:
-                session.usage_json = json.dumps(usage_payload, ensure_ascii=True)
+        if "usage" in p:
+            session.usage_json = json.dumps(usage_payload, ensure_ascii=True)
         session.last_message_at = turn_created_at
         session.last_message_preview = str(p.get("content") or "")[:240]
 
@@ -1271,7 +1394,7 @@ def project_event(db: Session, ev: EventEnvelope):
                     content=str(p.get("content") or ""),
                     order_index=order_index,
                     attachment_refs=json.dumps(attachment_refs, ensure_ascii=True),
-                    usage_json=json.dumps(usage_payload if role == "assistant" else {}, ensure_ascii=True),
+                    usage_json=json.dumps(usage_payload, ensure_ascii=True),
                     is_deleted=False,
                     turn_created_at=turn_created_at,
                 )
@@ -1284,7 +1407,7 @@ def project_event(db: Session, ev: EventEnvelope):
                 message.content = str(p.get("content") or "")
                 message.order_index = order_index
                 message.attachment_refs = json.dumps(attachment_refs, ensure_ascii=True)
-                if role == "assistant":
+                if "usage" in p:
                     message.usage_json = json.dumps(usage_payload, ensure_ascii=True)
                 message.turn_created_at = turn_created_at
                 message.is_deleted = False
@@ -1501,10 +1624,10 @@ def project_event(db: Session, ev: EventEnvelope):
                     if p["status"] != "Done":
                         task.completed_at = None
             elif ev.event_type == TASK_EVENT_COMPLETED:
-                task.status = "Done"
+                task.status = p.get("status", "Done")
                 task.completed_at = datetime.fromisoformat(p["completed_at"])
             elif ev.event_type == TASK_EVENT_REOPENED:
-                task.status = p.get("status", "To do")
+                task.status = p.get("status", "To Do")
                 task.completed_at = None
             elif ev.event_type == TASK_EVENT_ARCHIVED:
                 task.archived = True
@@ -1628,6 +1751,10 @@ def project_event(db: Session, ev: EventEnvelope):
         n = db.get(Notification, p["notification_id"])
         if n and n.user_id == p["user_id"]:
             n.is_read = True
+    elif ev.event_type == NOTIFICATION_EVENT_MARKED_UNREAD:
+        n = db.get(Notification, p["notification_id"])
+        if n and n.user_id == p["user_id"]:
+            n.is_read = False
     elif ev.event_type == NOTIFICATION_EVENT_CREATED:
         # Idempotent projection: in EventStore mode we can project the same event
         # via write-through append + later catch-up, so inserts must be safe.
@@ -1743,6 +1870,8 @@ def project_event(db: Session, ev: EventEnvelope):
         user.agent_chat_reasoning_effort = str(
             p.get("agent_chat_reasoning_effort") or user.agent_chat_reasoning_effort or "medium"
         )
+        user.onboarding_quick_tour_completed = bool(p.get("onboarding_quick_tour_completed", False))
+        user.onboarding_advanced_tour_completed = bool(p.get("onboarding_advanced_tour_completed", False))
 
         workspace_id = p.get("workspace_id")
         workspace_role = p.get("workspace_role")
@@ -1805,16 +1934,20 @@ def project_event(db: Session, ev: EventEnvelope):
     elif ev.event_type == USER_EVENT_PREFERENCES_UPDATED:
         user = db.get(User, ev.aggregate_id)
         if user:
-            if "theme" in p and p["theme"] in {"light", "dark"}:
+            if p.get("theme") in {"light", "dark"}:
                 user.theme = p["theme"]
-            if "timezone" in p and p["timezone"]:
+            if p.get("timezone"):
                 user.timezone = p["timezone"]
-            if "notifications_enabled" in p:
+            if "notifications_enabled" in p and p.get("notifications_enabled") is not None:
                 user.notifications_enabled = bool(p["notifications_enabled"])
-            if "agent_chat_model" in p:
+            if "agent_chat_model" in p and p.get("agent_chat_model") is not None:
                 user.agent_chat_model = str(p.get("agent_chat_model") or "")
-            if "agent_chat_reasoning_effort" in p and p.get("agent_chat_reasoning_effort"):
+            if "agent_chat_reasoning_effort" in p and p.get("agent_chat_reasoning_effort") is not None:
                 user.agent_chat_reasoning_effort = str(p.get("agent_chat_reasoning_effort"))
+            if "onboarding_quick_tour_completed" in p and p.get("onboarding_quick_tour_completed") is not None:
+                user.onboarding_quick_tour_completed = bool(p.get("onboarding_quick_tour_completed"))
+            if "onboarding_advanced_tour_completed" in p and p.get("onboarding_advanced_tour_completed") is not None:
+                user.onboarding_advanced_tour_completed = bool(p.get("onboarding_advanced_tour_completed"))
 
     workspace_id = m.get("workspace_id")
     actor_id = m.get("actor_id")

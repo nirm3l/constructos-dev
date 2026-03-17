@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import threading
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, create_engine
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
+from .observability import incr, set_value
 from .settings import DATABASE_URL
 
 
@@ -42,6 +44,8 @@ class User(Base, TimeMixin):
     notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     agent_chat_model: Mapped[str] = mapped_column(String(128), default="")
     agent_chat_reasoning_effort: Mapped[str] = mapped_column(String(16), default="medium")
+    onboarding_quick_tour_completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    onboarding_advanced_tour_completed: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Workspace(Base, TimeMixin):
@@ -60,6 +64,18 @@ class WorkspaceMember(Base):
     role: Mapped[str] = mapped_column(String(16), default="Member")
 
 
+class WorkspaceAgentRuntime(Base, TimeMixin):
+    __tablename__ = "workspace_agent_runtimes"
+    __table_args__ = (UniqueConstraint("workspace_id", "user_id", name="ux_workspace_agent_runtimes_workspace_user"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    model: Mapped[str] = mapped_column(String(128), default="")
+    reasoning_effort: Mapped[str] = mapped_column(String(16), default="")
+    is_background_default: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class Project(Base, TimeMixin):
     __tablename__ = "projects"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
@@ -67,14 +83,17 @@ class Project(Base, TimeMixin):
     name: Mapped[str] = mapped_column(String(128))
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(16), default="Active")
-    custom_statuses: Mapped[str] = mapped_column(Text, default='["To do", "In progress", "Done"]')
+    custom_statuses: Mapped[str] = mapped_column(Text, default='["To Do", "In Progress", "Done"]')
     external_refs: Mapped[str] = mapped_column(Text, default="[]")
     attachment_refs: Mapped[str] = mapped_column(Text, default="[]")
-    embedding_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    embedding_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     embedding_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     context_pack_evidence_top_k: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    automation_max_parallel_tasks: Mapped[int] = mapped_column(Integer, default=4)
     chat_index_mode: Mapped[str] = mapped_column(String(32), default="OFF")
     chat_attachment_ingestion_mode: Mapped[str] = mapped_column(String(32), default="METADATA_ONLY")
+    vector_index_distill_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    event_storming_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
@@ -125,6 +144,26 @@ class ProjectSkill(Base, TimeMixin):
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class ProjectPluginConfig(Base, TimeMixin):
+    __tablename__ = "project_plugin_configs"
+    __table_args__ = (UniqueConstraint("project_id", "plugin_key", name="ux_project_plugin_configs_project_key"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    plugin_key: Mapped[str] = mapped_column(String(128), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    config_json: Mapped[str] = mapped_column(Text, default="{}")
+    compiled_policy_json: Mapped[str] = mapped_column(Text, default="{}")
+    last_validation_errors_json: Mapped[str] = mapped_column(Text, default="[]")
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    updated_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class WorkspaceSkill(Base, TimeMixin):
     __tablename__ = "workspace_skills"
     __table_args__ = (UniqueConstraint("workspace_id", "skill_key", name="ux_workspace_skills_workspace_key"),)
@@ -169,10 +208,11 @@ class Task(Base, TimeMixin):
     specification_id: Mapped[str | None] = mapped_column(ForeignKey("specifications.id"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(256))
     description: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(32), default="To do")
+    status: Mapped[str] = mapped_column(String(32), default="To Do")
     priority: Mapped[str] = mapped_column(String(16), default="Med")
     due_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     assignee_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    assigned_agent_code: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     labels: Mapped[str] = mapped_column(Text, default="[]")
     subtasks: Mapped[str] = mapped_column(Text, default="[]")
     attachments: Mapped[str] = mapped_column(Text, default="[]")
@@ -180,6 +220,8 @@ class Task(Base, TimeMixin):
     attachment_refs: Mapped[str] = mapped_column(Text, default="[]")
     instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
     execution_triggers: Mapped[str] = mapped_column(Text, default="[]")
+    task_relationships: Mapped[str] = mapped_column(Text, default="[]")
+    delivery_mode: Mapped[str] = mapped_column(String(32), default="deployable_slice")
     recurring_rule: Mapped[str | None] = mapped_column(String(64), nullable=True)
     task_type: Mapped[str] = mapped_column(String(32), default="manual")
     scheduled_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -361,6 +403,71 @@ class ProjectionCheckpoint(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class EventStormingAnalysisJob(Base, TimeMixin):
+    __tablename__ = "event_storming_analysis_jobs"
+    __table_args__ = (
+        UniqueConstraint("dedup_key", name="ux_event_storming_jobs_dedup"),
+        Index("ix_event_storming_jobs_status_next_attempt", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), nullable=True, index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(32), index=True)
+    entity_id: Mapped[str] = mapped_column(String(64), index=True)
+    reason: Mapped[str] = mapped_column(String(24), default="updated")
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dedup_key: Mapped[str] = mapped_column(String(200), index=True)
+    last_commit_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class EventStormingAnalysisRun(Base, TimeMixin):
+    __tablename__ = "event_storming_analysis_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[int | None] = mapped_column(ForeignKey("event_storming_analysis_jobs.id"), nullable=True, index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(32), index=True)
+    entity_id: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="done", index=True)
+    inference_method: Mapped[str] = mapped_column(String(32), default="heuristic")
+    extractor_version: Mapped[str] = mapped_column(String(32), default="es-heuristic-v1")
+    components_count: Mapped[int] = mapped_column(Integer, default=0)
+    relations_count: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_chars: Mapped[int] = mapped_column(Integer, default=0)
+    input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    usage_json: Mapped[str] = mapped_column(Text, default="{}")
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    output_json: Mapped[str] = mapped_column(Text, default="{}")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ContextSessionState(Base, TimeMixin):
+    __tablename__ = "context_session_states"
+    __table_args__ = (
+        UniqueConstraint("scope_type", "scope_id", name="ux_context_session_scope"),
+        Index("ix_context_session_project_scope", "project_id", "scope_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), nullable=True, index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    scope_type: Mapped[str] = mapped_column(String(48), index=True)
+    scope_id: Mapped[str] = mapped_column(String(160), index=True)
+    context_revision: Mapped[str] = mapped_column(String(96), default="")
+    last_frame_mode: Mapped[str] = mapped_column(String(16), default="full")
+    last_frame_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
 class CommandExecution(Base):
@@ -558,12 +665,57 @@ def _build_engine(url: str):
     kwargs: dict[str, object] = {"pool_pre_ping": True}
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}
+    else:
+        kwargs["pool_size"] = int(os.getenv("DB_POOL_SIZE", "20"))
+        kwargs["max_overflow"] = int(os.getenv("DB_MAX_OVERFLOW", "20"))
+        kwargs["pool_timeout"] = int(os.getenv("DB_POOL_TIMEOUT_SECONDS", "30"))
+        kwargs["pool_recycle"] = int(os.getenv("DB_POOL_RECYCLE_SECONDS", "1800"))
     return create_engine(url, **kwargs)
 
 
+_db_pool_lock = threading.Lock()
+_db_pool_checked_out = 0
+_db_pool_checked_out_peak = 0
+
+
+def _attach_pool_observers(sqlalchemy_engine) -> None:
+    if getattr(sqlalchemy_engine, "_constructos_pool_observers_attached", False):
+        return
+
+    @event.listens_for(sqlalchemy_engine, "checkout")
+    def _on_checkout(_dbapi_connection, _connection_record, _connection_proxy) -> None:
+        global _db_pool_checked_out, _db_pool_checked_out_peak
+        with _db_pool_lock:
+            _db_pool_checked_out += 1
+            if _db_pool_checked_out > _db_pool_checked_out_peak:
+                _db_pool_checked_out_peak = _db_pool_checked_out
+            checked_out = _db_pool_checked_out
+            peak = _db_pool_checked_out_peak
+        incr("db_pool_checkout_events")
+        set_value("db_pool_checked_out", checked_out)
+        set_value("db_pool_checked_out_peak", peak)
+
+    @event.listens_for(sqlalchemy_engine, "checkin")
+    def _on_checkin(_dbapi_connection, _connection_record) -> None:
+        global _db_pool_checked_out
+        with _db_pool_lock:
+            _db_pool_checked_out = max(0, _db_pool_checked_out - 1)
+            checked_out = _db_pool_checked_out
+        incr("db_pool_checkin_events")
+        set_value("db_pool_checked_out", checked_out)
+
+    sqlalchemy_engine._constructos_pool_observers_attached = True
+
+
+_existing_session_local = globals().get("SessionLocal")
 _engine_url = str(DATABASE_URL or "").strip() or _runtime_database_url()
 engine = _build_engine(_engine_url)
-SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+_attach_pool_observers(engine)
+if isinstance(_existing_session_local, sessionmaker):
+    SessionLocal = _existing_session_local
+    SessionLocal.configure(bind=engine, autocommit=False, autoflush=False)
+else:
+    SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 
 def ensure_engine() -> str:
@@ -572,6 +724,7 @@ def ensure_engine() -> str:
     if runtime_url == _engine_url:
         return _engine_url
     new_engine = _build_engine(runtime_url)
+    _attach_pool_observers(new_engine)
     previous_engine = engine
     engine = new_engine
     SessionLocal.configure(bind=new_engine)

@@ -15,6 +15,7 @@ from .settings import (
     PERSISTENT_SUBSCRIPTION_EVENT_BUFFER_SIZE,
     PERSISTENT_SUBSCRIPTION_MAX_ACK_BATCH_SIZE,
     PERSISTENT_SUBSCRIPTION_MAX_ACK_DELAY_SECONDS,
+    PERSISTENT_SUBSCRIPTION_READ_MODEL_MAX_EVENT_RETRIES,
     PERSISTENT_SUBSCRIPTION_READ_MODEL_GROUP,
     PERSISTENT_SUBSCRIPTION_RETRY_BACKOFF_SECONDS,
     PERSISTENT_SUBSCRIPTION_STOPPING_GRACE_SECONDS,
@@ -25,6 +26,7 @@ _projection_stop_event = threading.Event()
 _projection_thread: threading.Thread | None = None
 _projection_subscription: Any | None = None
 _projection_subscription_lock = threading.Lock()
+_projection_event_failures: dict[str, int] = {}
 
 
 def _extract_aggregate_from_stream(stream_name: str) -> tuple[str, str] | None:
@@ -127,25 +129,64 @@ def _projection_worker_loop():
             for event in subscription:
                 if _projection_stop_event.is_set():
                     break
+                event_key = f"{getattr(event, 'stream_name', '')}:{int(getattr(event, 'stream_position', -1))}"
                 with SessionLocal() as db:
                     should_ack = False
                     try:
                         _project_recorded_event(db, event)
                         db.commit()
+                        _projection_event_failures.pop(event_key, None)
                         should_ack = True
                     except IntegrityError as exc:
                         db.rollback()
                         if _is_duplicate_projection_error(exc):
+                            _projection_event_failures.pop(event_key, None)
                             should_ack = True
                         else:
-                            logger.warning("Kurrent projection event failed, retrying event: %s", exc)
-                            subscription.nack(event, "retry")
-                            continue
+                            failures = int(_projection_event_failures.get(event_key, 0)) + 1
+                            _projection_event_failures[event_key] = failures
+                            if failures >= max(1, int(PERSISTENT_SUBSCRIPTION_READ_MODEL_MAX_EVENT_RETRIES)):
+                                logger.error(
+                                    "Kurrent projection event failed too many times; acknowledging to unblock stream. "
+                                    "event=%s failures=%s error=%s",
+                                    event_key,
+                                    failures,
+                                    exc,
+                                )
+                                _projection_event_failures.pop(event_key, None)
+                                should_ack = True
+                            else:
+                                logger.warning(
+                                    "Kurrent projection event failed, retrying event: %s (attempt %s/%s)",
+                                    exc,
+                                    failures,
+                                    max(1, int(PERSISTENT_SUBSCRIPTION_READ_MODEL_MAX_EVENT_RETRIES)),
+                                )
+                                subscription.nack(event, "retry")
+                                continue
                     except Exception as exc:
                         db.rollback()
-                        logger.warning("Kurrent projection event failed, retrying event: %s", exc)
-                        subscription.nack(event, "retry")
-                        continue
+                        failures = int(_projection_event_failures.get(event_key, 0)) + 1
+                        _projection_event_failures[event_key] = failures
+                        if failures >= max(1, int(PERSISTENT_SUBSCRIPTION_READ_MODEL_MAX_EVENT_RETRIES)):
+                            logger.error(
+                                "Kurrent projection event failed too many times; acknowledging to unblock stream. "
+                                "event=%s failures=%s error=%s",
+                                event_key,
+                                failures,
+                                exc,
+                            )
+                            _projection_event_failures.pop(event_key, None)
+                            should_ack = True
+                        else:
+                            logger.warning(
+                                "Kurrent projection event failed, retrying event: %s (attempt %s/%s)",
+                                exc,
+                                failures,
+                                max(1, int(PERSISTENT_SUBSCRIPTION_READ_MODEL_MAX_EVENT_RETRIES)),
+                            )
+                            subscription.nack(event, "retry")
+                            continue
                 if should_ack:
                     subscription.ack(event)
         except Exception as exc:

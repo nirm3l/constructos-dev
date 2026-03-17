@@ -798,6 +798,7 @@ def _project_project_event(ev: EventEnvelope, commit_position: int) -> None:
         "embedding_enabled",
         "embedding_model",
         "context_pack_evidence_top_k",
+        "automation_max_parallel_tasks",
         "chat_index_mode",
         "chat_attachment_ingestion_mode",
     ):
@@ -836,6 +837,7 @@ def _task_props_from_event(ev: EventEnvelope) -> dict[str, Any]:
         "priority",
         "due_date",
         "assignee_id",
+        "assigned_agent_code",
         "labels",
         "instruction",
         "execution_triggers",
@@ -861,7 +863,7 @@ def _task_props_from_event(ev: EventEnvelope) -> dict[str, Any]:
         props["status"] = "Done"
         props["completed_at"] = p.get("completed_at")
     elif ev.event_type == TASK_EVENT_REOPENED:
-        props["status"] = p.get("status", "To do")
+        props["status"] = p.get("status", "To Do")
         props["completed_at"] = None
     elif ev.event_type == TASK_EVENT_ARCHIVED:
         props["archived"] = True

@@ -13,14 +13,32 @@ import {
 
 export function useTaskNoteEditorEffects(c: any) {
   React.useEffect(() => {
-    if (!c.selectedTask) return
+    if (!c.selectedTask) {
+      // During query refetch, selectedTask may be temporarily undefined while a task is still selected.
+      // Only clear editor/live state when no task is selected at all.
+      if (!c.selectedTaskId) {
+        c.setTaskEditorHydratedTaskId(null)
+        c.setTaskEditorBaselineTask(null)
+        c.setTaskEditorTouched(false)
+        c.setAutomationLiveTaskId(null)
+        c.setAutomationLiveRunId(null)
+        c.setAutomationLiveActive(false)
+        c.setAutomationLiveBuffer('')
+        c.setAutomationLiveStatusText('')
+        c.setAutomationLiveUpdatedAt(null)
+      }
+      return
+    }
+    c.setTaskEditorHydratedTaskId(null)
     c.setEditTitle(c.selectedTask.title ?? '')
-    c.setEditStatus(c.selectedTask.status)
-    c.setEditDescription(c.selectedTask.description)
-    c.setEditPriority(c.selectedTask.priority)
+    c.setEditStatus(c.selectedTask.status ?? 'To Do')
+    c.setEditDescription(c.selectedTask.description ?? '')
+    c.setEditPriority(c.selectedTask.priority ?? 'Med')
     c.setEditDueDate(toLocalDateTimeInput(c.selectedTask.due_date))
-    c.setEditProjectId(c.selectedTask.project_id)
+    c.setEditProjectId(c.selectedTask.project_id ?? '')
     c.setEditTaskGroupId(c.selectedTask.task_group_id ?? '')
+    c.setEditAssigneeId(c.selectedTask.assignee_id ?? '')
+    c.setEditAssignedAgentCode(c.selectedTask.assigned_agent_code ?? '')
     c.setEditTaskTags(c.selectedTask.labels ?? [])
     c.setEditTaskExternalRefsText(externalRefsToText(c.selectedTask.external_refs))
     c.setEditTaskAttachmentRefsText(attachmentRefsToText(c.selectedTask.attachment_refs))
@@ -56,7 +74,10 @@ export function useTaskNoteEditorEffects(c: any) {
     c.setCommentBody('')
     c.setExpandedCommentIds(new Set())
     c.setTaskEditorError(null)
-  }, [c.selectedTask?.id, c.currentUserTimezone])
+    c.setTaskEditorBaselineTask(JSON.parse(JSON.stringify(c.selectedTask)))
+    c.setTaskEditorTouched(false)
+    c.setTaskEditorHydratedTaskId(c.selectedTask.id ?? null)
+  }, [c.selectedTask?.id, c.selectedTask?.updated_at, c.currentUserTimezone])
 
   React.useEffect(() => {
     if (!c.taskEditorError) return

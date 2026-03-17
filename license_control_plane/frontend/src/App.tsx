@@ -2,9 +2,12 @@ import React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ApiError,
+  createAppNotification,
+  deactivateAppNotification,
   deleteInstallation,
   getHealth,
   getInstallation,
+  listAppNotifications,
   listContactRequests,
   listInstallations,
   listWaitlist,
@@ -15,6 +18,8 @@ import {
   updateInstallationSubscription
 } from './api'
 import type {
+  AdminAppNotificationCreateRequest,
+  AppNotificationAudienceKind,
   AdminProvisionOnboardingRequest,
   AdminSendEmailRequest,
   InstallationListItem,
@@ -31,6 +36,8 @@ const LEGACY_STATUS_ALIASES: Record<string, SubscriptionStatus> = {
   grace: 'active',
 }
 const ONBOARDING_PLAN_CODES = ['monthly', 'yearly', 'trial', 'beta', 'lifetime'] as const
+const APP_NOTIFICATION_AUDIENCE_OPTIONS: AppNotificationAudienceKind[] = ['all', 'customer_ref', 'customer_email', 'installation_id']
+const APP_NOTIFICATION_ACTION_OPTIONS = ['none', 'auto_update_app_images'] as const
 const SUBSCRIPTION_PLAN_CODES_BY_STATUS: Record<SubscriptionStatus, string[]> = {
   none: ['', 'monthly', 'yearly'],
   active: ['monthly', 'yearly'],
@@ -64,6 +71,18 @@ type OnboardingProvisionFormState = {
   metadata_text: string
 }
 
+type AppNotificationFormState = {
+  title: string
+  message: string
+  severity: 'info' | 'warning' | 'critical'
+  action: typeof APP_NOTIFICATION_ACTION_OPTIONS[number]
+  audience_kind: AppNotificationAudienceKind
+  audience_values_text: string
+  active_from: string
+  active_until: string
+  payload_text: string
+}
+
 type CustomerGroup = {
   customer_ref: string
   items: InstallationListItem[]
@@ -85,6 +104,32 @@ function parseMetadata(metadataText: string): Record<string, unknown> {
     throw new Error('Metadata must be a JSON object')
   }
   return parsed as Record<string, unknown>
+}
+
+function parseAudienceValues(rawText: string): string[] {
+  return Array.from(
+    new Set(
+      String(rawText || '')
+        .split(/[\n,]+/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  )
+}
+
+function buildAppNotificationPayload(
+  payloadText: string,
+  action: AppNotificationFormState['action']
+): Record<string, unknown> {
+  const payload = parseMetadata(payloadText)
+  if (action === 'none') {
+    delete payload.action
+    return payload
+  }
+  return {
+    ...payload,
+    action,
+  }
 }
 
 function buildFormState(item: InstallationListItem): FormState {
@@ -217,6 +262,7 @@ export function App() {
   const [contactRequestsTypeFilter, setContactRequestsTypeFilter] = React.useState('')
   const [contactRequestsStatusFilter, setContactRequestsStatusFilter] = React.useState('')
   const [contactRequestsSourceFilter, setContactRequestsSourceFilter] = React.useState('')
+  const [showInactiveAppNotifications, setShowInactiveAppNotifications] = React.useState(false)
   const [selectedCustomerRef, setSelectedCustomerRef] = React.useState<string | null>(null)
   const [selectedInstallationId, setSelectedInstallationId] = React.useState<string | null>(null)
   const [form, setForm] = React.useState<FormState | null>(null)
@@ -239,6 +285,17 @@ export function App() {
     to_email: '',
     subject: 'ConstructOS onboarding package',
     text_body: 'Hello,\n\nThis is a test email sent from the ConstructOS license control-plane admin panel.\n',
+  })
+  const [appNotificationForm, setAppNotificationForm] = React.useState<AppNotificationFormState>({
+    title: '',
+    message: '',
+    severity: 'info',
+    action: 'none',
+    audience_kind: 'all',
+    audience_values_text: '',
+    active_from: '',
+    active_until: '',
+    payload_text: '{"source":"control-plane-ui"}',
   })
   const [liveFeedState, setLiveFeedState] = React.useState<'connecting' | 'online' | 'offline'>('offline')
   const [liveFeedLastEventAt, setLiveFeedLastEventAt] = React.useState<string | null>(null)
@@ -275,6 +332,12 @@ export function App() {
         limit: 100,
         offset: 0,
       }),
+    enabled: Boolean(token),
+  })
+
+  const appNotifications = useQuery({
+    queryKey: ['app-notifications', token, showInactiveAppNotifications],
+    queryFn: () => listAppNotifications(token, { active_only: !showInactiveAppNotifications, limit: 100, offset: 0 }),
     enabled: Boolean(token),
   })
 
@@ -541,6 +604,70 @@ export function App() {
       setFeedback(message)
     },
   })
+  const createAppNotificationMutation = useMutation({
+    mutationFn: async () => {
+      if (!token) {
+        throw new Error('Admin token is required to create app notifications')
+      }
+      const audienceKind = appNotificationForm.audience_kind
+      const action = appNotificationForm.action
+      const payload: AdminAppNotificationCreateRequest = {
+        title: String(appNotificationForm.title || '').trim() || null,
+        message: String(appNotificationForm.message || '').trim(),
+        severity: appNotificationForm.severity,
+        notification_type: action === 'auto_update_app_images' ? 'AppUpdateAvailable' : 'ControlPlaneMessage',
+        audience_kind: audienceKind,
+        audience_values: audienceKind === 'all' ? [] : parseAudienceValues(appNotificationForm.audience_values_text),
+        active_from: appNotificationForm.active_from ? new Date(appNotificationForm.active_from).toISOString() : null,
+        active_until: appNotificationForm.active_until ? new Date(appNotificationForm.active_until).toISOString() : null,
+        is_active: true,
+        payload: buildAppNotificationPayload(appNotificationForm.payload_text, action),
+      }
+      if (!payload.message) {
+        throw new Error('message is required')
+      }
+      return createAppNotification(token, payload)
+    },
+    onSuccess: async (response) => {
+      setFeedback(`App notification '${response.notification.id}' created.`)
+      setAppNotificationForm({
+        title: '',
+        message: '',
+        severity: 'info',
+        action: 'none',
+        audience_kind: 'all',
+        audience_values_text: '',
+        active_from: '',
+        active_until: '',
+        payload_text: '{"source":"control-plane-ui"}',
+      })
+      await queryClient.invalidateQueries({ queryKey: ['app-notifications'] })
+    },
+    onError: (error: unknown) => {
+      const message = error instanceof Error ? error.message : 'Failed to create app notification'
+      setFeedback(message)
+    },
+  })
+  const deactivateAppNotificationMutation = useMutation({
+    mutationFn: async (notificationId: string) => {
+      if (!token) {
+        throw new Error('Admin token is required to deactivate app notifications')
+      }
+      const normalizedNotificationId = String(notificationId || '').trim()
+      if (!normalizedNotificationId) {
+        throw new Error('notification_id is required')
+      }
+      return deactivateAppNotification(token, normalizedNotificationId)
+    },
+    onSuccess: async (response) => {
+      setFeedback(`App notification '${response.notification.id}' deactivated.`)
+      await queryClient.invalidateQueries({ queryKey: ['app-notifications'] })
+    },
+    onError: (error: unknown) => {
+      const message = error instanceof Error ? error.message : 'Failed to deactivate app notification'
+      setFeedback(message)
+    },
+  })
   const authError = installations.error instanceof ApiError && installations.error.status === 401
 
   React.useEffect(() => {
@@ -558,6 +685,7 @@ export function App() {
       void queryClient.invalidateQueries({ queryKey: ['installation'] })
       void queryClient.invalidateQueries({ queryKey: ['waitlist'] })
       void queryClient.invalidateQueries({ queryKey: ['contact-requests'] })
+      void queryClient.invalidateQueries({ queryKey: ['app-notifications'] })
     }
 
     const handleSseMessage = (event: MessageEvent<string>, shouldRefresh: boolean) => {
@@ -621,6 +749,7 @@ export function App() {
   const selectedCustomerInstallationCount = selectedCustomerInstallations.length
   const waitlistCount = waitlist.data?.items.length ?? 0
   const contactRequestsCount = contactRequests.data?.items.length ?? 0
+  const appNotificationsCount = appNotifications.data?.items.length ?? 0
   const betaPlanCutoff = health.data?.beta_plan_valid_until ?? health.data?.public_beta_free_until ?? null
   const betaPlanLabel = betaPlanCutoff
     ? `${formatDateTime(betaPlanCutoff)}`
@@ -919,6 +1048,232 @@ export function App() {
             </button>
           </div>
         </form>
+      </section>
+
+      <section className="panel">
+        <h2>App Notifications</h2>
+        <p className="muted">
+          Create control-plane notifications that are returned through installation register and heartbeat responses,
+          then exposed by the app via <code>/api/license/status</code>.
+        </p>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault()
+            setFeedback('')
+            createAppNotificationMutation.mutate()
+          }}
+        >
+          <div className="form-grid">
+            <label>
+              Title
+              <input
+                value={appNotificationForm.title}
+                onChange={(event) => setAppNotificationForm((prev) => ({ ...prev, title: event.target.value }))}
+                placeholder="New ConstructOS update available"
+              />
+            </label>
+            <label>
+              Severity
+              <select
+                value={appNotificationForm.severity}
+                onChange={(event) =>
+                  setAppNotificationForm((prev) => ({ ...prev, severity: event.target.value as AppNotificationFormState['severity'] }))
+                }
+              >
+                <option value="info">info</option>
+                <option value="warning">warning</option>
+                <option value="critical">critical</option>
+              </select>
+            </label>
+            <label>
+              Action
+              <select
+                value={appNotificationForm.action}
+                onChange={(event) =>
+                  setAppNotificationForm((prev) => ({
+                    ...prev,
+                    action: event.target.value as AppNotificationFormState['action'],
+                  }))
+                }
+              >
+                {APP_NOTIFICATION_ACTION_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Audience
+              <select
+                value={appNotificationForm.audience_kind}
+                onChange={(event) =>
+                  setAppNotificationForm((prev) => ({
+                    ...prev,
+                    audience_kind: event.target.value as AppNotificationAudienceKind,
+                    audience_values_text: event.target.value === 'all' ? '' : prev.audience_values_text,
+                  }))
+                }
+              >
+                {APP_NOTIFICATION_AUDIENCE_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Active from
+              <input
+                type="datetime-local"
+                value={appNotificationForm.active_from}
+                onChange={(event) => setAppNotificationForm((prev) => ({ ...prev, active_from: event.target.value }))}
+              />
+            </label>
+            <label>
+              Active until
+              <input
+                type="datetime-local"
+                value={appNotificationForm.active_until}
+                onChange={(event) => setAppNotificationForm((prev) => ({ ...prev, active_until: event.target.value }))}
+              />
+            </label>
+          </div>
+          <label>
+            Message
+            <textarea
+              value={appNotificationForm.message}
+              onChange={(event) => setAppNotificationForm((prev) => ({ ...prev, message: event.target.value }))}
+              rows={4}
+              placeholder="ConstructOS v0.1.1660 is available. Open the update panel to redeploy."
+            />
+          </label>
+          <label>
+            Audience values {appNotificationForm.audience_kind === 'all' ? '(not used for all)' : '(comma or newline separated)'}
+            <textarea
+              value={appNotificationForm.audience_values_text}
+              disabled={appNotificationForm.audience_kind === 'all'}
+              onChange={(event) => setAppNotificationForm((prev) => ({ ...prev, audience_values_text: event.target.value }))}
+              rows={3}
+              placeholder={
+                appNotificationForm.audience_kind === 'customer_ref'
+                  ? 'cust_abc123'
+                  : appNotificationForm.audience_kind === 'customer_email'
+                    ? 'user@example.com'
+                    : appNotificationForm.audience_kind === 'installation_id'
+                      ? 'inst-123'
+                      : ''
+              }
+            />
+          </label>
+          <label>
+            Payload (JSON object)
+            <textarea
+              value={appNotificationForm.payload_text}
+              onChange={(event) => setAppNotificationForm((prev) => ({ ...prev, payload_text: event.target.value }))}
+              rows={4}
+            />
+          </label>
+          <div className="row">
+            <button type="submit" disabled={!token || createAppNotificationMutation.isPending}>
+              <ButtonIcon name="generate" />
+              {createAppNotificationMutation.isPending ? 'Creating...' : 'Create Notification'}
+            </button>
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={() =>
+                setAppNotificationForm({
+                  title: '',
+                  message: '',
+                  severity: 'info',
+                  action: 'none',
+                  audience_kind: 'all',
+                  audience_values_text: '',
+                  active_from: '',
+                  active_until: '',
+                  payload_text: '{"source":"control-plane-ui"}',
+                })
+              }
+            >
+              <ButtonIcon name="reset" />Reset
+            </button>
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={() => void appNotifications.refetch()}
+              disabled={!token}
+            >
+              <ButtonIcon name="refresh" />Reload
+            </button>
+          </div>
+        </form>
+        {!token && <p className="muted">Save admin token to manage app notifications.</p>}
+        {appNotifications.isLoading && token && <p className="muted">Loading app notifications...</p>}
+        {appNotifications.isError && token && (
+          <p className="error">{appNotifications.error instanceof Error ? appNotifications.error.message : 'Failed to load app notifications.'}</p>
+        )}
+        {!appNotifications.isLoading && !appNotifications.isError && token && appNotificationsCount === 0 && (
+          <p className="muted">No control-plane app notifications have been created yet.</p>
+        )}
+        {!appNotifications.isLoading && !appNotifications.isError && token && appNotificationsCount > 0 && (
+          <>
+            <div className="app-notification-toolbar">
+              <p className="muted app-notification-toolbar-meta">
+                Loaded items: {appNotificationsCount} | Total: {appNotifications.data?.total ?? 0}
+              </p>
+              <label className="checkbox-inline app-notification-filter">
+                <input
+                  type="checkbox"
+                  checked={showInactiveAppNotifications}
+                  onChange={(event) => setShowInactiveAppNotifications(event.target.checked)}
+                />
+                Show inactive notifications
+              </label>
+            </div>
+            <ul className="installation-list app-notification-list">
+              {(appNotifications.data?.items ?? []).map((item) => (
+                <li key={item.id} className="app-notification-item">
+                  <div className="app-notification-header">
+                    <strong>{item.title || item.notification_type}</strong>
+                    <span className={`status-chip ${item.is_active ? 'status-chip-ok' : 'status-chip-warn'}`}>
+                      {item.is_active ? 'Active' : 'Inactive'}
+                    </span>
+                  </div>
+                  <p className="app-notification-message">{item.message}</p>
+                  <div className="app-notification-meta">
+                    <span><strong>Action:</strong> {String(item.payload?.action || 'none')}</span>
+                    <span><strong>Type:</strong> {item.notification_type}</span>
+                    <span><strong>Severity:</strong> {item.severity}</span>
+                    <span>
+                      <strong>Audience:</strong> {item.audience_kind}
+                      {item.audience_values.length ? ` (${item.audience_values.join(', ')})` : ''}
+                    </span>
+                    <span><strong>Window:</strong> {formatDateTime(item.active_from)} → {formatDateTime(item.active_until)}</span>
+                    <span><strong>Created:</strong> {formatDateTime(item.created_at)}</span>
+                    <span><strong>ID:</strong> <code>{item.id}</code></span>
+                  </div>
+                  <div className="row compact app-notification-actions">
+                    <button
+                      type="button"
+                      className="button-secondary"
+                      disabled={!item.is_active || deactivateAppNotificationMutation.isPending}
+                      onClick={() => {
+                        if (!window.confirm(`Deactivate app notification '${item.id}'?`)) {
+                          return
+                        }
+                        deactivateAppNotificationMutation.mutate(item.id)
+                      }}
+                    >
+                      <ButtonIcon name="clear" />
+                      {deactivateAppNotificationMutation.isPending ? 'Deactivating...' : 'Deactivate'}
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
       </section>
 
       <section className="panel">

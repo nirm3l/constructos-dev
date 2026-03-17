@@ -87,6 +87,7 @@ class ChatSessionAggregate(Aggregate):
         content: str,
         order_index: int,
         created_at: str,
+        usage: dict[str, Any] | None = None,
         attachment_refs: list[dict[str, Any]] | None = None,
         mcp_servers: list[str] | None = None,
     ) -> None:
@@ -94,6 +95,8 @@ class ChatSessionAggregate(Aggregate):
         self.next_message_index = max(int(self.next_message_index), int(order_index))
         self.last_message_at = created_at
         self.last_message_preview = str(content or "")[:240]
+        if usage is not None:
+            self.usage = usage
         if mcp_servers is not None:
             self.mcp_servers = mcp_servers
 

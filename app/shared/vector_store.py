@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import httpx
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, inspect, or_, select, text
 from sqlalchemy.orm import Session
 
 from .observability import incr, observe
@@ -22,9 +23,14 @@ from .settings import (
     EMBEDDING_PROVIDER,
     OLLAMA_BASE_URL,
     OLLAMA_EMBED_GPU_ENABLED,
+    VECTOR_INDEX_DISTILL_ENABLED,
+    VECTOR_INDEX_DISTILL_MAX_SOURCES_PER_REQUEST,
+    VECTOR_INDEX_DISTILL_MAX_SOURCE_TOKENS,
+    VECTOR_INDEX_DISTILL_MIN_TOKENS,
     VECTOR_STORE_ENABLED,
     logger,
 )
+from .classification_cache import ClassificationCache, build_classification_cache_key
 from .chat_indexing import (
     CHAT_ATTACHMENT_INGESTION_FULL_TEXT,
     CHAT_ATTACHMENT_INGESTION_METADATA_ONLY,
@@ -37,6 +43,8 @@ from .chat_indexing import (
 )
 
 _WORD_RE = re.compile(r"\S+")
+_PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _CONTEXT_ERROR_MARKERS = (
     "context length",
     "input length exceeds",
@@ -45,6 +53,10 @@ _CONTEXT_ERROR_MARKERS = (
 _MODEL_NOT_FOUND_RE = re.compile(r'model\s+"?([^"]+)"?\s+not\s+found', re.IGNORECASE)
 _OLLAMA_MODEL_PULL_LOCK = threading.Lock()
 _OLLAMA_MODELS_READY: set[str] = set()
+_VECTOR_DISTILLATION_VERSION = "vector-distillation-v1"
+_VECTOR_DISTILLATION_SCHEMA_VERSION = "1"
+_VECTOR_DISTILLATION_CACHE = ClassificationCache(max_entries=256)
+_PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parent / "prompt_templates" / "codex"
 
 
 class EmbeddingRuntimeError(RuntimeError):
@@ -60,10 +72,69 @@ class ProjectEmbeddingRuntime:
     project_id: str
     enabled: bool
     model: str
+    distill_enabled: bool = False
+
+
+_PGVECTOR_INDEX_LOCK = threading.Lock()
+_PGVECTOR_INDEXES_READY: set[tuple[str, int]] = set()
 
 
 def vector_store_enabled() -> bool:
     return bool(VECTOR_STORE_ENABLED and EMBEDDING_PROVIDER == "ollama" and str(OLLAMA_BASE_URL or "").strip())
+
+
+def vector_backend_health_summary(db: Session) -> dict[str, Any]:
+    bind = db.bind
+    dialect_name = str(getattr(getattr(bind, "dialect", None), "name", "")).strip().lower()
+    enabled = bool(vector_store_enabled())
+    summary: dict[str, Any] = {
+        "enabled": enabled,
+        "database": dialect_name or None,
+        "provider": str(EMBEDDING_PROVIDER or "").strip() or None,
+        "status": "disabled" if not enabled else "unknown",
+    }
+    if not enabled:
+        return summary
+    if dialect_name != "postgresql":
+        summary["status"] = "unsupported_database"
+        summary["detail"] = "pgvector retrieval requires PostgreSQL"
+        return summary
+
+    extension_ready = False
+    vector_column_present = False
+    indexed_models = 0
+    try:
+        extension_ready = bool(db.execute(text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')")).scalar())
+        columns = {column["name"] for column in inspect(bind).get_columns("vector_chunks")}
+        vector_column_present = "embedding_vector" in columns
+        indexed_models = int(
+            db.execute(
+                text(
+                    "SELECT COUNT(*) "
+                    "FROM ("
+                    "SELECT DISTINCT embedding_model "
+                    "FROM vector_chunks "
+                    "WHERE is_deleted = FALSE "
+                    "AND embedding_vector IS NOT NULL"
+                    ") AS indexed_models"
+                )
+            ).scalar()
+            or 0
+        )
+    except Exception as exc:
+        summary["status"] = "error"
+        summary["detail"] = str(exc)
+        return summary
+
+    summary.update(
+        {
+            "extension_ready": extension_ready,
+            "vector_column_present": vector_column_present,
+            "indexed_models": indexed_models,
+        }
+    )
+    summary["status"] = "ready" if extension_ready and vector_column_present else "not_ready"
+    return summary
 
 
 def _allowed_embedding_map() -> dict[str, str]:
@@ -94,21 +165,204 @@ def resolve_project_embedding_runtime(db: Session, project_id: str) -> ProjectEm
 
     project = db.get(Project, project_id)
     if project is None or project.is_deleted:
-        return ProjectEmbeddingRuntime(project_id=project_id, enabled=False, model=normalize_embedding_model(None))
+        return ProjectEmbeddingRuntime(
+            project_id=project_id,
+            enabled=False,
+            model=normalize_embedding_model(None),
+            distill_enabled=bool(VECTOR_INDEX_DISTILL_ENABLED),
+        )
     model = normalize_embedding_model(project.embedding_model)
     enabled = bool(vector_store_enabled() and project.embedding_enabled)
-    return ProjectEmbeddingRuntime(project_id=project_id, enabled=enabled, model=model)
+    return ProjectEmbeddingRuntime(
+        project_id=project_id,
+        enabled=enabled,
+        model=model,
+        distill_enabled=bool(getattr(project, "vector_index_distill_enabled", VECTOR_INDEX_DISTILL_ENABLED)),
+    )
 
 
 def estimate_tokens(text: str) -> int:
     return len(_WORD_RE.findall(str(text or "")))
 
 
-def chunk_text(text: str, *, max_tokens: int = 500, overlap_ratio: float = 0.12) -> list[str]:
+@lru_cache(maxsize=16)
+def _load_prompt_template(name: str) -> str:
+    return (_PROMPT_TEMPLATES_DIR / name).read_text(encoding="utf-8")
+
+
+def _render_prompt_template(name: str, values: dict[str, object]) -> str:
+    rendered_values = {key: str(value) for key, value in values.items()}
+    return _load_prompt_template(name).format(**rendered_values)
+
+
+def _truncate_to_token_limit(text: str, *, max_tokens: int) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    safe_limit = max(32, int(max_tokens or 0))
+    words = raw.split()
+    if len(words) <= safe_limit:
+        return raw
+    return " ".join(words[:safe_limit]).strip()
+
+
+def _source_type_supports_distillation(source_type: str) -> bool:
+    normalized = str(source_type or "").strip().lower()
+    return normalized in {
+        "task.description",
+        "note.body",
+        "specification.body",
+        "project_rule.body",
+        "chat_attachment.text",
+    }
+
+
+def _distillation_candidates(sources: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for source_type, source_text in sources:
+        normalized_text = str(source_text or "").strip()
+        if not normalized_text:
+            continue
+        if not _source_type_supports_distillation(source_type):
+            continue
+        token_count = estimate_tokens(normalized_text)
+        if token_count < max(1, int(VECTOR_INDEX_DISTILL_MIN_TOKENS)):
+            continue
+        candidates.append(
+            {
+                "source_type": str(source_type),
+                "token_count": token_count,
+                "text": _truncate_to_token_limit(
+                    normalized_text,
+                    max_tokens=max(128, int(VECTOR_INDEX_DISTILL_MAX_SOURCE_TOKENS)),
+                ),
+            }
+        )
+    return candidates[: max(1, int(VECTOR_INDEX_DISTILL_MAX_SOURCES_PER_REQUEST or 1))]
+
+
+def _normalize_distilled_sources(raw: dict[str, Any], *, allowed_source_types: set[str]) -> list[tuple[str, str]]:
+    results: list[tuple[str, str]] = []
+    for item in (raw.get("sources") or []):
+        if not isinstance(item, dict):
+            continue
+        source_type = str(item.get("source_type") or "").strip()
+        if source_type not in allowed_source_types:
+            continue
+        distilled_text = " ".join(str(item.get("distilled_text") or "").split()).strip()
+        if not distilled_text:
+            continue
+        results.append((f"{source_type}.distilled", distilled_text))
+    deduped: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in results:
+        if item in seen:
+            continue
+        deduped.append(item)
+        seen.add(item)
+    return deduped
+
+
+def _distill_index_sources(
+    *,
+    enabled: bool,
+    workspace_id: str,
+    project_id: str,
+    entity_type: str,
+    entity_id: str,
+    sources: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    candidates = _distillation_candidates(sources) if enabled else []
+    if not candidates:
+        return []
+
+    payload = {
+        "entity_type": str(entity_type or "").strip(),
+        "entity_id": str(entity_id or "").strip(),
+        "sources": [
+            {
+                "source_type": item["source_type"],
+                "token_count": int(item["token_count"]),
+                "text": str(item["text"]),
+            }
+            for item in candidates
+        ],
+    }
+    cache_key = build_classification_cache_key(
+        cache_name="vector_source_distillation",
+        workspace_id=str(workspace_id or "").strip() or None,
+        project_id=str(project_id or "").strip() or None,
+        classifier_version=_VECTOR_DISTILLATION_VERSION,
+        schema_version=_VECTOR_DISTILLATION_SCHEMA_VERSION,
+        payload=payload,
+    )
+    cached = _VECTOR_DISTILLATION_CACHE.get(cache_key)
+    if isinstance(cached, dict):
+        return _normalize_distilled_sources(
+            cached,
+            allowed_source_types={str(item["source_type"]) for item in candidates},
+        )
+
+    prompt = _render_prompt_template(
+        "vector_index_distillation.md",
+        {"payload_json": json.dumps(payload, ensure_ascii=True)},
+    )
+    output_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "sources": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "source_type": {"type": "string"},
+                        "distilled_text": {"type": "string"},
+                    },
+                    "required": ["source_type", "distilled_text"],
+                },
+            }
+        },
+        "required": ["sources"],
+    }
+    payload_hash = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    try:
+        from features.agents.agent_mcp_adapter import run_structured_agent_prompt
+
+        parsed = run_structured_agent_prompt(
+            prompt=prompt,
+            output_schema=output_schema,
+            workspace_id=str(workspace_id or "").strip() or None,
+            session_key=f"vector-index-distillation:{payload_hash}",
+            actor_user_id=None,
+            mcp_servers=[],
+            use_cache=True,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Vector source distillation failed project_id=%s entity=%s:%s err=%s",
+            project_id,
+            entity_type,
+            entity_id,
+            exc,
+        )
+        return []
+    if not isinstance(parsed, dict):
+        return []
+    _VECTOR_DISTILLATION_CACHE.set(cache_key, parsed)
+    return _normalize_distilled_sources(
+        parsed,
+        allowed_source_types={str(item["source_type"]) for item in candidates},
+    )
+
+
+def _split_words_with_overlap(text: str, *, max_tokens: int, overlap_ratio: float) -> list[str]:
     raw = str(text or "").strip()
     if not raw:
         return []
-    max_tokens = max(32, int(max_tokens or 500))
     words = raw.split()
     if len(words) <= max_tokens:
         return [raw]
@@ -125,6 +379,146 @@ def chunk_text(text: str, *, max_tokens: int = 500, overlap_ratio: float = 0.12)
         if idx + max_tokens >= len(words):
             break
     return chunks
+
+
+def _split_oversized_unit(unit: str, *, max_tokens: int, overlap_ratio: float) -> list[str]:
+    text = str(unit or "").strip()
+    if not text:
+        return []
+    if estimate_tokens(text) <= max_tokens:
+        return [text]
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) > 1:
+        parts: list[str] = []
+        for line in lines:
+            parts.extend(_split_oversized_unit(line, max_tokens=max_tokens, overlap_ratio=overlap_ratio))
+        if parts:
+            return parts
+
+    sentences = [part.strip() for part in _SENTENCE_SPLIT_RE.split(text) if part.strip()]
+    if len(sentences) > 1:
+        parts = []
+        current: list[str] = []
+        current_tokens = 0
+        for sentence in sentences:
+            sentence_tokens = estimate_tokens(sentence)
+            if sentence_tokens > max_tokens:
+                if current:
+                    parts.append(" ".join(current).strip())
+                    current = []
+                    current_tokens = 0
+                parts.extend(_split_words_with_overlap(sentence, max_tokens=max_tokens, overlap_ratio=overlap_ratio))
+                continue
+            if current_tokens and current_tokens + sentence_tokens > max_tokens:
+                parts.append(" ".join(current).strip())
+                current = [sentence]
+                current_tokens = sentence_tokens
+                continue
+            current.append(sentence)
+            current_tokens += sentence_tokens
+        if current:
+            parts.append(" ".join(current).strip())
+        if parts:
+            return parts
+
+    return _split_words_with_overlap(text, max_tokens=max_tokens, overlap_ratio=overlap_ratio)
+
+
+def chunk_text(text: str, *, max_tokens: int = 500, overlap_ratio: float = 0.12) -> list[str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    max_tokens = max(32, int(max_tokens or 500))
+    if estimate_tokens(raw) <= max_tokens:
+        return [raw]
+
+    units: list[str] = []
+    paragraphs = [part.strip() for part in _PARAGRAPH_SPLIT_RE.split(raw) if part.strip()]
+    if len(paragraphs) <= 1:
+        paragraphs = [raw]
+    for paragraph in paragraphs:
+        units.extend(_split_oversized_unit(paragraph, max_tokens=max_tokens, overlap_ratio=overlap_ratio))
+
+    chunks: list[str] = []
+    current_parts: list[str] = []
+    current_tokens = 0
+    for unit in units:
+        unit = unit.strip()
+        if not unit:
+            continue
+        unit_tokens = estimate_tokens(unit)
+        if unit_tokens > max_tokens:
+            if current_parts:
+                chunks.append("\n\n".join(current_parts).strip())
+                current_parts = []
+                current_tokens = 0
+            chunks.extend(_split_words_with_overlap(unit, max_tokens=max_tokens, overlap_ratio=overlap_ratio))
+            continue
+        if current_tokens and current_tokens + unit_tokens > max_tokens:
+            chunks.append("\n\n".join(current_parts).strip())
+            current_parts = [unit]
+            current_tokens = unit_tokens
+            continue
+        current_parts.append(unit)
+        current_tokens += unit_tokens
+
+    if current_parts:
+        chunks.append("\n\n".join(current_parts).strip())
+
+    deduped: list[str] = []
+    for chunk in chunks:
+        if chunk and chunk not in deduped:
+            deduped.append(chunk)
+    return deduped
+
+
+def _planned_source_chunks(sources: list[tuple[str, str]], *, max_tokens: int = 500, overlap_ratio: float = 0.12) -> list[tuple[str, int, str]]:
+    planned: list[tuple[str, int, str]] = []
+    for source_type, source_text in sources:
+        chunk_index = 0
+        for chunk in chunk_text(source_text, max_tokens=max_tokens, overlap_ratio=overlap_ratio):
+            planned.append((source_type, chunk_index, chunk))
+            chunk_index += 1
+    return planned
+
+
+def _entity_chunks_match_existing(
+    db: Session,
+    *,
+    project_id: str,
+    entity_type: str,
+    entity_id: str,
+    model: str,
+    planned_chunks: list[tuple[str, int, str]],
+) -> bool:
+    from .models import VectorChunk
+
+    existing_rows = db.execute(
+        select(VectorChunk).where(
+            VectorChunk.project_id == project_id,
+            VectorChunk.entity_type == entity_type,
+            VectorChunk.entity_id == entity_id,
+            VectorChunk.is_deleted == False,
+        )
+    ).scalars().all()
+    if len(existing_rows) != len(planned_chunks):
+        return False
+    existing_rows.sort(key=lambda row: (str(row.source_type or ""), int(row.chunk_index or 0), int(row.id or 0)))
+    normalized_planned_chunks = sorted(
+        planned_chunks,
+        key=lambda item: (str(item[0] or ""), int(item[1] or 0), str(item[2] or "")),
+    )
+    for row, (source_type, chunk_index, chunk_text_value) in zip(existing_rows, normalized_planned_chunks):
+        if normalize_embedding_model(row.embedding_model) != model:
+            return False
+        if str(row.source_type or "") != source_type:
+            return False
+        if int(row.chunk_index or 0) != chunk_index:
+            return False
+        if str(row.text_chunk or "") != chunk_text_value:
+            return False
+    return True
 
 
 def _is_context_length_error(message: str) -> bool:
@@ -251,6 +645,124 @@ def _embed_text_with_split_retry(text: str, model: str) -> list[tuple[str, list[
 
 def _embedding_to_json(embedding: list[float]) -> str:
     return json.dumps(embedding, separators=(",", ":"))
+
+
+def _embedding_to_vector_literal(embedding: list[float]) -> str:
+    values = [format(float(value), ".12g") for value in embedding]
+    return "[" + ",".join(values) + "]"
+
+
+def _session_uses_postgresql(db: Session) -> bool:
+    bind = db.bind
+    if bind is None:
+        return False
+    return str(getattr(bind.dialect, "name", "")).strip().lower() == "postgresql"
+
+
+def _sql_quote_literal(value: str) -> str:
+    return "'" + str(value or "").replace("'", "''") + "'"
+
+
+def _pgvector_index_name(model: str, dimension: int) -> str:
+    digest = hashlib.sha1(f"{model}:{dimension}".encode("utf-8")).hexdigest()[:12]
+    return f"ix_vector_chunks_hnsw_{digest}"
+
+
+def _ensure_pgvector_model_index(db: Session, *, model: str, dimension: int) -> None:
+    normalized_model = str(model or "").strip()
+    normalized_dimension = max(1, int(dimension or 0))
+    cache_key = (normalized_model, normalized_dimension)
+    if cache_key in _PGVECTOR_INDEXES_READY:
+        return
+    if not _session_uses_postgresql(db):
+        return
+    with _PGVECTOR_INDEX_LOCK:
+        if cache_key in _PGVECTOR_INDEXES_READY:
+            return
+        index_name = _pgvector_index_name(normalized_model, normalized_dimension)
+        db.execute(
+            text(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "
+                f"ON vector_chunks USING hnsw ((embedding_vector::vector({normalized_dimension})) vector_cosine_ops) "
+                f"WHERE embedding_model = {_sql_quote_literal(normalized_model)} "
+                f"AND is_deleted = FALSE "
+                f"AND vector_dims(embedding_vector) = {normalized_dimension}"
+            )
+        )
+        db.flush()
+        _PGVECTOR_INDEXES_READY.add(cache_key)
+
+
+def _insert_vector_chunk(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str,
+    entity_type: str,
+    entity_id: str,
+    source_type: str,
+    chunk_index: int,
+    text_chunk: str,
+    token_count: int,
+    embedding: list[float],
+    embedding_model: str,
+    content_hash: str,
+    source_updated_at: datetime | None,
+) -> None:
+    from .models import VectorChunk
+
+    embedding_json = _embedding_to_json(embedding)
+    if not _session_uses_postgresql(db):
+        db.add(
+            VectorChunk(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                source_type=source_type,
+                chunk_index=chunk_index,
+                text_chunk=text_chunk,
+                token_count=token_count,
+                embedding_json=embedding_json,
+                embedding_model=embedding_model,
+                content_hash=content_hash,
+                source_updated_at=source_updated_at,
+                is_deleted=False,
+            )
+        )
+        return
+
+    now = datetime.now(timezone.utc)
+    db.execute(
+        text(
+            "INSERT INTO vector_chunks ("
+            "workspace_id, project_id, entity_type, entity_id, source_type, chunk_index, "
+            "text_chunk, token_count, embedding_json, embedding_model, content_hash, "
+            "source_updated_at, is_deleted, created_at, updated_at, embedding_vector"
+            ") VALUES ("
+            ":workspace_id, :project_id, :entity_type, :entity_id, :source_type, :chunk_index, "
+            ":text_chunk, :token_count, :embedding_json, :embedding_model, :content_hash, "
+            ":source_updated_at, FALSE, :created_at, :updated_at, CAST(:embedding_vector AS vector)"
+            ")"
+        ),
+        {
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "source_type": source_type,
+            "chunk_index": chunk_index,
+            "text_chunk": text_chunk,
+            "token_count": token_count,
+            "embedding_json": embedding_json,
+            "embedding_model": embedding_model,
+            "content_hash": content_hash,
+            "source_updated_at": source_updated_at,
+            "created_at": now,
+            "updated_at": now,
+            "embedding_vector": _embedding_to_vector_literal(embedding),
+        },
+    )
 
 
 def _entity_state_sources(entity_type: str, state: dict[str, Any]) -> list[tuple[str, str]]:
@@ -475,8 +987,6 @@ def index_entity_state(
     force_reindex: bool = False,
     runtime_override: ProjectEmbeddingRuntime | None = None,
 ) -> int:
-    from .models import VectorChunk
-
     project_id = str(state.get("project_id") or "").strip()
     workspace_id = str(state.get("workspace_id") or "").strip()
     if not project_id or not workspace_id:
@@ -492,6 +1002,26 @@ def index_entity_state(
     if not sources:
         purge_entity_chunks(db, project_id=project_id, entity_type=entity_type, entity_id=entity_id)
         return 0
+    distilled_sources = _distill_index_sources(
+        enabled=bool(runtime.distill_enabled),
+        workspace_id=workspace_id,
+        project_id=project_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        sources=sources,
+    )
+    if distilled_sources:
+        sources = [*sources, *distilled_sources]
+    planned_chunks = _planned_source_chunks(sources, max_tokens=500, overlap_ratio=0.12)
+    if planned_chunks and _entity_chunks_match_existing(
+        db,
+        project_id=project_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        model=runtime.model,
+        planned_chunks=planned_chunks,
+    ):
+        return 0
 
     if force_reindex:
         purge_entity_chunks(db, project_id=project_id, entity_type=entity_type, entity_id=entity_id)
@@ -504,31 +1034,34 @@ def index_entity_state(
         source_updated_at = raw_updated_at if raw_updated_at.tzinfo else raw_updated_at.replace(tzinfo=timezone.utc)
 
     indexed = 0
+    ensured_dimensions: set[int] = set()
     for source_type, source_text in sources:
         chunk_items = chunk_text(source_text, max_tokens=500, overlap_ratio=0.12)
         chunk_index = 0
         for chunk in chunk_items:
             for effective_chunk, embedding in _embed_text_with_split_retry(chunk, runtime.model):
+                embedding_dimension = len(embedding)
+                if _session_uses_postgresql(db) and embedding_dimension not in ensured_dimensions:
+                    _ensure_pgvector_model_index(db, model=runtime.model, dimension=embedding_dimension)
+                    ensured_dimensions.add(embedding_dimension)
                 token_count = estimate_tokens(effective_chunk)
                 content_hash = hashlib.sha256(
                     f"{entity_type}:{entity_id}:{source_type}:{effective_chunk}".encode("utf-8")
                 ).hexdigest()
-                db.add(
-                    VectorChunk(
-                        workspace_id=workspace_id,
-                        project_id=project_id,
-                        entity_type=entity_type,
-                        entity_id=entity_id,
-                        source_type=source_type,
-                        chunk_index=chunk_index,
-                        text_chunk=effective_chunk,
-                        token_count=token_count,
-                        embedding_json=_embedding_to_json(embedding),
-                        embedding_model=runtime.model,
-                        content_hash=content_hash,
-                        source_updated_at=source_updated_at,
-                        is_deleted=False,
-                    )
+                _insert_vector_chunk(
+                    db,
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    source_type=source_type,
+                    chunk_index=chunk_index,
+                    text_chunk=effective_chunk,
+                    token_count=token_count,
+                    embedding=embedding,
+                    embedding_model=runtime.model,
+                    content_hash=content_hash,
+                    source_updated_at=source_updated_at,
                 )
                 chunk_index += 1
                 indexed += 1
@@ -543,36 +1076,6 @@ def reindex_project(db: Session, *, project_id: str) -> int:
     return reindex_project_with_runtime(db, project_id=project_id, runtime=runtime)
 
 
-def _parse_embedding(raw: str) -> list[float]:
-    try:
-        payload = json.loads(raw or "[]")
-    except Exception:
-        return []
-    if not isinstance(payload, list):
-        return []
-    out: list[float] = []
-    for value in payload:
-        try:
-            out.append(float(value))
-        except (TypeError, ValueError):
-            continue
-    return out
-
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    size = min(len(a), len(b))
-    if size <= 0:
-        return 0.0
-    lhs = a[:size]
-    rhs = b[:size]
-    dot = sum(x * y for x, y in zip(lhs, rhs))
-    lhs_norm = math.sqrt(sum(x * x for x in lhs))
-    rhs_norm = math.sqrt(sum(y * y for y in rhs))
-    if lhs_norm <= 0 or rhs_norm <= 0:
-        return 0.0
-    return dot / (lhs_norm * rhs_norm)
-
-
 def search_project_chunks(
     db: Session,
     *,
@@ -581,56 +1084,75 @@ def search_project_chunks(
     limit: int,
     entity_filters: set[tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
-    from .models import VectorChunk
-
     runtime = resolve_project_embedding_runtime(db, project_id)
     if not runtime.enabled:
         return []
     text_query = str(query or "").strip()
     if not text_query:
         return []
+    if not _session_uses_postgresql(db):
+        raise EmbeddingRuntimeError("pgvector retrieval requires PostgreSQL")
 
     started_at = time.perf_counter()
     query_embedding = _ollama_embed_text(text_query, runtime.model)
-    rows = db.execute(
-        select(VectorChunk).where(
-            VectorChunk.project_id == project_id,
-            VectorChunk.is_deleted == False,
-        )
-    ).scalars().all()
+    embedding_dimension = len(query_embedding)
+    if embedding_dimension <= 0:
+        return []
+    _ensure_pgvector_model_index(db, model=runtime.model, dimension=embedding_dimension)
 
-    evidence: list[dict[str, Any]] = []
+    where_clauses = [
+        "project_id = :project_id",
+        "is_deleted = FALSE",
+        "embedding_model = :embedding_model",
+        "embedding_vector IS NOT NULL",
+        "vector_dims(embedding_vector) = :embedding_dimension",
+    ]
+    params: dict[str, Any] = {
+        "project_id": project_id,
+        "embedding_model": runtime.model,
+        "embedding_dimension": embedding_dimension,
+        "query_vector": _embedding_to_vector_literal(query_embedding),
+        "limit": max(1, int(limit or 10)),
+    }
     filters = entity_filters or set()
-    for row in rows:
-        if filters and (row.entity_type, row.entity_id) not in filters:
-            continue
-        vector = _parse_embedding(row.embedding_json)
-        if not vector:
-            continue
-        similarity = _cosine_similarity(query_embedding, vector)
-        evidence.append(
-            {
-                "entity_type": row.entity_type,
-                "entity_id": row.entity_id,
-                "source_type": row.source_type,
-                "chunk_index": row.chunk_index,
-                "snippet": row.text_chunk,
-                "vector_similarity": similarity,
-                "source_updated_at": row.source_updated_at,
-            }
-        )
+    if filters:
+        filter_fragments: list[str] = []
+        for idx, (entity_type, entity_id) in enumerate(sorted(filters)):
+            entity_type_key = f"entity_type_{idx}"
+            entity_id_key = f"entity_id_{idx}"
+            params[entity_type_key] = entity_type
+            params[entity_id_key] = entity_id
+            filter_fragments.append(f"(entity_type = :{entity_type_key} AND entity_id = :{entity_id_key})")
+        where_clauses.append("(" + " OR ".join(filter_fragments) + ")")
 
-    evidence.sort(
-        key=lambda item: (
-            -float(item.get("vector_similarity") or 0.0),
-            str(item.get("source_type") or ""),
-            str(item.get("entity_id") or ""),
-            int(item.get("chunk_index") or 0),
-        )
+    distance_expr = (
+        f"(embedding_vector::vector({embedding_dimension}) <=> CAST(:query_vector AS vector({embedding_dimension})))"
     )
+    rows = db.execute(
+        text(
+            "SELECT entity_type, entity_id, source_type, chunk_index, text_chunk, source_updated_at, "
+            f"(1 - {distance_expr}) AS vector_similarity "
+            "FROM vector_chunks "
+            f"WHERE {' AND '.join(where_clauses)} "
+            f"ORDER BY {distance_expr} ASC, source_type ASC, entity_id ASC, chunk_index ASC "
+            "LIMIT :limit"
+        ),
+        params,
+    ).mappings().all()
     latency_ms = int((time.perf_counter() - started_at) * 1000)
     observe("vector_retrieval_latency_ms", latency_ms)
-    return evidence[: max(1, int(limit or 10))]
+    return [
+        {
+            "entity_type": str(row.get("entity_type") or ""),
+            "entity_id": str(row.get("entity_id") or ""),
+            "source_type": str(row.get("source_type") or ""),
+            "chunk_index": int(row.get("chunk_index") or 0),
+            "snippet": str(row.get("text_chunk") or ""),
+            "vector_similarity": max(0.0, min(1.0, float(row.get("vector_similarity") or 0.0))),
+            "source_updated_at": row.get("source_updated_at"),
+        }
+        for row in rows
+    ]
 
 
 def maybe_reindex_project(
@@ -639,13 +1161,14 @@ def maybe_reindex_project(
     project_id: str,
     embedding_enabled: bool | None = None,
     embedding_model: str | None = None,
+    vector_index_distill_enabled: bool | None = None,
     chat_index_mode: str | None = None,
     chat_attachment_ingestion_mode: str | None = None,
 ) -> int:
     from .models import Project
 
     runtime_override: ProjectEmbeddingRuntime | None = None
-    if embedding_enabled is not None or embedding_model is not None:
+    if embedding_enabled is not None or embedding_model is not None or vector_index_distill_enabled is not None:
         project = db.get(Project, project_id)
         resolved_enabled = bool(embedding_enabled if embedding_enabled is not None else (project.embedding_enabled if project else False))
         resolved_model = normalize_embedding_model(embedding_model if embedding_model is not None else (project.embedding_model if project else None))
@@ -653,6 +1176,15 @@ def maybe_reindex_project(
             project_id=project_id,
             enabled=bool(vector_store_enabled() and resolved_enabled),
             model=resolved_model,
+            distill_enabled=bool(
+                vector_index_distill_enabled
+                if vector_index_distill_enabled is not None
+                else (
+                    getattr(project, "vector_index_distill_enabled", VECTOR_INDEX_DISTILL_ENABLED)
+                    if project is not None
+                    else VECTOR_INDEX_DISTILL_ENABLED
+                )
+            ),
         )
     try:
         if runtime_override is None:

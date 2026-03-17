@@ -18,6 +18,7 @@ from .contracts import (
     NoteGroupCommandState,
     NoteGroupDTO,
     NotificationDTO,
+    ProjectCommandState,
     ProjectRuleCommandState,
     ProjectRuleDTO,
     SpecificationCommandState,
@@ -28,7 +29,7 @@ from .contracts import (
     TaskGroupDTO,
 )
 from .models import Note, NoteGroup, Notification, Project, ProjectRule, SavedView, Specification, StoredEvent, Task, TaskGroup
-from .settings import DEFAULT_STATUSES
+from .settings import DEFAULT_STATUSES, VECTOR_INDEX_DISTILL_ENABLED
 from .typed_notifications import (
     DEFAULT_NOTIFICATION_SEVERITY,
     DEFAULT_NOTIFICATION_TYPE,
@@ -42,6 +43,8 @@ from .task_automation import (
     derive_legacy_schedule_fields,
     normalize_execution_triggers,
 )
+from .task_delivery import normalize_delivery_mode
+from .task_relationships import normalize_task_relationships
 from .vector_store import project_embedding_index_snapshot
 
 
@@ -106,9 +109,37 @@ def load_created_by_map(db: Session, aggregate_type: str, aggregate_ids: list[st
     return out
 
 
-def serialize_task(task: Task, created_by: str = "", linked_note_count: int = 0) -> dict[str, Any]:
+def _sanitize_labels(raw_labels: object) -> list[str]:
+    parsed: list[object]
+    if isinstance(raw_labels, list):
+        parsed = raw_labels
+    else:
+        try:
+            parsed = json.loads(str(raw_labels or "[]"))
+        except Exception:
+            parsed = []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in parsed:
+        label = str(item or "").strip()
+        lowered = label.lower()
+        if not label or lowered.startswith("delivery_mode:") or lowered in seen:
+            continue
+        seen.add(lowered)
+        out.append(label)
+    return out
+
+
+def serialize_task(
+    task: Task,
+    created_by: str = "",
+    linked_note_count: int = 0,
+    automation_state: str | None = None,
+) -> dict[str, Any]:
     instruction = str(task.instruction or task.scheduled_instruction or "").strip() or None
     execution_triggers = normalize_execution_triggers(task.execution_triggers)
+    task_relationships = normalize_task_relationships(task.task_relationships)
+    delivery_mode = normalize_delivery_mode(getattr(task, "delivery_mode", None))
     if not execution_triggers:
         legacy_trigger = build_legacy_schedule_trigger(
             scheduled_at_utc=to_iso_utc(task.scheduled_at_utc),
@@ -133,19 +164,23 @@ def serialize_task(task: Task, created_by: str = "", linked_note_count: int = 0)
         priority=task.priority,
         due_date=to_iso_utc(task.due_date),
         assignee_id=task.assignee_id,
-        labels=json.loads(task.labels or "[]"),
+        assigned_agent_code=(str(task.assigned_agent_code or "").strip() or None),
+        labels=_sanitize_labels(task.labels),
         subtasks=json.loads(task.subtasks or "[]"),
         attachments=json.loads(task.attachments or "[]"),
         external_refs=json.loads(task.external_refs or "[]"),
         attachment_refs=json.loads(task.attachment_refs or "[]"),
         instruction=instruction,
         execution_triggers=execution_triggers,
+        task_relationships=task_relationships,
+        delivery_mode=delivery_mode,
         recurring_rule=legacy_schedule.get("recurring_rule") or task.recurring_rule,
         task_type=str(legacy_schedule.get("task_type") or "manual"),
         scheduled_instruction=legacy_schedule.get("scheduled_instruction"),
         scheduled_at_utc=legacy_schedule.get("scheduled_at_utc"),
         schedule_timezone=legacy_schedule.get("schedule_timezone"),
         schedule_state=task.schedule_state or "idle",
+        automation_state=str(automation_state or "idle"),
         last_schedule_run_at=to_iso_utc(task.last_schedule_run_at),
         last_schedule_error=task.last_schedule_error,
         archived=task.archived,
@@ -277,6 +312,8 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
         created_by = str(state.get("created_by") or "") or load_created_by(db, "Task", task_id)
         instruction = str(state.get("instruction") or state.get("scheduled_instruction") or "").strip() or None
         execution_triggers = normalize_execution_triggers(state.get("execution_triggers"))
+        task_relationships = normalize_task_relationships(state.get("task_relationships"))
+        delivery_mode = normalize_delivery_mode(state.get("delivery_mode"))
         if not execution_triggers:
             legacy_trigger = build_legacy_schedule_trigger(
                 scheduled_at_utc=state.get("scheduled_at_utc"),
@@ -297,17 +334,20 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
             "specification_id": state.get("specification_id"),
             "title": state.get("title"),
             "description": state.get("description", ""),
-            "status": state.get("status", "To do"),
+            "status": state.get("status", "To Do"),
             "priority": state.get("priority", "Med"),
             "due_date": state.get("due_date"),
             "assignee_id": state.get("assignee_id"),
-            "labels": state.get("labels", []),
+            "assigned_agent_code": state.get("assigned_agent_code"),
+            "labels": _sanitize_labels(state.get("labels", [])),
             "subtasks": state.get("subtasks", []),
             "attachments": state.get("attachments", []),
             "external_refs": state.get("external_refs", []),
             "attachment_refs": state.get("attachment_refs", state.get("attachments", [])),
             "instruction": instruction,
             "execution_triggers": execution_triggers,
+            "task_relationships": task_relationships,
+            "delivery_mode": delivery_mode,
             "recurring_rule": legacy_schedule.get("recurring_rule") or state.get("recurring_rule"),
             "task_type": str(legacy_schedule.get("task_type") or state.get("task_type") or "manual"),
             "scheduled_instruction": legacy_schedule.get("scheduled_instruction"),
@@ -326,7 +366,18 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
 
     task = db.get(Task, task_id)
     if task and not task.is_deleted:
-        return serialize_task(task, created_by=load_created_by(db, "Task", task_id))
+        serialized = serialize_task(task, created_by=load_created_by(db, "Task", task_id))
+        try:
+            state, _ = rebuild_state(db, "Task", task_id)
+        except Exception:
+            state = {}
+        if isinstance(state, dict) and state:
+            serialized["delivery_mode"] = normalize_delivery_mode(state.get("delivery_mode"))
+            if state.get("completed_at"):
+                serialized["completed_at"] = state.get("completed_at")
+            if state.get("status"):
+                serialized["status"] = state.get("status")
+        return serialized
     return None
 
 
@@ -390,7 +441,7 @@ def load_task_command_state(db: Session, task_id: str) -> TaskCommandState | Non
         project_id=state.get("project_id"),
         task_group_id=state.get("task_group_id"),
         specification_id=state.get("specification_id"),
-        status=state.get("status", "To do"),
+        status=state.get("status", "To Do"),
         archived=bool(state.get("archived", False)),
         is_deleted=bool(state.get("is_deleted", False)),
     )
@@ -555,10 +606,15 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
             "embedding_enabled": bool(project.embedding_enabled),
             "embedding_model": project.embedding_model,
             "context_pack_evidence_top_k": project.context_pack_evidence_top_k,
+            "automation_max_parallel_tasks": int(getattr(project, "automation_max_parallel_tasks", 4) or 4),
             "chat_index_mode": str(project.chat_index_mode or "OFF"),
             "chat_attachment_ingestion_mode": str(
                 project.chat_attachment_ingestion_mode or "METADATA_ONLY"
             ),
+            "vector_index_distill_enabled": bool(
+                getattr(project, "vector_index_distill_enabled", VECTOR_INDEX_DISTILL_ENABLED)
+            ),
+            "event_storming_enabled": bool(getattr(project, "event_storming_enabled", True)),
             "embedding_index_status": str(index_snapshot.get("status") or "not_indexed"),
             "embedding_index_progress_pct": index_snapshot.get("progress_pct"),
             "embedding_indexed_entities": int(index_snapshot.get("indexed_entities") or 0),
@@ -597,10 +653,13 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
         "embedding_enabled": bool(state.get("embedding_enabled", False)),
         "embedding_model": state.get("embedding_model"),
         "context_pack_evidence_top_k": state.get("context_pack_evidence_top_k"),
+        "automation_max_parallel_tasks": int(state.get("automation_max_parallel_tasks") or 4),
         "chat_index_mode": str(state.get("chat_index_mode") or "OFF"),
         "chat_attachment_ingestion_mode": str(
             state.get("chat_attachment_ingestion_mode") or "METADATA_ONLY"
         ),
+        "vector_index_distill_enabled": bool(state.get("vector_index_distill_enabled", VECTOR_INDEX_DISTILL_ENABLED)),
+        "event_storming_enabled": bool(state.get("event_storming_enabled", True)),
         "embedding_index_status": str(index_snapshot.get("status") or "not_indexed"),
         "embedding_index_progress_pct": index_snapshot.get("progress_pct"),
         "embedding_indexed_entities": int(index_snapshot.get("indexed_entities") or 0),
@@ -610,6 +669,39 @@ def load_project_view(db: Session, project_id: str) -> dict[str, Any] | None:
         "created_at": None,
         "updated_at": None,
     }
+
+
+def load_project_command_state(db: Session, project_id: str) -> ProjectCommandState | None:
+    from .eventing import get_kurrent_client, rebuild_state
+
+    if get_kurrent_client() is None:
+        project = db.get(Project, project_id)
+        if not project:
+            return None
+        try:
+            custom_statuses = json.loads(project.custom_statuses or "[]")
+        except Exception:
+            custom_statuses = []
+        return ProjectCommandState(
+            id=project.id,
+            workspace_id=project.workspace_id,
+            is_deleted=bool(project.is_deleted),
+            custom_statuses=[str(status) for status in custom_statuses if str(status).strip()],
+        )
+
+    state, _ = rebuild_state(db, "Project", project_id)
+    if not state:
+        return None
+    return ProjectCommandState(
+        id=project_id,
+        workspace_id=state.get("workspace_id", ""),
+        is_deleted=bool(state.get("is_deleted", False)),
+        custom_statuses=[
+            str(status)
+            for status in (state.get("custom_statuses") or [])
+            if str(status).strip()
+        ],
+    )
 
 
 def load_saved_view(db: Session, saved_view_id: str) -> dict[str, Any] | None:

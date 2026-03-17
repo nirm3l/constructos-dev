@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from importlib import reload
 from pathlib import Path
@@ -477,12 +478,14 @@ def test_workspace_skill_catalog_seed_and_attach_to_project(tmp_path: Path):
     items = catalog.json()["items"]
     assert any(item["skill_key"] == "github_delivery" for item in items)
     assert any(item["skill_key"] == "jira_execution" for item in items)
+    assert all(item["skill_key"] != "git_delivery" for item in items)
+    assert all(item["skill_key"] != "team_mode" for item in items)
 
     github_skill = next(item for item in items if item["skill_key"] == "github_delivery")
     assert github_skill["source_locator"] == "seed://workspace-skills/github-delivery"
     assert github_skill["is_seeded"] is True
     github_content = str(github_skill["manifest"].get("source_content", ""))
-    assert "Use GitHub MCP for repository operations and publishing" in github_content
+    assert "Core Git execution rules are enforced by the `git_delivery` project plugin." in github_content
 
     jira_skill = next(item for item in items if item["skill_key"] == "jira_execution")
     assert jira_skill["source_locator"] == "seed://workspace-skills/jira-execution"
@@ -500,6 +503,212 @@ def test_workspace_skill_catalog_seed_and_attach_to_project(tmp_path: Path):
     assert attached_payload["skill_key"] == "github_delivery"
     assert attached_payload["generated_rule_id"] is None
     assert attached_payload["attached_from_workspace_skill_id"] == github_skill["id"]
+
+    project_skills = client.get(f"/api/project-skills?workspace_id={workspace_id}&project_id={project_id}")
+    assert project_skills.status_code == 200
+    project_skill_keys = {item["skill_key"] for item in project_skills.json()["items"]}
+    assert "github_delivery" in project_skill_keys
+    assert "git_delivery" not in project_skill_keys
+
+    github_project_skill_id = next(
+        item["id"] for item in project_skills.json()["items"] if item["skill_key"] == "github_delivery"
+    )
+    applied = client.post(f"/api/project-skills/{github_project_skill_id}/apply")
+    assert applied.status_code == 200
+    apply_payload = applied.json()
+    assert isinstance(apply_payload["generated_rule_id"], str) and apply_payload["generated_rule_id"]
+    project_rules = client.get(f"/api/project-rules?workspace_id={workspace_id}&project_id={project_id}")
+    assert project_rules.status_code == 200
+    assert any(
+        str(item.get("id") or "").strip() == str(apply_payload["generated_rule_id"])
+        for item in project_rules.json()["items"]
+    )
+
+
+def test_apply_team_mode_skill_ensures_agent_users_and_project_roles(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={workspace_id}")
+    assert catalog.status_code == 200
+    team_mode_skill = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode_skill['id']}/attach",
+        json={"workspace_id": workspace_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    attached_payload = attached.json()
+    assert attached_payload["skill_key"] == "team_mode"
+
+    applied = client.post(f"/api/project-skills/{attached_payload['id']}/apply")
+    assert applied.status_code == 200
+    applied_payload = applied.json()
+    assert isinstance(applied_payload["generated_rule_id"], str) and applied_payload["generated_rule_id"]
+    assert applied_payload["team_mode_contract_complete"] is True
+    team_dependencies = applied_payload.get("resolved_dependencies") or []
+    git_dependency = next((item for item in team_dependencies if item.get("skill_key") == "git_delivery"), None)
+    assert git_dependency is not None
+    assert git_dependency.get("project_skill_id")
+    assert git_dependency.get("applied") is True
+    roster = applied_payload["team_mode_roster"]
+    assert isinstance(roster, list) and len(roster) == 4
+    roster_by_username = {str(item["username"]): item for item in roster}
+    assert roster_by_username["agent.m0rph3u5"]["project_member_role"] == "TeamLeadAgent"
+    assert roster_by_username["agent.tr1n1ty"]["project_member_role"] == "DeveloperAgent"
+    assert roster_by_username["agent.n30"]["project_member_role"] == "DeveloperAgent"
+    assert roster_by_username["agent.0r4cl3"]["project_member_role"] == "QAAgent"
+    assert all(bool(item.get("user_id")) for item in roster)
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    assert members.status_code == 200
+    items = members.json()["items"]
+    by_username = {str(item["user"]["username"]): item for item in items}
+
+    expected = {
+        "agent.m0rph3u5": "TeamLeadAgent",
+        "agent.tr1n1ty": "DeveloperAgent",
+        "agent.n30": "DeveloperAgent",
+        "agent.0r4cl3": "QAAgent",
+    }
+    for username, expected_role in expected.items():
+        assert username in by_username
+        assert by_username[username]["role"] == expected_role
+        assert by_username[username]["user"]["user_type"] == "agent"
+
+    applied_again = client.post(f"/api/project-skills/{attached_payload['id']}/apply")
+    assert applied_again.status_code == 200
+
+    project_skills = client.get(f"/api/project-skills?workspace_id={workspace_id}&project_id={project_id}")
+    assert project_skills.status_code == 200
+    skill_by_key = {item["skill_key"]: item for item in project_skills.json()["items"]}
+    assert "team_mode" in skill_by_key
+    assert "git_delivery" in skill_by_key
+    team_rule_id = str(skill_by_key["team_mode"].get("generated_rule_id") or "").strip()
+    git_rule_id = str(skill_by_key["git_delivery"].get("generated_rule_id") or "").strip()
+    assert team_rule_id
+    assert git_rule_id
+    assert team_rule_id != git_rule_id
+    project_rules = client.get(f"/api/project-rules?workspace_id={workspace_id}&project_id={project_id}")
+    assert project_rules.status_code == 200
+    repo_context_rules = [
+        item
+        for item in project_rules.json()["items"]
+        if str(item.get("title") or "").strip().lower() == "repository context"
+    ]
+    assert len(repo_context_rules) == 1
+    assert "repository_path" in str(repo_context_rules[0].get("body") or "")
+    assert "repository_url" in str(repo_context_rules[0].get("body") or "")
+
+    project = next(item for item in client.get("/api/bootstrap").json()["projects"] if item["id"] == project_id)
+    project_refs = project.get("external_refs") or []
+    repo_refs = [
+        item
+        for item in project_refs
+        if str(item.get("title") or "").strip().lower() == "repository context"
+    ]
+    assert len(repo_refs) == 1
+
+
+def test_apply_team_mode_skill_provisions_git_delivery_plugin_config(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={workspace_id}")
+    assert catalog.status_code == 200
+    team_mode_skill = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode_skill['id']}/attach",
+        json={"workspace_id": workspace_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+
+    applied = client.post(f"/api/project-skills/{attached.json()['id']}/apply")
+    assert applied.status_code == 200
+
+    plugin = client.get(f"/api/projects/{project_id}/plugins/git_delivery")
+    assert plugin.status_code == 200
+    payload = plugin.json()
+    assert payload.get("enabled") is True
+    config = payload.get("config")
+    assert isinstance(config, dict)
+    assert isinstance(payload.get("compiled_policy"), dict)
+
+
+def test_team_mode_runner_attributes_automation_events_to_assigned_agent(tmp_path: Path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    catalog = client.get(f"/api/workspace-skills?workspace_id={workspace_id}")
+    assert catalog.status_code == 200
+    team_mode_skill = next(item for item in catalog.json()["items"] if item["skill_key"] == "team_mode")
+
+    attached = client.post(
+        f"/api/workspace-skills/{team_mode_skill['id']}/attach",
+        json={"workspace_id": workspace_id, "project_id": project_id},
+    )
+    assert attached.status_code == 200
+    skill_id = attached.json()["id"]
+    applied = client.post(f"/api/project-skills/{skill_id}/apply")
+    assert applied.status_code == 200
+
+    members = client.get(f"/api/projects/{project_id}/members")
+    assert members.status_code == 200
+    assignee = next(item for item in members.json()["items"] if item["user"]["username"] == "agent.tr1n1ty")
+    assignee_id = str(assignee["user_id"])
+
+    created = client.post(
+        "/api/tasks",
+        json={
+            "title": "Team mode actor attribution",
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "assignee_id": assignee_id,
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()["id"]
+
+    queued = client.post(f"/api/tasks/{task_id}/automation/run", json={"instruction": "Leave a progress comment"})
+    assert queued.status_code == 200
+
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
+    from features.agents.runner import run_queued_automation_once
+    from features.tasks.domain import EVENT_AUTOMATION_COMPLETED
+    from shared.models import SessionLocal, StoredEvent
+    from sqlalchemy import select
+
+    monkeypatch.setattr(
+        runner_module,
+        "execute_task_automation",
+        lambda **_: AutomationOutcome(action="comment", summary="ok", comment="ok"),
+    )
+
+    run_queued_automation_once(limit=5)
+    run_queued_automation_once(limit=5)
+
+    with SessionLocal() as db:
+        completion_event = db.execute(
+            select(StoredEvent)
+            .where(
+                StoredEvent.aggregate_type == "Task",
+                StoredEvent.aggregate_id == task_id,
+                StoredEvent.event_type == EVENT_AUTOMATION_COMPLETED,
+            )
+            .order_by(StoredEvent.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        assert completion_event is not None
+        meta = json.loads(completion_event.meta or "{}")
+        assert meta.get("actor_id") == assignee_id
 
 
 def test_workspace_skill_patch_updates_content(tmp_path: Path):
@@ -610,6 +819,10 @@ def test_agent_task_service_supports_project_skill_lifecycle(tmp_path: Path, mon
     )
     assert updated["mode"] == "enforced"
     assert updated["trust_level"] == "verified"
+
+    members = service.list_project_members(workspace_id=workspace_id, project_id=project_id, limit=200)
+    assert isinstance(members.get("items"), list)
+    assert int(members.get("total", 0)) >= 1
 
     deleted = service.delete_project_skill(skill_id=imported["id"])
     assert deleted["ok"] is True

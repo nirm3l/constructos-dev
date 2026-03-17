@@ -650,6 +650,7 @@ export function QuickAddDrawer({ state }: { state: any }) {
                           disabled={!canCreateTask}
                           onClick={createTask}
                           aria-label="Create task"
+                          data-tour-id="quickadd-create-task"
                         >
                           <Icon path="M12 5v14M5 12h14" />
                         </button>
@@ -698,10 +699,10 @@ export function QuickAddDrawer({ state }: { state: any }) {
                           className="status-chip"
                           type="button"
                           onClick={() => state.setShowQuickTaskTagPicker(false)}
-                          title="Done"
-                          aria-label="Done"
+                          title="Close"
+                          aria-label="Close"
                         >
-                          Done
+                          Close
                         </button>
                       </div>
                       <div className="tag-picker-input-row">

@@ -20,7 +20,7 @@ STATUS_SCOPE_EXTERNAL_ALIASES = {
 }
 STATUS_MATCH_ANY = "any"
 STATUS_MATCH_ALL = "all"
-DEFAULT_SCHEDULE_RUN_ON_STATUSES = ["In progress"]
+DEFAULT_SCHEDULE_RUN_ON_STATUSES = ["In Progress"]
 
 
 def _normalize_string(value: Any) -> str | None:

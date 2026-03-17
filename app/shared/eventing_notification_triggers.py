@@ -23,7 +23,8 @@ from features.tasks.domain import (
 
 from .contracts import EventEnvelope
 from .eventing_rebuild import rebuild_state
-from .models import Task, TaskWatcher
+from .models import Project, Task, TaskWatcher
+from .settings import AGENT_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID
 from .typed_notifications import (
     NOTIFICATION_TYPE_PROJECT_MEMBERSHIP_CHANGED,
     NOTIFICATION_TYPE_TASK_ASSIGNED_TO_ME,
@@ -48,6 +49,7 @@ def _task_state_snapshot(db: Session, task_id: str) -> dict[str, Any]:
             "title": row.title,
             "status": row.status,
             "assignee_id": row.assignee_id,
+            "assigned_agent_code": row.assigned_agent_code,
             "scheduled_at_utc": row.scheduled_at_utc.isoformat() if row.scheduled_at_utc else None,
         }
     state, _ = rebuild_state(db, "Task", task_id)
@@ -93,7 +95,7 @@ def prepare_event_payload_for_notification_triggers(
         if "from_status" not in normalized_payload:
             normalized_payload["from_status"] = previous_status
         if "to_status" not in normalized_payload:
-            normalized_payload["to_status"] = normalized_payload.get("status") or "To do"
+            normalized_payload["to_status"] = normalized_payload.get("status") or "To Do"
     return normalized_payload
 
 
@@ -173,6 +175,11 @@ def _emit_task_assigned_to_me(
             return
 
     if not assignee_id:
+        return
+    effective_assigned_agent_code = normalize_optional_id(
+        payload.get("assigned_agent_code") if "assigned_agent_code" in payload else task_state.get("assigned_agent_code")
+    )
+    if effective_assigned_agent_code:
         return
     if actor_id and assignee_id == actor_id:
         return
@@ -370,6 +377,14 @@ def _emit_project_membership_changed(
     workspace_id = normalize_optional_id(payload.get("workspace_id")) or normalize_optional_id(metadata.get("workspace_id"))
     role = str(payload.get("role") or "").strip() or None
     action = "removed" if env.event_type == PROJECT_EVENT_MEMBER_REMOVED else "upserted"
+    if action == "upserted" and actor_id and actor_id == target_user_id:
+        return
+    if action == "upserted" and actor_id in {AGENT_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID} and project_id:
+        project_row = db.get(Project, project_id)
+        if project_row is not None and isinstance(project_row.created_at, datetime):
+            age_seconds = (datetime.now(timezone.utc) - project_row.created_at.astimezone(timezone.utc)).total_seconds()
+            if age_seconds <= 60:
+                return
     role_for_key = role or "none"
     dedupe_key = f"project-member:{project_id}:{target_user_id}:{action}:{role_for_key}:{env.version}"
     if action == "removed":

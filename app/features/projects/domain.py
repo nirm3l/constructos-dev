@@ -24,11 +24,14 @@ class ProjectAggregate(Aggregate):
         custom_statuses: list[str],
         external_refs: list[dict[str, Any]],
         attachment_refs: list[dict[str, Any]],
-        embedding_enabled: bool = False,
+        embedding_enabled: bool = True,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        automation_max_parallel_tasks: int = 4,
         chat_index_mode: str = "OFF",
         chat_attachment_ingestion_mode: str = "METADATA_ONLY",
+        vector_index_distill_enabled: bool = False,
+        event_storming_enabled: bool = True,
         status: str = "Active",
     ) -> None:
         _ = id
@@ -41,8 +44,11 @@ class ProjectAggregate(Aggregate):
         self.embedding_enabled = embedding_enabled
         self.embedding_model = embedding_model
         self.context_pack_evidence_top_k = context_pack_evidence_top_k
+        self.automation_max_parallel_tasks = max(1, int(automation_max_parallel_tasks or 4))
         self.chat_index_mode = chat_index_mode
         self.chat_attachment_ingestion_mode = chat_attachment_ingestion_mode
+        self.vector_index_distill_enabled = bool(vector_index_distill_enabled)
+        self.event_storming_enabled = event_storming_enabled
         self.status = status
         self.is_deleted = False
         self.member_roles: dict[str, str] = {}
@@ -58,9 +64,16 @@ class ProjectAggregate(Aggregate):
         embedding_enabled: bool | None = None,
         embedding_model: str | None = None,
         context_pack_evidence_top_k: int | None = None,
+        automation_max_parallel_tasks: int | None = None,
         chat_index_mode: str | None = None,
         chat_attachment_ingestion_mode: str | None = None,
+        vector_index_distill_enabled: bool | None = None,
+        event_storming_enabled: bool | None = None,
+        updated_fields: list[str] | None = None,
     ) -> None:
+        # Keep an explicit mutation list in event payload so read-model projectors
+        # can distinguish intentional null updates from omitted parameters.
+        _ = updated_fields
         if name is not None:
             self.name = name
         if description is not None:
@@ -77,10 +90,16 @@ class ProjectAggregate(Aggregate):
             self.embedding_model = embedding_model
         if context_pack_evidence_top_k is not None:
             self.context_pack_evidence_top_k = context_pack_evidence_top_k
+        if automation_max_parallel_tasks is not None:
+            self.automation_max_parallel_tasks = max(1, int(automation_max_parallel_tasks))
         if chat_index_mode is not None:
             self.chat_index_mode = chat_index_mode
         if chat_attachment_ingestion_mode is not None:
             self.chat_attachment_ingestion_mode = chat_attachment_ingestion_mode
+        if vector_index_distill_enabled is not None:
+            self.vector_index_distill_enabled = bool(vector_index_distill_enabled)
+        if event_storming_enabled is not None:
+            self.event_storming_enabled = event_storming_enabled
 
     @event("Deleted")
     def delete(self, deleted_tasks: int = 0, deleted_notes: int = 0) -> None:

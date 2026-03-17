@@ -6,6 +6,7 @@ from eventsourcing.domain import Aggregate, event
 
 EVENT_CREATED = "NotificationCreated"
 EVENT_MARKED_READ = "NotificationMarkedRead"
+EVENT_MARKED_UNREAD = "NotificationMarkedUnread"
 
 
 class NotificationAggregate(Aggregate):
@@ -47,3 +48,8 @@ class NotificationAggregate(Aggregate):
     def mark_read(self, notification_id: str, user_id: str) -> None:
         _ = (notification_id, user_id)
         self.is_read = True
+
+    @event("MarkedUnread")
+    def mark_unread(self, notification_id: str, user_id: str) -> None:
+        _ = (notification_id, user_id)
+        self.is_read = False

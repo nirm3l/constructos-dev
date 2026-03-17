@@ -8,6 +8,11 @@ import * as Tooltip from '@radix-ui/react-tooltip'
 import { archiveChatSession, updateChatSessionContext } from '../../api'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import type { AttachmentRef } from '../../types'
+import {
+  authStatusForProvider,
+  getAgentExecutionProviderLabel,
+  resolveActiveAgentExecutionProvider,
+} from '../../utils/agentExecution'
 import { AttachmentRefList, Icon } from '../shared/uiHelpers'
 
 function getSpeechRecognitionCtor(): any | null {
@@ -26,17 +31,7 @@ function appendTranscript(base: string, transcript: string): string {
 }
 
 function buildProjectCreationStarter(): string {
-  return [
-    'Help me create a new project with a streamlined setup flow.',
-    'Workflow requirements:',
-    '1. Ask one clarifying question at a time, but only for missing inputs.',
-    '2. Default to manual setup unless I explicitly ask for a template.',
-    '3. Do not ask template-vs-manual when my request already implies a custom/manual setup.',
-    '4. If I directly ask to create the project, treat that as confirmation and create once required fields are complete.',
-    '5. If template setup is requested, run list_project_templates -> get_project_template -> preview_project_from_template -> create_project_from_template.',
-    '6. After creation, ask whether tasks/specifications/rules should be adjusted.',
-    '7. Return a clickable project link in this format: ?tab=projects&project=<project_id>.',
-  ].join('\n')
+  return 'Help me set up a new project in chat. Use setup_project_orchestration and, if inputs are missing, ask only the next missing question from the tool response.'
 }
 
 const CHAT_INPUT_MIN_HEIGHT_PX = 64
@@ -114,12 +109,21 @@ function normalizeBool(value: unknown): boolean {
 
 function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | 'xhigh' {
   const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'max' || normalized === 'maximum') return 'xhigh'
   if (normalized === 'low' || normalized === 'high' || normalized === 'xhigh') return normalized
   return 'medium'
 }
 
-function reasoningEffortLabel(value: 'low' | 'medium' | 'high' | 'xhigh'): string {
-  if (value === 'xhigh') return 'Very high'
+function buildClassifierMarkdown(value: Record<string, unknown> | null | undefined): string {
+  if (!value || Object.keys(value).length === 0) return '_No classifier data recorded_'
+  return `\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``
+}
+
+function reasoningEffortLabel(
+  value: 'low' | 'medium' | 'high' | 'xhigh',
+  provider: 'codex' | 'claude' = 'codex'
+): string {
+  if (value === 'xhigh') return provider === 'claude' ? 'Max' : 'Very high'
   return value.charAt(0).toUpperCase() + value.slice(1)
 }
 
@@ -208,8 +212,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const [deleteSessionDialogOpen, setDeleteSessionDialogOpen] = React.useState(false)
   const [clearChatDialogOpen, setClearChatDialogOpen] = React.useState(false)
   const [deleteSessionId, setDeleteSessionId] = React.useState<string | null>(null)
+  const [projectSetupStarterUsed, setProjectSetupStarterUsed] = React.useState(false)
   const [resumeCommandCopyState, setResumeCommandCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
   const [turnCopyState, setTurnCopyState] = React.useState<TurnCopyState>({ status: 'idle', turnId: null })
+  const [expandedDebugTurns, setExpandedDebugTurns] = React.useState<Record<string, boolean>>({})
   const codexThreadId = String(state.codexChatCodexSessionId || '').trim()
     || extractCodexThreadIdFromTurns(state.codexChatTurns)
     || ''
@@ -271,6 +277,14 @@ export function CodexChatDrawer({ state }: { state: any }) {
 
   React.useEffect(() => {
     setTurnCopyState({ status: 'idle', turnId: null })
+  }, [state.codexChatSessionId])
+
+  React.useEffect(() => {
+    setExpandedDebugTurns({})
+  }, [state.codexChatSessionId])
+
+  React.useEffect(() => {
+    setProjectSetupStarterUsed(false)
   }, [state.codexChatSessionId])
 
   React.useEffect(() => {
@@ -423,12 +437,58 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const selectedOptionalMcpServers = selectedMcpServers.filter(
     (name) => !CORE_MCP_LOOKUP_KEYS.has(normalizeMcpLookupKey(name))
   )
+  const isChatBusy = Boolean(state.runAgentChatMutation.isPending || state.isCodexChatRunning || state.codexChatLiveRunActive)
   const lastTurnId = state.codexChatTurns.length > 0
     ? state.codexChatTurns[state.codexChatTurns.length - 1]?.id ?? null
     : null
   const contextSummary = inputTokens !== null
     ? (contextLimitTokens && usagePercent !== null ? `Context ${usagePercent}%` : `Context ${inputTokens.toLocaleString()}`)
     : null
+  const contextFrameModeRaw = String(usage?.graph_context_frame_mode || '').trim().toLowerCase()
+  const contextFrameMode = contextFrameModeRaw === 'full' || contextFrameModeRaw === 'delta'
+    ? contextFrameModeRaw.toUpperCase()
+    : null
+  const contextFrameRevision = String(usage?.graph_context_frame_revision || '').trim()
+  const contextFrameRevisionShort = contextFrameRevision ? contextFrameRevision.slice(0, 8) : null
+  const contextFrameSummary = contextFrameMode
+    ? `Frame ${contextFrameMode}${contextFrameRevisionShort ? ` · ${contextFrameRevisionShort}` : ''}`
+    : null
+  const promptModeRaw = String(usage?.prompt_mode || '').trim().toLowerCase()
+  const promptMode = promptModeRaw === 'resume' || promptModeRaw === 'full' ? promptModeRaw.toUpperCase() : null
+  const promptSegmentChars = usage?.prompt_segment_chars && typeof usage.prompt_segment_chars === 'object'
+    ? usage.prompt_segment_chars
+    : null
+  const promptSegmentEntries = promptSegmentChars
+    ? Object.entries(promptSegmentChars)
+      .filter(([key, value]) => String(key || '').trim() && Number.isFinite(Number(value)) && Number(value) >= 0)
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+    : []
+  const promptSegmentsTotal = promptSegmentEntries.length > 0
+    ? promptSegmentEntries.reduce((sum, [, value]) => sum + Number(value), 0)
+    : null
+  const promptSegmentsSummary = promptSegmentsTotal !== null
+    ? `Prompt ${promptMode || 'N/A'} · ${(promptSegmentsTotal / 1000).toFixed(1)}k chars`
+    : null
+  const promptSegmentsTooltip = promptSegmentEntries.length > 0
+    ? promptSegmentEntries
+      .slice(0, 6)
+      .map(([key, value]) => `${key}: ${Number(value).toLocaleString()} chars`)
+      .join('\n')
+    : null
+  const contextFrameLabel = contextFrameSummary || null
+  const hasContextMetrics = Boolean(contextSummary || contextFrameLabel || promptSegmentsSummary || promptSegmentsTooltip)
+  const contextMetaText = contextSummary || 'Context'
+  const contextMetricsTooltip = (() => {
+    const lines: string[] = []
+    if (contextSummary) lines.push(contextSummary)
+    if (contextFrameLabel) lines.push(contextFrameLabel)
+    if (promptSegmentsSummary) lines.push(promptSegmentsSummary)
+    if (promptSegmentsTooltip) {
+      lines.push('Segments:')
+      lines.push(promptSegmentsTooltip)
+    }
+    return lines.length > 0 ? lines.join('\n') : null
+  })()
   const codexResumeFallbackUsed = Boolean(
     normalizeBool(state.codexChatResumeState?.fallbackUsed)
     || normalizeBool(usage?.codex_resume_fallback_used)
@@ -444,21 +504,19 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const metaParts: string[] = []
   if (hasMessages) metaParts.push(`${state.codexChatTurns.length} ${state.codexChatTurns.length === 1 ? 'message' : 'messages'}`)
   if (activeSessionUpdatedAt && (hasMessages || hasContext)) metaParts.push(activeSessionUpdatedAt)
-  const hasSessionMeta = metaParts.length > 0 || Boolean(contextSummary) || codexResumeFallbackUsed
+  const hasSessionMeta = metaParts.length > 0 || Boolean(contextSummary) || Boolean(contextFrameSummary) || codexResumeFallbackUsed
   const canDeleteSession = (
     Array.isArray(state.codexChatSessions)
     && state.codexChatSessions.length > 1
     && !state.runAgentChatMutation.isPending
     && !isDeletingSession
   )
-  const canCreateSession = !state.runAgentChatMutation.isPending
+  const canCreateSession = !isChatBusy
   const canUseProjectCreationStarter =
-    !state.runAgentChatMutation.isPending &&
-    !state.isCodexChatRunning &&
-    Boolean(state.workspaceId)
-  const canQuickConfirmCreate =
-    canUseProjectCreationStarter && Boolean(state.workspaceId) && state.codexChatTurns.length > 0
-  const canClearChat = !state.runAgentChatMutation.isPending && state.codexChatTurns.length > 0
+    !isChatBusy &&
+    Boolean(state.workspaceId) &&
+    !projectSetupStarterUsed
+  const canClearChat = !isChatBusy && state.codexChatTurns.length > 0
   const activeSpeechLang = String(state.speechLang || '').trim() || 'en-US'
   const speechLangName = activeSpeechLang === 'bs-BA' ? 'Bosnian' : 'English'
   const speechLangLabel = `${speechLangName} (${activeSpeechLang})`
@@ -474,7 +532,32 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const effectiveReasoningEffort = normalizeReasoningEffort(
     state.agentChatReasoningEffort || state.agentChatDefaultReasoningEffort
   )
-  const effectiveReasoningLabel = reasoningEffortLabel(effectiveReasoningEffort)
+  const activeExecutionProvider = resolveActiveAgentExecutionProvider(
+    state.agentChatModel || chatModelOverride,
+    defaultChatModel
+  )
+  const effectiveReasoningLabel = reasoningEffortLabel(effectiveReasoningEffort, activeExecutionProvider)
+  const activeExecutionProviderLabel = getAgentExecutionProviderLabel(activeExecutionProvider)
+  const activeAuthStatus = authStatusForProvider(
+    activeExecutionProvider,
+    state.codexAuthStatus?.data ?? null,
+    state.claudeAuthStatus?.data ?? null
+  )
+  const activeAuthLoading = activeExecutionProvider === 'claude'
+    ? Boolean(state.claudeAuthStatus?.isLoading || state.claudeAuthStatus?.isFetching)
+    : Boolean(state.codexAuthStatus?.isLoading || state.codexAuthStatus?.isFetching)
+  const providerAuthMissing = !activeAuthLoading
+    && String(activeAuthStatus?.effective_source || '').trim().toLowerCase() === 'none'
+  const canManageProviderAuth = Boolean(state.canManageUsers)
+  const providerAuthMissingGuidance = canManageProviderAuth
+    ? `${activeExecutionProviderLabel} authentication is not configured. Open Settings and use Workspace > Connections to connect ${activeExecutionProviderLabel} before using chat.`
+    : `${activeExecutionProviderLabel} authentication is not configured. Ask a workspace admin to open Settings and use Workspace > Connections to connect ${activeExecutionProviderLabel} before using chat.`
+  const providerAuthMissingBannerText = canManageProviderAuth
+    ? `${activeExecutionProviderLabel} authentication is not configured. Open settings and connect ${activeExecutionProviderLabel} before sending messages.`
+    : `${activeExecutionProviderLabel} authentication is not configured. Ask a workspace admin to connect ${activeExecutionProviderLabel} in settings before sending messages.`
+  const providerAuthMissingPlaceholder = canManageProviderAuth
+    ? `Connect ${activeExecutionProviderLabel} in Settings under Workspace > Connections before starting a chat session.`
+    : `Ask a workspace admin to connect ${activeExecutionProviderLabel} in Settings under Workspace > Connections before starting a chat session.`
 
   const stopVoiceInput = () => {
     const recognition = recognitionRef.current
@@ -494,7 +577,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
       state.setUiError('Voice input is not supported in this browser.')
       return
     }
-    if (state.runAgentChatMutation.isPending || isListening) return
+    if (isChatBusy || isListening) return
 
     const recognition = new Ctor()
     speechBaseInstructionRef.current = state.codexChatInstruction
@@ -575,11 +658,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
         ? 'Listening...'
         : ''
   const canStopChat = Boolean(
-    state.isCodexChatRunning &&
-    state.runAgentChatMutation.isPending &&
+    (state.isCodexChatRunning || state.codexChatLiveRunActive) &&
     typeof state.cancelAgentChat === 'function'
   )
-  const mcpControlsDisabled = state.runAgentChatMutation.isPending
+  const mcpControlsDisabled = isChatBusy
   const handleOptionalMcpServersChange = (values: string[]) => {
     if (typeof state.setCodexChatMcpServers !== 'function') return
     const deduped: string[] = []
@@ -654,6 +736,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const applyProjectCreationStarter = () => {
     if (!canUseProjectCreationStarter) return
     state.setUiError(null)
+    setProjectSetupStarterUsed(true)
     sendChatInstruction(buildProjectCreationStarter())
   }
 
@@ -666,7 +749,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
     } catch {
       // Ignore storage failures and still navigate.
     }
-    state.setTab?.('profile')
+    state.setTab?.('settings')
     state.setShowCodexChat?.(false)
   }
 
@@ -678,8 +761,40 @@ export function CodexChatDrawer({ state }: { state: any }) {
     } catch {
       // Ignore storage failures and still navigate.
     }
-    state.setTab?.('profile')
+    state.setTab?.('settings')
     state.setShowCodexChat?.(false)
+  }
+
+  const openCodexAuthSettings = () => {
+    stopVoiceInput()
+    try {
+      const authTarget = activeExecutionProvider === 'claude' ? 'claude_auth' : 'codex_auth'
+      window.sessionStorage.setItem('ui_profile_scroll_target', authTarget)
+      window.dispatchEvent(new Event(activeExecutionProvider === 'claude' ? 'ui:focus-claude-auth' : 'ui:focus-codex-auth'))
+    } catch {
+      // Ignore storage failures and still navigate.
+    }
+    state.setTab?.('settings')
+    state.setShowCodexChat?.(false)
+  }
+
+  const appendLocalCodexAuthGuidance = () => {
+    const content = providerAuthMissingGuidance
+    state.setCodexChatTurns((prev: any[]) => {
+      const lastTurn = Array.isArray(prev) && prev.length > 0 ? prev[prev.length - 1] : null
+      if (lastTurn?.role === 'assistant' && String(lastTurn?.content || '').trim() === content) {
+        return prev
+      }
+      return [
+        ...(Array.isArray(prev) ? prev : []),
+        {
+          id: globalThis.crypto?.randomUUID?.() ?? `a-local-${Date.now()}`,
+          role: 'assistant',
+          content,
+          createdAt: Date.now(),
+        },
+      ]
+    })
   }
 
   const persistSessionAttachmentRefs = async (nextRefs: AttachmentRef[]) => {
@@ -721,6 +836,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
       || isUploadingAttachments
       || isUpdatingSessionAttachments
     ) return
+    if (providerAuthMissing) {
+      appendLocalCodexAuthGuidance()
+      return
+    }
     if (opts?.clearInput) state.setCodexChatInstruction('')
     const attachedRefs = [...chatAttachmentRefs]
     const nextUserTurn = {
@@ -730,11 +849,19 @@ export function CodexChatDrawer({ state }: { state: any }) {
       createdAt: Date.now(),
       attachmentRefs: attachedRefs,
     }
+    const commandId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
     const history = [...state.codexChatTurns, nextUserTurn]
       .slice(-80)
       .map((t: any) => ({ role: t.role, content: t.content }))
     state.setCodexChatTurns((prev: any) => [...prev, nextUserTurn])
     setChatAttachmentRefs([])
+    if (typeof state.setCodexChatLiveRunForSession === 'function' && state.codexChatSessionId) {
+      state.setCodexChatLiveRunForSession(state.codexChatSessionId, {
+        liveRunId: commandId,
+        liveRunStartedAt: Date.now(),
+        liveRunActive: true,
+      })
+    }
     state.setIsCodexChatRunning(true)
     state.setCodexChatRunStartedAt(Date.now())
     state.setCodexChatElapsedSeconds(0)
@@ -748,6 +875,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
       reasoningEffort: effectiveReasoningEffort,
       attachmentRefs: attachedRefs,
       sessionAttachmentRefs,
+      commandId,
     })
   }
 
@@ -758,7 +886,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
           <div className="row codex-chat-header-row">
             <div className="codex-chat-header-main">
               <h3 className="codex-chat-header-title">Chat</h3>
-              <ChatTooltip content="Open Profile settings to change chat model and reasoning level">
+              <ChatTooltip content="Open Settings to change chat model and reasoning level">
                 <button
                   className="status-chip tag-filter-chip codex-chat-execution-chip codex-chat-header-inline-chip"
                   type="button"
@@ -786,7 +914,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
             <Select.Root
               value={projectSelectValue}
               onValueChange={(value) => state.selectCodexChatProject(value === '__none__' ? '' : value)}
-              disabled={state.runAgentChatMutation.isPending}
+              disabled={isChatBusy}
             >
               <Select.Trigger
                 id="codex-chat-project-context"
@@ -876,7 +1004,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
           <Select.Root
             value={state.codexChatActiveSessionId}
             onValueChange={(value) => state.setCodexChatActiveSessionId(value)}
-            disabled={state.runAgentChatMutation.isPending || sessions.length === 0}
+            disabled={isChatBusy || sessions.length === 0}
           >
             <Select.Trigger
               id="codex-chat-session-select"
@@ -979,8 +1107,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
                 )}
               </div>
             )}
-            {contextSummary && (
-              <span className="codex-chat-session-meta-context">{contextSummary}</span>
+            {hasContextMetrics && (
+              <ChatTooltip content={contextMetricsTooltip || 'Context metrics unavailable.'}>
+                <span className="codex-chat-session-meta-context">{contextMetaText}</span>
+              </ChatTooltip>
             )}
           </div>
         )}
@@ -1002,8 +1132,24 @@ export function CodexChatDrawer({ state }: { state: any }) {
           {state.codexChatTurns.length === 0 && (
             <div className="meta">Chat is empty. Send your first instruction.</div>
           )}
-          {state.codexChatTurns.map((turn: any) => (
-            <div key={turn.id} className={`codex-chat-bubble ${turn.role}`}>
+          {state.codexChatTurns.map((turn: any) => {
+            const isStreamingAssistantTurn = Boolean(
+              turn.role === 'assistant' && state.isCodexChatRunning && turn.id === lastTurnId
+            )
+            const turnContent = String(turn?.content || '')
+            const lastStreamChunk = isStreamingAssistantTurn ? String(turn?.lastStreamChunk || '') : ''
+            const streamShimmerChunk = isStreamingAssistantTurn ? String(turn?.streamShimmerChunk || '') : ''
+            const fallbackChunkLength = Math.min(32, Math.max(12, Math.floor(turnContent.length * 0.35)))
+            const shimmerChunk = streamShimmerChunk || lastStreamChunk || turnContent.slice(-fallbackChunkLength)
+            const hasShimmerChunk = Boolean(shimmerChunk)
+            const streamLeadContent = hasShimmerChunk
+              ? turnContent.slice(0, Math.max(0, turnContent.length - shimmerChunk.length))
+              : turnContent
+            return (
+            <div
+              key={turn.id}
+              className={`codex-chat-bubble ${turn.role} ${isStreamingAssistantTurn ? 'is-streaming' : ''}`.trim()}
+            >
               <div className="codex-chat-role">
                 <span className="codex-chat-role-meta">
                   {turn.role === 'user' ? 'You' : 'Assistant'}
@@ -1034,12 +1180,50 @@ export function CodexChatDrawer({ state }: { state: any }) {
                 </ChatTooltip>
               </div>
               {turn.role === 'assistant' ? (
-                <MarkdownView
-                  value={turn.content}
-                  disableMermaid={Boolean(state.isCodexChatRunning && turn.id === lastTurnId)}
-                />
+                isStreamingAssistantTurn ? (
+                  <div className="codex-chat-streaming-text" aria-live="polite">
+                    {streamLeadContent}
+                    {hasShimmerChunk && (
+                      <span className="codex-chat-stream-last-chunk">
+                        {shimmerChunk}
+                      </span>
+                    )}
+                    <span className="codex-chat-stream-caret" aria-hidden="true" />
+                  </div>
+                ) : (
+                  <MarkdownView
+                    value={turn.content}
+                    disableMermaid={Boolean(state.isCodexChatRunning && turn.id === lastTurnId)}
+                  />
+                )
               ) : (
-                <div>{turn.content}</div>
+                <>
+                  <div>{turn.content}</div>
+                  {turn.usage && typeof turn.usage === 'object' && 'intent_flags' in turn.usage && (
+                    <div className="codex-chat-debug">
+                      <button
+                        type="button"
+                        className="codex-chat-debug-toggle"
+                        onClick={() => {
+                          setExpandedDebugTurns((prev: Record<string, boolean>) => ({
+                            ...prev,
+                            [turn.id]: !Boolean(prev[turn.id]),
+                          }))
+                        }}
+                        aria-expanded={Boolean(expandedDebugTurns[turn.id])}
+                      >
+                        <span>Debug</span>
+                        <Icon path={expandedDebugTurns[turn.id] ? 'M18 15 12 9 6 15' : 'm6 9 6 6 6-6'} />
+                      </button>
+                      {expandedDebugTurns[turn.id] && (
+                        <div className="codex-chat-debug-panel">
+                          <div className="meta">Classifier output</div>
+                          <MarkdownView value={buildClassifierMarkdown((turn.usage.intent_flags as Record<string, unknown> | null | undefined) ?? null)} />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
               {Array.isArray(turn.attachmentRefs) && turn.attachmentRefs.length > 0 && (
                 <div className="codex-chat-attachments">
@@ -1054,7 +1238,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
                 </div>
               )}
             </div>
-          ))}
+          )})}
           {hasMessages && codexResumeCommand && (
             <div className="codex-chat-history-resume-row">
               <ChatTooltip content="Continue this conversation in COS CLI. Click to copy the resume command.">
@@ -1079,14 +1263,32 @@ export function CodexChatDrawer({ state }: { state: any }) {
             </div>
           )}
         </div>
-        <div className="codex-chat-composer">
+        <div className="codex-chat-composer" data-tour-id="codex-chat-composer">
+          {providerAuthMissing && (
+            <div className="notice notice-error codex-chat-auth-banner" role="alert">
+              <div className="codex-chat-auth-banner-copy">
+                {providerAuthMissingBannerText}
+              </div>
+              <button
+                type="button"
+                className="button-secondary codex-chat-auth-banner-action"
+                onClick={openCodexAuthSettings}
+              >
+                Open settings
+              </button>
+            </div>
+          )}
           <textarea
             ref={inputRef}
             className="codex-chat-input"
             value={state.codexChatInstruction}
             onChange={(e) => state.setCodexChatInstruction(e.target.value)}
             rows={2}
-            placeholder="Try: Create 3 high-priority tasks for tomorrow in the Website Redesign project and assign them to me."
+            placeholder={
+              providerAuthMissing
+                ? providerAuthMissingPlaceholder
+                : 'Try: Create 3 high-priority tasks for tomorrow in the Website Redesign project and assign them to me.'
+            }
           />
           {!state.codexChatProjectId.trim() && (
             <div className="row wrap" style={{ marginTop: 8, alignItems: 'center', gap: 8 }}>
@@ -1097,14 +1299,6 @@ export function CodexChatDrawer({ state }: { state: any }) {
                 onClick={() => applyProjectCreationStarter()}
               >
                 Start project setup
-              </button>
-              <button
-                className="status-chip"
-                type="button"
-                disabled={!canQuickConfirmCreate}
-                onClick={() => sendChatInstruction('confirm create')}
-              >
-                Confirm create
               </button>
               <span className="meta">
                 No project is selected, so chat can create a new one interactively.
@@ -1216,7 +1410,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
                       }
                       startVoiceInput()
                     }}
-                    disabled={state.runAgentChatMutation.isPending || !speechSupported}
+                    disabled={isChatBusy || !speechSupported}
                     aria-label={isListening ? 'Stop voice input' : 'Start voice input'}
                   >
                     <Icon path="M12 15a3 3 0 0 0 3-3V7a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0m5 5v4m-4 0h8" />
@@ -1255,7 +1449,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
                     }
                     fileInputRef.current?.click()
                   }}
-                  disabled={state.runAgentChatMutation.isPending || isUploadingAttachments || isUpdatingSessionAttachments}
+                  disabled={isChatBusy || isUploadingAttachments || isUpdatingSessionAttachments}
                   aria-label="Attach files"
                 >
                   <Icon path="M21.44 11.05l-8.49 8.49a5.5 5.5 0 0 1-7.78-7.78l9.19-9.2a3.5 3.5 0 1 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.48-8.49" />
@@ -1301,7 +1495,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
                     sendChatInstruction(state.codexChatInstruction, { clearInput: true })
                   }}
                   disabled={
-                    state.runAgentChatMutation.isPending
+                    isChatBusy
                     || isUploadingAttachments
                     || isUpdatingSessionAttachments
                     || !state.codexChatInstruction.trim()

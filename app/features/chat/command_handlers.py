@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 from shared.aggregates import AggregateEventRepository, coerce_originator_id
 from shared.deps import ensure_project_access, ensure_role
 from shared.eventing_rebuild import rebuild_state
-from shared.models import Project, User
+from shared.models import User
+from shared.serializers import load_project_command_state
 
 from .domain import ChatSessionAggregate
 
@@ -145,8 +146,8 @@ def _ensure_project_scope(db: Session, user: User, *, workspace_id: str, project
     normalized = _normalized_project_id(project_id)
     if not normalized:
         return None
-    project = db.get(Project, normalized)
-    if not project or bool(project.is_deleted):
+    project = load_project_command_state(db, normalized)
+    if project is None or bool(project.is_deleted):
         raise HTTPException(status_code=404, detail="Project not found")
     if project.workspace_id != workspace_id:
         raise HTTPException(status_code=400, detail="Project does not belong to workspace")
@@ -257,6 +258,7 @@ class AppendUserMessagePayload:
     message_id: str | None
     content: str
     created_at: str | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
     mcp_servers: list[str] = field(default_factory=list)
     attachment_refs: list[dict[str, Any]] = field(default_factory=list)
     session_attachment_refs: list[dict[str, Any]] = field(default_factory=list)
@@ -339,6 +341,7 @@ class AppendUserMessageHandler:
         created_at = _normalize_created_at(self.payload.created_at)
         order_index = int(getattr(aggregate, "next_message_index", 0)) + 1
         attachment_refs = _normalize_attachment_refs(self.payload.attachment_refs)
+        usage = _normalize_usage(self.payload.usage)
         # Emit message append before attachment links so projection order never
         # violates chat_attachments.message_id FK constraints.
         aggregate.append_user_message(
@@ -346,6 +349,7 @@ class AppendUserMessageHandler:
             content=content,
             order_index=order_index,
             created_at=created_at,
+            usage=usage,
             attachment_refs=attachment_refs,
             mcp_servers=mcp_servers,
         )

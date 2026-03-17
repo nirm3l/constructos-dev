@@ -7,15 +7,27 @@ import {
   authLogin,
   authLogout,
   authMe,
+  cancelClaudeDeviceAuth,
+  cancelCodexDeviceAuth,
   createAdminUser,
+  deleteClaudeAuthOverride,
+  deleteCodexAuthOverride,
+  getProjectPluginConfig,
   getBootstrap,
+  getClaudeAuthStatus,
+  getCodexAuthStatus,
   getLicenseStatus,
+  triggerLicenseAutoUpdate,
   linkTaskToSpecification,
   listAdminUsers,
   patchMyPreferences,
   resetAdminUserPassword,
+  startClaudeDeviceAuth,
+  startCodexDeviceAuth,
   submitFeedback,
+  submitClaudeDeviceAuthCode,
   updateAdminUserRole,
+  updateAdminUserAgentRuntime,
 } from '../api'
 import { useCoreQueries } from './useCoreQueries'
 import { useAppMutations } from './useAppMutations'
@@ -36,6 +48,7 @@ import { useProjectState } from './useProjectState'
 import { useCodexChatState } from './useCodexChatState'
 import { useTaskEditorState } from './useTaskEditorState'
 import { AppContent } from '../components/layout/AppContent'
+import { normalizeAgentExecutionModel } from '../utils/agentExecution'
 import {
   DEFAULT_PROJECT_STATUSES,
   activityTone,
@@ -72,6 +85,7 @@ const SEMANTIC_FALLBACK_MAX_ITEMS_WITHOUT_TOKEN_MATCH = 2
 
 function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | 'xhigh' {
   const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'max' || normalized === 'maximum') return 'xhigh'
   if (normalized === 'low' || normalized === 'high' || normalized === 'xhigh') return normalized
   return 'medium'
 }
@@ -154,18 +168,24 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectExternalRefsText, setProjectExternalRefsText, projectAttachmentRefsText, setProjectAttachmentRefsText,
     projectEmbeddingEnabled, setProjectEmbeddingEnabled, projectEmbeddingModel, setProjectEmbeddingModel,
     projectContextPackEvidenceTopKText, setProjectContextPackEvidenceTopKText,
+    projectAutomationMaxParallelTasksText, setProjectAutomationMaxParallelTasksText,
     projectChatIndexMode, setProjectChatIndexMode, projectChatAttachmentIngestionMode, setProjectChatAttachmentIngestionMode,
+    projectEventStormingEnabled, setProjectEventStormingEnabled,
     projectTemplateParametersText, setProjectTemplateParametersText,
     projectDescriptionView, setProjectDescriptionView, showProjectCreateForm,
     setShowProjectCreateForm, showProjectEditForm, setShowProjectEditForm, editProjectName, setEditProjectName, editProjectDescription,
     setEditProjectDescription, editProjectCustomStatusesText, setEditProjectCustomStatusesText, editProjectExternalRefsText,
     setEditProjectExternalRefsText, editProjectAttachmentRefsText, setEditProjectAttachmentRefsText,
     editProjectEmbeddingEnabled, setEditProjectEmbeddingEnabled, editProjectEmbeddingModel, setEditProjectEmbeddingModel,
+    editProjectVectorIndexDistillEnabled, setEditProjectVectorIndexDistillEnabled,
     editProjectContextPackEvidenceTopKText, setEditProjectContextPackEvidenceTopKText,
+    editProjectAutomationMaxParallelTasksText, setEditProjectAutomationMaxParallelTasksText,
     editProjectChatIndexMode, setEditProjectChatIndexMode,
     editProjectChatAttachmentIngestionMode, setEditProjectChatAttachmentIngestionMode,
+    editProjectEventStormingEnabled, setEditProjectEventStormingEnabled,
     createProjectMemberIds,
-    setCreateProjectMemberIds, editProjectMemberIds, setEditProjectMemberIds, editProjectDescriptionView,
+    setCreateProjectMemberIds, createProjectWorkspaceSkillIds, setCreateProjectWorkspaceSkillIds, toggleCreateProjectWorkspaceSkill,
+    editProjectMemberIds, setEditProjectMemberIds, editProjectDescriptionView,
     setEditProjectDescriptionView, selectedProjectRuleId, setSelectedProjectRuleId, projectRuleTitle, setProjectRuleTitle,
     projectRuleBody, setProjectRuleBody, projectRuleView, setProjectRuleView, draftProjectRules, setDraftProjectRules,
     selectedDraftProjectRuleId, setSelectedDraftProjectRuleId, draftProjectRuleTitle, setDraftProjectRuleTitle,
@@ -179,6 +199,28 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const [quickTaskType, setQuickTaskType] = React.useState<'manual' | 'scheduled_instruction'>('manual')
   const [quickTaskScheduledInstruction, setQuickTaskScheduledInstruction] = React.useState('')
   const [quickTaskScheduleTimezone, setQuickTaskScheduleTimezone] = React.useState<string>(quickTaskLocalTimezone)
+  const [projectEditorHasUnsavedChanges, setProjectEditorHasUnsavedChanges] = React.useState(false)
+  const [discardDialogOpen, setDiscardDialogOpen] = React.useState(false)
+  const [discardDialogMessage, setDiscardDialogMessage] = React.useState('You have unsaved changes. Discard them?')
+  const discardDialogActionRef = React.useRef<(() => void) | null>(null)
+  const requestDiscardDialog = React.useCallback((message: string, onConfirm: () => void) => {
+    if (discardDialogOpen) return
+    discardDialogActionRef.current = onConfirm
+    setDiscardDialogMessage(message)
+    setDiscardDialogOpen(true)
+  }, [discardDialogOpen])
+
+  const handleDiscardDialogCancel = React.useCallback(() => {
+    discardDialogActionRef.current = null
+    setDiscardDialogOpen(false)
+  }, [])
+
+  const handleDiscardDialogConfirm = React.useCallback(() => {
+    const next = discardDialogActionRef.current
+    discardDialogActionRef.current = null
+    setDiscardDialogOpen(false)
+    if (typeof next === 'function') next()
+  }, [])
   const [quickTaskCreateAnother, setQuickTaskCreateAnother] = React.useState(false)
   const [quickTaskTags, setQuickTaskTags] = React.useState<string[]>([])
   const [quickTaskExternalRefsText, setQuickTaskExternalRefsText] = React.useState('')
@@ -221,7 +263,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const [noteEditorView, setNoteEditorView] = React.useState<'write' | 'preview' | 'split'>('split')
   const {
     editStatus, setEditStatus, editTitle, setEditTitle, editDescription, setEditDescription, editPriority, setEditPriority,
-    editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskGroupId, setEditTaskGroupId, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
+    editDueDate, setEditDueDate, editProjectId, setEditProjectId, editTaskGroupId, setEditTaskGroupId, editAssigneeId, setEditAssigneeId, editAssignedAgentCode, setEditAssignedAgentCode, editTaskTags, setEditTaskTags, editTaskExternalRefsText,
     setEditTaskExternalRefsText, editTaskAttachmentRefsText, setEditTaskAttachmentRefsText, showTaskTagPicker,
     setShowTaskTagPicker, taskTagPickerQuery, setTaskTagPickerQuery, editTaskType, setEditTaskType, editScheduledAtUtc,
     setEditScheduledAtUtc, editScheduleTimezone, setEditScheduleTimezone, editScheduleRunOnStatuses, setEditScheduleRunOnStatuses,
@@ -236,9 +278,19 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editStatusTriggerExternalFromStatusesText, setEditStatusTriggerExternalFromStatusesText,
     editStatusTriggerExternalToStatusesText, setEditStatusTriggerExternalToStatusesText,
     commentBody, setCommentBody,
-    expandedCommentIds, setExpandedCommentIds, automationInstruction, setAutomationInstruction, activityExpandedIds,
+    expandedCommentIds, setExpandedCommentIds, automationInstruction, setAutomationInstruction,
+    automationLiveTaskId, setAutomationLiveTaskId,
+    automationLiveRunId, setAutomationLiveRunId,
+    automationLiveActive, setAutomationLiveActive,
+    automationLiveBuffer, setAutomationLiveBuffer,
+    automationLiveStatusText, setAutomationLiveStatusText,
+    automationLiveUpdatedAt, setAutomationLiveUpdatedAt,
+    activityExpandedIds,
     setActivityExpandedIds, activityShowRawDetails, setActivityShowRawDetails, scrollToNewestComment, setScrollToNewestComment,
     uiError, setUiError, uiInfo, setUiInfo, taskEditorError, setTaskEditorError,
+    taskEditorHydratedTaskId, setTaskEditorHydratedTaskId,
+    taskEditorBaselineTask, setTaskEditorBaselineTask,
+    taskEditorTouched, setTaskEditorTouched,
   } = useTaskEditorState()
   const {
     showCodexChat, setShowCodexChat, codexChatSessions, codexChatProjectSessions, codexChatActiveSessionId,
@@ -252,6 +304,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setCodexChatUsage, setCodexChatUsageForSession, codexChatCodexSessionId, setCodexChatCodexSessionId,
     codexChatResumeState, setCodexChatResumeState, setCodexChatResumeStateForSession,
     setCodexChatCodexSessionIdForSession,
+    codexChatLiveRunId, codexChatLiveRunSeq, codexChatLiveRunActive, codexChatLiveAssistantTurnId,
+    codexChatLiveStatusText, codexChatLiveRunStartedAt, setCodexChatLiveRunForSession,
     mergeCodexChatSessionsFromServer,
   } = useCodexChatState(userId)
 
@@ -332,6 +386,42 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     enabled: Boolean(bootstrap.data),
     retry: 1,
   })
+  const codexAuthStatus = useQuery({
+    queryKey: ['codex-auth-status', userId],
+    queryFn: () => getCodexAuthStatus(userId),
+    enabled: Boolean(bootstrap.data),
+    retry: 1,
+    refetchOnWindowFocus: false,
+    refetchInterval: (query) => {
+      const data = query.state.data as {
+        configured?: boolean
+        effective_source?: string | null
+        login_session?: { status?: string | null }
+      } | undefined
+      if (data?.configured || String(data?.effective_source || '').trim().toLowerCase() === 'system_override') {
+        return false
+      }
+      return data?.login_session?.status === 'pending' ? 5000 : false
+    },
+  })
+  const claudeAuthStatus = useQuery({
+    queryKey: ['claude-auth-status', userId],
+    queryFn: () => getClaudeAuthStatus(userId),
+    enabled: Boolean(bootstrap.data),
+    retry: 1,
+    refetchOnWindowFocus: false,
+    refetchInterval: (query) => {
+      const data = query.state.data as {
+        configured?: boolean
+        effective_source?: string | null
+        login_session?: { status?: string | null }
+      } | undefined
+      if (data?.configured || String(data?.effective_source || '').trim().toLowerCase() === 'system_override') {
+        return false
+      }
+      return data?.login_session?.status === 'pending' ? 5000 : false
+    },
+  })
   const activateLicenseMutation = useMutation({
     mutationFn: (activationCode: string) =>
       activateLicense(userId, {
@@ -382,13 +472,96 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       agent_chat_reasoning_effort: string | null
     }) => patchMyPreferences(userId, payload),
     onSuccess: async (payload) => {
-      setAgentChatModel(String(payload?.agent_chat_model || '').trim())
+      setAgentChatModel(normalizeAgentExecutionModel(payload?.agent_chat_model))
       setAgentChatReasoningEffort(normalizeReasoningEffort(payload?.agent_chat_reasoning_effort))
       setUiError(null)
       await qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
     },
     onError: (error: unknown) => {
       setUiError(toErrorMessage(error, 'Chat execution settings update failed'))
+    },
+  })
+  const onboardingTourPreferencesMutation = useMutation({
+    mutationFn: (payload: {
+      onboarding_quick_tour_completed?: boolean
+      onboarding_advanced_tour_completed?: boolean
+    }) => patchMyPreferences(userId, payload),
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Onboarding tour preference update failed'))
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+    },
+  })
+  const startCodexDeviceAuthMutation = useMutation({
+    mutationFn: () => startCodexDeviceAuth(userId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['codex-auth-status', userId] })
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Codex sign-in could not be started'))
+    },
+  })
+  const cancelCodexDeviceAuthMutation = useMutation({
+    mutationFn: () => cancelCodexDeviceAuth(userId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['codex-auth-status', userId] })
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Codex sign-in could not be cancelled'))
+    },
+  })
+  const deleteCodexAuthOverrideMutation = useMutation({
+    mutationFn: () => deleteCodexAuthOverride(userId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['codex-auth-status', userId] })
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Shared Codex authentication could not be removed'))
+    },
+  })
+  const startClaudeDeviceAuthMutation = useMutation({
+    mutationFn: (loginMethod: 'claudeai' | 'console') =>
+      startClaudeDeviceAuth(userId, { login_method: loginMethod }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Claude sign-in could not be started'))
+    },
+  })
+  const cancelClaudeDeviceAuthMutation = useMutation({
+    mutationFn: () => cancelClaudeDeviceAuth(userId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Claude sign-in could not be cancelled'))
+    },
+  })
+  const submitClaudeDeviceAuthCodeMutation = useMutation({
+    mutationFn: (code: string) => submitClaudeDeviceAuthCode(userId, { code }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Claude sign-in code could not be submitted'))
+    },
+  })
+  const deleteClaudeAuthOverrideMutation = useMutation({
+    mutationFn: () => deleteClaudeAuthOverride(userId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Shared Claude authentication could not be removed'))
     },
   })
   const { frontendVersion, backendVersion, backendBuild, backendDeployedAtUtc } = useAppVersion()
@@ -409,11 +582,12 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const [resetAdminPasswordUserId, setResetAdminPasswordUserId] = React.useState<string | null>(null)
   const [updateAdminRoleUserId, setUpdateAdminRoleUserId] = React.useState<string | null>(null)
   const [deactivateAdminUserId, setDeactivateAdminUserId] = React.useState<string | null>(null)
+  const [updateAdminAgentRuntimeUserId, setUpdateAdminAgentRuntimeUserId] = React.useState<string | null>(null)
 
   const adminUsersQuery = useQuery({
     queryKey: ['admin-users', userId, workspaceId],
     queryFn: () => listAdminUsers(userId, workspaceId),
-    enabled: Boolean(workspaceId && canManageUsers && (tab === 'profile' || tab === 'admin')),
+    enabled: Boolean(workspaceId && canManageUsers && tab === 'settings'),
   })
 
   const createAdminUserMutation = useMutation({
@@ -481,6 +655,32 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setDeactivateAdminUserId(null)
     },
   })
+  const updateAdminUserAgentRuntimeMutation = useMutation({
+    mutationFn: (payload: {
+      targetUserId: string
+      model?: string | null
+      reasoning_effort?: string | null
+      use_for_background_processing?: boolean | null
+    }) =>
+      updateAdminUserAgentRuntime(userId, payload.targetUserId, {
+        workspace_id: workspaceId,
+        model: payload.model,
+        reasoning_effort: payload.reasoning_effort,
+        use_for_background_processing: payload.use_for_background_processing,
+      }),
+    onMutate: (payload) => {
+      setUpdateAdminAgentRuntimeUserId(payload.targetUserId)
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['admin-users', userId, workspaceId] })
+    },
+    onError: (err: any) => {
+      setUiError(err?.message || 'Unable to update bot runtime')
+    },
+    onSettled: () => {
+      setUpdateAdminAgentRuntimeUserId(null)
+    },
+  })
   const adminUsers = adminUsersQuery.data?.items ?? []
   const adminUsersError = adminUsersQuery.isError ? toErrorMessage(adminUsersQuery.error, 'Unable to load users') : null
   const onCreateAdminUser = React.useCallback(() => {
@@ -506,6 +706,15 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     if (!workspaceId) return
     deactivateAdminUserMutation.mutate(targetUserId)
   }, [deactivateAdminUserMutation, workspaceId])
+  const onUpdateAdminUserAgentRuntime = React.useCallback((payload: {
+    targetUserId: string
+    model?: string | null
+    reasoning_effort?: string | null
+    use_for_background_processing?: boolean | null
+  }) => {
+    if (!workspaceId) return
+    updateAdminUserAgentRuntimeMutation.mutate(payload)
+  }, [updateAdminUserAgentRuntimeMutation, workspaceId])
 
   useBootstrapSelectionEffects({
     bootstrap,
@@ -565,6 +774,9 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectGraphOverview,
     projectGraphContextPack,
     projectGraphSubgraph,
+    projectEventStormingOverview,
+    projectEventStormingSubgraph,
+    projectTaskDependencyGraph,
     projectTaskCountQueries,
     projectNoteCountQueries,
     projectRuleCountQueries,
@@ -599,6 +811,195 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectsMode,
   })
 
+  const mergedNotifications = React.useMemo(() => {
+    const items = Array.isArray(notifications.data) ? [...notifications.data] : []
+    return items.sort((a: any, b: any) => {
+      const at = Date.parse(String(a?.created_at || ''))
+      const bt = Date.parse(String(b?.created_at || ''))
+      if (Number.isFinite(at) && Number.isFinite(bt)) return bt - at
+      if (Number.isFinite(bt)) return 1
+      if (Number.isFinite(at)) return -1
+      return String(b?.id || '').localeCompare(String(a?.id || ''))
+    })
+  }, [notifications.data])
+
+  const autoUpdateEventSourceRef = React.useRef<EventSource | null>(null)
+  const autoUpdateRecoveryActiveRef = React.useRef(false)
+  const autoUpdateRecoveryTimerRef = React.useRef<number | null>(null)
+  const autoUpdateUiFlushTimerRef = React.useRef<number | null>(null)
+  const autoUpdateUiPendingMessageRef = React.useRef('')
+  const autoUpdateUiLastMessageRef = React.useRef('')
+  const closeAutoUpdateEventStream = React.useCallback(() => {
+    if (!autoUpdateEventSourceRef.current) return
+    autoUpdateEventSourceRef.current.close()
+    autoUpdateEventSourceRef.current = null
+  }, [])
+  const clearAutoUpdateRecoveryTimer = React.useCallback(() => {
+    if (autoUpdateRecoveryTimerRef.current == null) return
+    window.clearTimeout(autoUpdateRecoveryTimerRef.current)
+    autoUpdateRecoveryTimerRef.current = null
+  }, [])
+  const clearAutoUpdateUiFlushTimer = React.useCallback(() => {
+    if (autoUpdateUiFlushTimerRef.current == null) return
+    window.clearTimeout(autoUpdateUiFlushTimerRef.current)
+    autoUpdateUiFlushTimerRef.current = null
+  }, [])
+  const normalizeAutoUpdateUiMessage = React.useCallback((value: string) => {
+    const clean = String(value || '')
+      .replace(/\x1b\[[0-9;]*m/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+    if (!clean) return ''
+    return clean.length > 220 ? `${clean.slice(0, 219).trimEnd()}…` : clean
+  }, [])
+  const pushAutoUpdateUiMessage = React.useCallback((rawMessage: string, immediate = false) => {
+    const message = normalizeAutoUpdateUiMessage(rawMessage)
+    if (!message) return
+    autoUpdateUiPendingMessageRef.current = message
+    const flush = () => {
+      const next = autoUpdateUiPendingMessageRef.current
+      autoUpdateUiFlushTimerRef.current = null
+      if (!next || next === autoUpdateUiLastMessageRef.current) return
+      autoUpdateUiLastMessageRef.current = next
+      setUiInfo(`Update: ${next}`)
+    }
+    if (immediate) {
+      clearAutoUpdateUiFlushTimer()
+      flush()
+      return
+    }
+    if (autoUpdateUiFlushTimerRef.current != null) return
+    autoUpdateUiFlushTimerRef.current = window.setTimeout(flush, 220)
+  }, [clearAutoUpdateUiFlushTimer, normalizeAutoUpdateUiMessage, setUiInfo])
+  const waitForAppReadyAndRefresh = React.useCallback((statusMessage: string) => {
+    if (autoUpdateRecoveryActiveRef.current) return
+    autoUpdateRecoveryActiveRef.current = true
+    clearAutoUpdateRecoveryTimer()
+    clearAutoUpdateUiFlushTimer()
+    closeAutoUpdateEventStream()
+    setUiError(null)
+    setUiInfo(statusMessage)
+    const startedAt = Date.now()
+    const timeoutMs = 120_000
+    const probeDelayMs = 1_500
+    const minWaitBeforeReloadMs = 8_000
+    let sawDowntime = false
+
+    const probe = async () => {
+      try {
+        const response = await fetch('/api/auth/me', {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'no-store',
+        })
+        if (response.status >= 500) {
+          sawDowntime = true
+        }
+        const elapsedMs = Date.now() - startedAt
+        if (response.status < 500 && (sawDowntime || elapsedMs >= minWaitBeforeReloadMs)) {
+          window.location.reload()
+          return
+        }
+      } catch {
+        sawDowntime = true
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        autoUpdateRecoveryActiveRef.current = false
+        setUiError('Update completed, but app is still unreachable. Please refresh manually.')
+        return
+      }
+      autoUpdateRecoveryTimerRef.current = window.setTimeout(() => {
+        void probe()
+      }, probeDelayMs)
+    }
+
+    void probe()
+  }, [clearAutoUpdateRecoveryTimer, clearAutoUpdateUiFlushTimer, closeAutoUpdateEventStream, setUiError, setUiInfo])
+  const parseAutoUpdateEvent = React.useCallback((event: MessageEvent) => {
+    try {
+      const payload = JSON.parse(String(event.data || '{}'))
+      return payload && typeof payload === 'object' ? payload as Record<string, unknown> : null
+    } catch {
+      return null
+    }
+  }, [])
+  const startAutoUpdateEventStream = React.useCallback((runId: string) => {
+    const normalizedRunId = String(runId || '').trim()
+    if (!normalizedRunId) return
+    closeAutoUpdateEventStream()
+    const streamUrl = `/api/license/auto-update/stream?run_id=${encodeURIComponent(normalizedRunId)}`
+    const source = new EventSource(streamUrl)
+    autoUpdateEventSourceRef.current = source
+
+    const onStatus = (event: MessageEvent) => {
+      const payload = parseAutoUpdateEvent(event)
+      const message = String(payload?.message || '').trim()
+      if (message) pushAutoUpdateUiMessage(message, true)
+    }
+    const onProgress = (event: MessageEvent) => {
+      const payload = parseAutoUpdateEvent(event)
+      const message = String(payload?.message || '').trim()
+      if (message) pushAutoUpdateUiMessage(message, false)
+    }
+    const onFinal = (event: MessageEvent) => {
+      const payload = parseAutoUpdateEvent(event)
+      const result = payload?.result && typeof payload.result === 'object'
+        ? (payload.result as Record<string, unknown>)
+        : null
+      const ok = Boolean(result?.ok)
+      const message = String(result?.message || '').trim()
+      if (ok) {
+        waitForAppReadyAndRefresh(message || 'Update dispatched. Waiting for app to become available...')
+        return
+      }
+      autoUpdateRecoveryActiveRef.current = false
+      clearAutoUpdateRecoveryTimer()
+      clearAutoUpdateUiFlushTimer()
+      closeAutoUpdateEventStream()
+      setUiError(message || 'Application update failed')
+    }
+    const onError = () => {
+      waitForAppReadyAndRefresh('Update in progress. Waiting for app restart...')
+    }
+
+    source.addEventListener('status', onStatus as EventListener)
+    source.addEventListener('progress', onProgress as EventListener)
+    source.addEventListener('final', onFinal as EventListener)
+    source.addEventListener('error', onError as EventListener)
+  }, [clearAutoUpdateRecoveryTimer, clearAutoUpdateUiFlushTimer, closeAutoUpdateEventStream, parseAutoUpdateEvent, pushAutoUpdateUiMessage, setUiError, waitForAppReadyAndRefresh])
+
+  const autoUpdateFromNotificationMutation = useMutation({
+    mutationFn: async (_notificationId: string) => {
+      return triggerLicenseAutoUpdate(userId)
+    },
+    onSuccess: (response) => {
+      autoUpdateRecoveryActiveRef.current = false
+      clearAutoUpdateRecoveryTimer()
+      clearAutoUpdateUiFlushTimer()
+      autoUpdateUiPendingMessageRef.current = ''
+      autoUpdateUiLastMessageRef.current = ''
+      setUiError(null)
+      const runId = String(response?.run_id || '').trim()
+      if (!runId) {
+        setUiError('Update run_id is missing from server response')
+        return
+      }
+      setUiInfo('Application auto-update started (task-app + mcp-tools).')
+      startAutoUpdateEventStream(runId)
+    },
+    onError: (err) => {
+      setUiError(err instanceof Error ? err.message : 'Application auto-update failed to start')
+    },
+  })
+
+  React.useEffect(() => {
+    return () => {
+      clearAutoUpdateRecoveryTimer()
+      clearAutoUpdateUiFlushTimer()
+      closeAutoUpdateEventStream()
+    }
+  }, [clearAutoUpdateRecoveryTimer, clearAutoUpdateUiFlushTimer, closeAutoUpdateEventStream])
+
   useRealtimeEffects({
     qc,
     realtimeRefreshTimerRef,
@@ -615,24 +1016,63 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     codexChatHistoryRef,
     codexChatTurns,
     codexChatActiveSessionId,
+    codexChatSessionId,
+    codexChatLiveRunId,
+    codexChatLiveRunSeq,
+    codexChatLiveRunActive,
+    codexChatLiveAssistantTurnId,
+    codexChatLiveStatusText,
+    codexChatLiveRunStartedAt,
+    setCodexChatLiveRunForSession,
+    setCodexChatTurnsForSession,
+    setIsCodexChatRunning,
+    setCodexChatRunStartedAt,
     mergeCodexChatSessionsFromServer,
   })
 
   const selectedTask = React.useMemo(() => {
-    const fromList = tasks.data?.items.find((t) => t.id === selectedTaskId) ?? null
-    if (fromList) return fromList
+    if (!selectedTaskId) return null
     return selectedTaskQuery.data ?? null
-  }, [selectedTaskId, selectedTaskQuery.data, tasks.data?.items])
+  }, [selectedTaskId, selectedTaskQuery.data])
+  const taskEditorProjectId = React.useMemo(() => {
+    return String(selectedTask?.project_id || selectedProjectId || '').trim()
+  }, [selectedProjectId, selectedTask?.project_id])
+  const taskEditorTeamModeConfigQuery = useQuery({
+    queryKey: ['project-plugin-config', userId, taskEditorProjectId, 'team_mode', 'task-editor'],
+    queryFn: () => getProjectPluginConfig(userId, taskEditorProjectId, 'team_mode'),
+    enabled: Boolean(taskEditorProjectId),
+    staleTime: 10_000,
+  })
+  const taskEditorTeamAgents = React.useMemo(() => {
+    const config = taskEditorTeamModeConfigQuery.data?.config
+    if (!config || typeof config !== 'object') return []
+    const team = (config as Record<string, unknown>).team
+    if (!team || typeof team !== 'object') return []
+    const agents = (team as Record<string, unknown>).agents
+    if (!Array.isArray(agents)) return []
+    return agents
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const asObj = item as Record<string, unknown>
+        const id = String(asObj.id || '').trim()
+        if (!id) return null
+        return {
+          id,
+          name: String(asObj.name || '').trim(),
+          authority_role: String(asObj.authority_role || '').trim(),
+          executor_user_id: String(asObj.executor_user_id || '').trim(),
+        }
+      })
+      .filter(Boolean)
+  }, [taskEditorTeamModeConfigQuery.data?.config])
   const selectedNote = React.useMemo(() => {
     const fromList = notes.data?.items.find((n) => n.id === selectedNoteId) ?? null
-    if (fromList) return fromList
-    return selectedNoteQuery.data ?? null
+    return selectedNoteQuery.data ?? fromList
   }, [notes.data?.items, selectedNoteId, selectedNoteQuery.data])
   const selectedSpecification = React.useMemo(
     () => {
       const fromList = specifications.data?.items.find((s: any) => s.id === selectedSpecificationId) ?? null
-      if (fromList) return fromList
-      return selectedSpecificationQuery.data ?? null
+      return selectedSpecificationQuery.data ?? fromList
     },
     [selectedSpecificationId, selectedSpecificationQuery.data, specifications.data?.items]
   )
@@ -651,7 +1091,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     useBootstrapDerived({
       bootstrapData: bootstrap.data,
       selectedProjectId,
-      notifications: notifications.data ?? [],
+      notifications: mergedNotifications,
     })
 
   React.useEffect(() => {
@@ -1041,6 +1481,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     toggleEditProjectMember,
     projectIsDirty,
     noteIsDirty,
+    specificationIsDirty,
     taskIsDirty,
     confirmDiscardChanges,
     closeTaskEditor,
@@ -1061,13 +1502,17 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editProjectEmbeddingEnabled,
     editProjectEmbeddingModel,
     editProjectContextPackEvidenceTopKText,
+    editProjectAutomationMaxParallelTasksText,
     editProjectChatIndexMode,
     editProjectChatAttachmentIngestionMode,
+    editProjectEventStormingEnabled,
     parseExternalRefsText,
     editProjectExternalRefsText,
     parseAttachmentRefsText,
     editProjectAttachmentRefsText,
     editProjectMemberIds,
+    projectEditorHasUnsavedChanges,
+    setProjectEditorHasUnsavedChanges,
     selectedNote,
     editNoteTitle,
     editNoteBody,
@@ -1089,6 +1534,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editPriority,
     editProjectId,
     editTaskGroupId,
+    editAssigneeId,
+    editAssignedAgentCode,
     editTaskTags,
     editDueDate,
     editTaskType,
@@ -1106,6 +1553,9 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editStatusTriggerExternalTaskIdsText,
     editStatusTriggerExternalFromStatusesText,
     editStatusTriggerExternalToStatusesText,
+    taskEditorHydratedTaskId,
+    taskEditorBaselineTask,
+    taskEditorTouched,
     editTaskExternalRefsText,
     editTaskAttachmentRefsText,
     setSelectedTaskId,
@@ -1118,6 +1568,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setShowProjectCreateForm,
     setShowProjectEditForm,
     setSelectedProjectId,
+    requestDiscardChanges: requestDiscardDialog,
   })
 
   const openTask = React.useCallback((taskId: string, projectId?: string | null) => {
@@ -1153,6 +1604,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   // Notes uses an accordion: do not auto-open a note.
   useTaskNoteEditorEffects({
     selectedTask,
+    selectedTaskId,
     currentUserTimezone: bootstrap.data?.current_user?.timezone,
     setEditTitle,
     setEditStatus,
@@ -1161,6 +1613,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setEditDueDate,
     setEditProjectId,
     setEditTaskGroupId,
+    setEditAssigneeId,
+    setEditAssignedAgentCode,
     setEditTaskTags,
     setEditTaskExternalRefsText,
     setEditTaskAttachmentRefsText,
@@ -1182,9 +1636,18 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setEditStatusTriggerExternalFromStatusesText,
     setEditStatusTriggerExternalToStatusesText,
     setAutomationInstruction,
+    setAutomationLiveTaskId,
+    setAutomationLiveRunId,
+    setAutomationLiveActive,
+    setAutomationLiveBuffer,
+    setAutomationLiveStatusText,
+    setAutomationLiveUpdatedAt,
     setCommentBody,
     setExpandedCommentIds,
     setTaskEditorError,
+    setTaskEditorHydratedTaskId,
+    setTaskEditorBaselineTask,
+    setTaskEditorTouched,
     taskEditorError,
     editTaskType,
     editScheduledInstruction,
@@ -1243,8 +1706,10 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editProjectEmbeddingEnabled,
     editProjectEmbeddingModel,
     editProjectContextPackEvidenceTopKText,
+    editProjectAutomationMaxParallelTasksText,
     editProjectChatIndexMode,
     editProjectChatAttachmentIngestionMode,
+    editProjectEventStormingEnabled,
     editProjectExternalRefsText,
     parseExternalRefsText,
     editProjectAttachmentRefsText,
@@ -1266,6 +1731,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editPriority,
     editProjectId,
     editTaskGroupId,
+    editAssigneeId,
+    editAssignedAgentCode,
     selectedTask,
     editTaskTags,
     editTaskExternalRefsText,
@@ -1284,6 +1751,67 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editStatusTriggerExternalFromStatusesText,
     editStatusTriggerExternalToStatusesText,
   })
+
+  const setTabWithGuards = React.useCallback((nextTab: Tab) => {
+    const normalizedNextTab = String(nextTab || '').trim() as Tab
+    if (!normalizedNextTab || normalizedNextTab === tab) return
+    if (discardDialogOpen) return
+
+    if (tab === 'projects' && showProjectEditForm && (projectIsDirty || projectEditorHasUnsavedChanges)) {
+      requestDiscardDialog('You have unsaved project changes. Discard them and switch section?', () => {
+        setShowProjectEditForm(false)
+        setProjectEditorHasUnsavedChanges(false)
+        setTab(normalizedNextTab)
+      })
+      return
+    }
+    if (tab === 'notes' && selectedNoteId && noteIsDirty) {
+      requestDiscardDialog('You have unsaved note changes. Discard them and switch section?', () => {
+        setSelectedNoteId(null)
+        setShowTagPicker(false)
+        setTagPickerQuery('')
+        setTab(normalizedNextTab)
+      })
+      return
+    }
+    if (tab === 'specifications' && selectedSpecificationId && specificationIsDirty) {
+      requestDiscardDialog('You have unsaved specification changes. Discard them and switch section?', () => {
+        setSelectedSpecificationId(null)
+        setTab(normalizedNextTab)
+      })
+      return
+    }
+    if ((tab === 'tasks' || tab === 'inbox') && selectedTaskId && taskIsDirty) {
+      requestDiscardDialog('You have unsaved task changes. Discard them and switch section?', () => {
+        setSelectedTaskId(null)
+        setTaskEditorError(null)
+        setTab(normalizedNextTab)
+      })
+      return
+    }
+    setTab(normalizedNextTab)
+  }, [
+    discardDialogOpen,
+    noteIsDirty,
+    projectEditorHasUnsavedChanges,
+    projectIsDirty,
+    requestDiscardDialog,
+    selectedNoteId,
+    selectedSpecificationId,
+    selectedTaskId,
+    setSelectedNoteId,
+    setSelectedSpecificationId,
+    setSelectedTaskId,
+    setShowProjectEditForm,
+    setShowTagPicker,
+    setTab,
+    setTagPickerQuery,
+    setTaskEditorError,
+    showProjectEditForm,
+    specificationIsDirty,
+    tab,
+    taskIsDirty,
+  ])
 
   const {
     saveProjectMutation,
@@ -1338,6 +1866,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     linkNoteToSpecificationMutation,
     unlinkNoteFromSpecificationMutation,
     markReadMutation,
+    markUnreadMutation,
     markAllReadMutation,
     themeMutation,
     addCommentMutation,
@@ -1399,10 +1928,14 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectEmbeddingEnabled,
     projectEmbeddingModel,
     projectContextPackEvidenceTopKText,
+    projectAutomationMaxParallelTasksText,
     projectChatIndexMode,
     projectChatAttachmentIngestionMode,
+    projectEventStormingEnabled,
     projectTemplateParametersText,
     createProjectMemberIds,
+    createProjectWorkspaceSkillIds,
+    workspaceSkills,
     draftProjectRules,
     setProjectName,
     setProjectTemplateKey,
@@ -1413,11 +1946,14 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setProjectEmbeddingEnabled,
     setProjectEmbeddingModel,
     setProjectContextPackEvidenceTopKText,
+    setProjectAutomationMaxParallelTasksText,
     setProjectChatIndexMode,
     setProjectChatAttachmentIngestionMode,
+    setProjectEventStormingEnabled,
     setProjectTemplateParametersText,
     setProjectDescriptionView,
     setCreateProjectMemberIds,
+    setCreateProjectWorkspaceSkillIds,
     setDraftProjectRules,
     setSelectedDraftProjectRuleId,
     setDraftProjectRuleTitle,
@@ -1441,6 +1977,12 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setScrollToNewestComment,
     automationInstruction,
     setAutomationInstruction,
+    setAutomationLiveTaskId,
+    setAutomationLiveRunId,
+    setAutomationLiveActive,
+    setAutomationLiveBuffer,
+    setAutomationLiveStatusText,
+    setAutomationLiveUpdatedAt,
     codexChatSessionId,
     codexChatMcpServers,
     setCodexChatTurns,
@@ -1451,6 +1993,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setCodexChatResumeState,
     setCodexChatResumeStateForSession,
     setCodexChatCodexSessionIdForSession,
+    setCodexChatLiveRunForSession,
     setIsCodexChatRunning,
     setCodexChatRunStartedAt,
     setCodexChatElapsedSeconds,
@@ -1466,6 +2009,26 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     editSpecificationExternalRefsText,
     editSpecificationAttachmentRefsText,
   })
+
+  const handleMarkNotificationRead = React.useCallback((notificationId: string) => {
+    const id = String(notificationId || '').trim()
+    if (!id) return
+    markReadMutation.mutate(id)
+  }, [markReadMutation])
+
+  const handleMarkNotificationUnread = React.useCallback((notificationId: string) => {
+    const id = String(notificationId || '').trim()
+    if (!id) return
+    markUnreadMutation.mutate(id)
+  }, [markUnreadMutation])
+
+  const handleNotificationAction = React.useCallback((notificationId: string, action: string) => {
+    const normalizedAction = String(action || '').trim()
+    if (!normalizedAction) return
+    if (normalizedAction === 'auto_update_app_images') {
+      autoUpdateFromNotificationMutation.mutate(notificationId)
+    }
+  }, [autoUpdateFromNotificationMutation])
 
   const createTaskFromGraphSummary = React.useCallback(async (payload: { title: string; description: string }) => {
     if (!selectedProjectId) throw new Error('No project selected')
@@ -1511,9 +2074,12 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setEditProjectAttachmentRefsText,
     setEditProjectEmbeddingEnabled,
     setEditProjectEmbeddingModel,
+    setEditProjectVectorIndexDistillEnabled,
     setEditProjectContextPackEvidenceTopKText,
+    setEditProjectAutomationMaxParallelTasksText,
     setEditProjectChatIndexMode,
     setEditProjectChatAttachmentIngestionMode,
+    setEditProjectEventStormingEnabled,
     setEditProjectDescriptionView,
     setShowProjectEditForm,
     setSelectedProjectRuleId,
@@ -1526,6 +2092,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectCustomStatusesText,
     setProjectCustomStatusesText,
     setProjectDescriptionView,
+    setProjectEventStormingEnabled,
     selectedProjectRule,
     selectedDraftProjectRuleId,
     draftProjectRules,
@@ -1574,27 +2141,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setSpecificationEditorView('split')
   }, [selectedSpecification])
 
-  const specificationIsDirty = React.useMemo(() => {
-    if (!selectedSpecification) return false
-    return (
-      (editSpecificationTitle || '').trim() !== (selectedSpecification.title || '').trim() ||
-      (editSpecificationBody || '') !== (selectedSpecification.body || '') ||
-      (editSpecificationStatus || 'Draft') !== (selectedSpecification.status || 'Draft') ||
-      parseCommaTags(editSpecificationTags).map((tag) => tag.toLowerCase()).join(',') !==
-        (selectedSpecification.tags ?? []).map((tag) => String(tag || '').toLowerCase()).join(',') ||
-      editSpecificationExternalRefsText.trim() !== externalRefsToText(selectedSpecification.external_refs).trim() ||
-      editSpecificationAttachmentRefsText.trim() !== attachmentRefsToText(selectedSpecification.attachment_refs).trim()
-    )
-  }, [
-    editSpecificationAttachmentRefsText,
-    editSpecificationBody,
-    editSpecificationExternalRefsText,
-    editSpecificationStatus,
-    editSpecificationTags,
-    editSpecificationTitle,
-    selectedSpecification,
-  ])
-
   if (bootstrap.isLoading) return <div className="page"><div className="card skeleton">Loading workspace...</div></div>
   if (bootstrap.isError || !bootstrap.data) return <div className="page"><div className="notice notice-error">Unable to load bootstrap data.</div></div>
 
@@ -1619,7 +2165,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       licenseStatus,
       activateLicenseMutation,
       tab,
-      setTab,
+      setTab: setTabWithGuards,
       searchQ,
       setSearchQ,
       selectedProjectId,
@@ -1627,9 +2173,14 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       showNotificationsPanel,
       setShowNotificationsPanel,
       notifications,
+      notificationsForHeader: mergedNotifications,
       unreadCount,
       markReadMutation,
+      markUnreadMutation,
       markAllReadMutation,
+      handleMarkNotificationRead,
+      handleMarkNotificationUnread,
+      handleNotificationAction,
       uiError,
       setUiError,
       uiInfo,
@@ -1696,6 +2247,12 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       showProjectCreateForm,
       showProjectEditForm,
       projectIsDirty,
+      projectEditorHasUnsavedChanges,
+      requestDiscardChanges: requestDiscardDialog,
+      discardDialogOpen,
+      discardDialogMessage,
+      handleDiscardDialogCancel,
+      handleDiscardDialogConfirm,
       confirmDiscardChanges,
       setShowProjectEditForm,
       setShowProjectCreateForm,
@@ -1717,6 +2274,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setProjectChatIndexMode,
       projectChatAttachmentIngestionMode,
       setProjectChatAttachmentIngestionMode,
+      projectEventStormingEnabled,
+      setProjectEventStormingEnabled,
       projectTemplateParametersText,
       setProjectTemplateParametersText,
       projectDescriptionView,
@@ -1738,6 +2297,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setProjectExternalRefsText,
       workspaceUsers,
       createProjectMemberIds,
+      createProjectWorkspaceSkillIds,
+      toggleCreateProjectWorkspaceSkill,
       toggleCreateProjectMember,
       selectedProject,
       projectTaskCountQueries,
@@ -1761,6 +2322,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       resetAdminPasswordUserId,
       onUpdateAdminUserRole,
       updateAdminRoleUserId,
+      onUpdateAdminUserAgentRuntime,
+      updateAdminAgentRuntimeUserId,
       onDeactivateAdminUser,
       deactivateAdminUserId,
       logout,
@@ -1780,6 +2343,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       editProjectDescriptionRef,
       editProjectDescription,
       setEditProjectDescription,
+      setProjectEditorHasUnsavedChanges,
       projectRules,
       projectSkills,
       workspaceSkills,
@@ -1787,6 +2351,9 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       projectGraphOverview,
       projectGraphContextPack,
       projectGraphSubgraph,
+      projectEventStormingOverview,
+      projectEventStormingSubgraph,
+      projectTaskDependencyGraph,
       selectedProjectRuleId,
       setSelectedProjectRuleId,
       projectRuleTitle,
@@ -1820,12 +2387,18 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setEditProjectEmbeddingEnabled,
       editProjectEmbeddingModel,
       setEditProjectEmbeddingModel,
+      editProjectVectorIndexDistillEnabled,
+      setEditProjectVectorIndexDistillEnabled,
       editProjectContextPackEvidenceTopKText,
       setEditProjectContextPackEvidenceTopKText,
+      editProjectAutomationMaxParallelTasksText,
+      setEditProjectAutomationMaxParallelTasksText,
       editProjectChatIndexMode,
       setEditProjectChatIndexMode,
       editProjectChatAttachmentIngestionMode,
       setEditProjectChatAttachmentIngestionMode,
+      editProjectEventStormingEnabled,
+      setEditProjectEventStormingEnabled,
       embeddingAllowedModels: bootstrap.data.embedding_allowed_models ?? [],
       embeddingDefaultModel: String(bootstrap.data.embedding_default_model || '').trim(),
       vectorStoreEnabled: Boolean(bootstrap.data.vector_store_enabled),
@@ -1961,6 +2534,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       themeMutation,
       saveChatExecutionPreferences: chatExecutionPreferencesMutation.mutateAsync,
       saveChatExecutionPreferencesPending: chatExecutionPreferencesMutation.isPending,
+      saveOnboardingTourProgress: onboardingTourPreferencesMutation.mutateAsync,
+      saveOnboardingTourProgressPending: onboardingTourPreferencesMutation.isPending,
       changeMyPassword: changeMyPasswordMutation.mutateAsync,
       changeMyPasswordPending: changeMyPasswordMutation.isPending,
       submitFeedback: submitFeedbackMutation.mutateAsync,
@@ -2003,11 +2578,18 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setEditDescription,
       editTaskGroupId,
       setEditTaskGroupId,
+      editAssigneeId,
+      setEditAssigneeId,
+      editAssignedAgentCode,
+      setEditAssignedAgentCode,
       editTaskTags,
       setShowTaskTagPicker,
       editTaskType,
       setEditTaskType,
+      taskTeamAgents: taskEditorTeamAgents,
       taskEditorError,
+      taskEditorTouched,
+      setTaskEditorTouched,
       editScheduledAtUtc,
       setEditScheduledAtUtc,
       editScheduleTimezone,
@@ -2066,6 +2648,18 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       automationStatus,
       automationInstruction,
       setAutomationInstruction,
+      automationLiveTaskId,
+      automationLiveRunId,
+      automationLiveActive,
+      automationLiveBuffer,
+      automationLiveStatusText,
+      automationLiveUpdatedAt,
+      setAutomationLiveTaskId,
+      setAutomationLiveRunId,
+      setAutomationLiveActive,
+      setAutomationLiveBuffer,
+      setAutomationLiveStatusText,
+      setAutomationLiveUpdatedAt,
       runAutomationMutation,
       selectedTaskId,
       setSelectedTaskId,
@@ -2081,6 +2675,22 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       backendVersion,
       backendBuild,
       backendDeployedAtUtc,
+      codexAuthStatus,
+      claudeAuthStatus,
+      startCodexDeviceAuth: startCodexDeviceAuthMutation.mutateAsync,
+      startCodexDeviceAuthPending: startCodexDeviceAuthMutation.isPending,
+      cancelCodexDeviceAuth: cancelCodexDeviceAuthMutation.mutateAsync,
+      cancelCodexDeviceAuthPending: cancelCodexDeviceAuthMutation.isPending,
+      deleteCodexAuthOverride: deleteCodexAuthOverrideMutation.mutateAsync,
+      deleteCodexAuthOverridePending: deleteCodexAuthOverrideMutation.isPending,
+      startClaudeDeviceAuth: startClaudeDeviceAuthMutation.mutateAsync,
+      startClaudeDeviceAuthPending: startClaudeDeviceAuthMutation.isPending,
+      cancelClaudeDeviceAuth: cancelClaudeDeviceAuthMutation.mutateAsync,
+      cancelClaudeDeviceAuthPending: cancelClaudeDeviceAuthMutation.isPending,
+      submitClaudeDeviceAuthCode: submitClaudeDeviceAuthCodeMutation.mutateAsync,
+      submitClaudeDeviceAuthCodePending: submitClaudeDeviceAuthCodeMutation.isPending,
+      deleteClaudeAuthOverride: deleteClaudeAuthOverrideMutation.mutateAsync,
+      deleteClaudeAuthOverridePending: deleteClaudeAuthOverrideMutation.isPending,
       showCodexChat,
       codexChatSessions,
       codexChatProjectSessions,
@@ -2099,6 +2709,13 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setCodexChatSessionAttachmentRefs,
       codexChatCodexSessionId,
       codexChatResumeState,
+      codexChatLiveRunId,
+      codexChatLiveRunSeq,
+      codexChatLiveRunActive,
+      codexChatLiveAssistantTurnId,
+      codexChatLiveStatusText,
+      codexChatLiveRunStartedAt,
+      setCodexChatLiveRunForSession,
       runAgentChatMutation,
       cancelAgentChat,
       codexChatHistoryRef,
@@ -2147,6 +2764,18 @@ function AuthGate() {
     window.localStorage.removeItem('ui_projects_mode')
   }, [])
 
+  const routeToDefaultPostLoginTab = React.useCallback(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem('ui_tab', 'tasks')
+    const params = new URLSearchParams(window.location.search)
+    params.set('tab', 'tasks')
+    params.delete('task')
+    params.delete('note')
+    params.delete('specification')
+    const next = `${window.location.pathname}?${params.toString()}${window.location.hash || ''}`
+    window.history.replaceState({}, '', next)
+  }, [])
+
   const checkAuth = React.useCallback(async () => {
     setAuthError(null)
     setPhase('checking')
@@ -2177,6 +2806,7 @@ function AuthGate() {
       const payload = await authLogin({ username: username.trim(), password })
       queryClient.clear()
       clearClientSessionState()
+      routeToDefaultPostLoginTab()
       setSessionUserId(String(payload.user?.id || '').trim() || 'session')
       setCurrentPassword(password)
       setPassword('')
@@ -2191,7 +2821,7 @@ function AuthGate() {
     } finally {
       setPending(false)
     }
-  }, [clearClientSessionState, password, pending, username])
+  }, [clearClientSessionState, password, pending, routeToDefaultPostLoginTab, username])
 
   const handleChangePassword = React.useCallback(async () => {
     if (pending) return
@@ -2211,6 +2841,7 @@ function AuthGate() {
         new_password: newPassword,
       })
       queryClient.clear()
+      routeToDefaultPostLoginTab()
       setNewPassword('')
       setConfirmPassword('')
       setPhase('ready')
@@ -2220,7 +2851,7 @@ function AuthGate() {
     } finally {
       setPending(false)
     }
-  }, [confirmPassword, currentPassword, newPassword, pending])
+  }, [confirmPassword, currentPassword, newPassword, pending, routeToDefaultPostLoginTab])
 
   const handleLogout = React.useCallback(() => {
     void authLogout().finally(() => {
@@ -2266,7 +2897,7 @@ function AuthGate() {
               type="password"
               autoComplete="current-password"
             />
-            <button type="submit" disabled={pending || !username.trim() || !password}>
+            <button type="submit" disabled={pending || !username.trim()}>
               {pending ? 'Logging in...' : 'Login'}
             </button>
           </form>

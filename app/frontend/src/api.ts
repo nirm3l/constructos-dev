@@ -1,6 +1,7 @@
 import type {
   AdminUserCreateResponse,
   AdminUserDeactivateResponse,
+  AdminUserAgentRuntimeUpdateResponse,
   AdminUserRoleUpdateResponse,
   AdminUserResetPasswordResponse,
   AdminUsersPage,
@@ -9,16 +10,32 @@ import type {
   FeedbackCreateRequest,
   FeedbackCreateResponse,
   LicenseActivationResponse,
+  LicenseAutoUpdateResponse,
   LicenseStatusResponse,
   AgentChatResponse,
   ChatMessageRecord,
   ChatMcpServer,
   ChatReasoningEffort,
   ChatSessionRecord,
+  ClaudeAuthLoginMethod,
+  CodexAuthStatus,
+  EventStormingOverview,
+  EventStormingEntityLinks,
+  EventStormingComponentLinks,
+  EventStormingLinkReviewResult,
+  EventStormingSubgraph,
+  GraphAiLayoutResult,
   GraphContextPack,
   ProjectKnowledgeSearchResult,
   GraphProjectOverview,
   GraphProjectSubgraph,
+  ProjectDockerComposeRuntimeSnapshot,
+  ProjectGitRepositoryBranchesResponse,
+  ProjectGitRepositoryFileResponse,
+  ProjectGitRepositorySummary,
+  ProjectGitRepositoryTreeResponse,
+  ProjectTaskDependencyGraph,
+  TaskDependencyGraphEventDetail,
   Notification,
   Note,
   NoteGroup,
@@ -32,6 +49,11 @@ import type {
   ProjectMembersPage,
   ProjectFromTemplatePreviewResponse,
   ProjectFromTemplateResponse,
+  ProjectPolicyChecksVerifyResponse,
+  ProjectCapabilities,
+  ProjectPluginConfig,
+  ProjectPluginConfigDiff,
+  ProjectPluginConfigValidation,
   ProjectRule,
   ProjectRulesPage,
   ProjectSkill,
@@ -133,6 +155,10 @@ export const activateLicense = (userId: string, payload: { activation_code: stri
   api<LicenseActivationResponse>('/api/license/activate', userId, {
     method: 'POST',
     body: JSON.stringify(payload),
+  })
+export const triggerLicenseAutoUpdate = (userId: string) =>
+  api<LicenseAutoUpdateResponse>('/api/license/auto-update', userId, {
+    method: 'POST',
   })
 
 export const submitFeedback = (userId: string, payload: FeedbackCreateRequest) =>
@@ -249,6 +275,21 @@ export const deactivateAdminUser = (
     body: JSON.stringify(payload),
   })
 
+export const updateAdminUserAgentRuntime = (
+  userId: string,
+  targetUserId: string,
+  payload: {
+    workspace_id: string
+    model?: string | null
+    reasoning_effort?: string | null
+    use_for_background_processing?: boolean | null
+  }
+) =>
+  api<AdminUserAgentRuntimeUpdateResponse>(`/api/admin/users/${targetUserId}/agent-runtime`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
 export const getTasks = (
   userId: string,
   workspaceId: string,
@@ -299,6 +340,7 @@ export const createTask = (
     priority?: string
     due_date?: string | null
     assignee_id?: string | null
+    assigned_agent_code?: string | null
     labels?: string[]
     external_refs?: ExternalRef[]
     attachment_refs?: AttachmentRef[]
@@ -314,6 +356,12 @@ export const createTask = (
 
 export const completeTask = (userId: string, taskId: string) =>
   api<Task>(`/api/tasks/${taskId}/complete`, userId, { method: 'POST' })
+
+export const reviewTask = (
+  userId: string,
+  taskId: string,
+  payload: { action: 'approve' | 'request_changes'; comment?: string | null }
+) => api<Task>(`/api/tasks/${taskId}/review`, userId, { method: 'POST', body: JSON.stringify(payload) })
 
 export const reopenTask = (userId: string, taskId: string) =>
   api<Task>(`/api/tasks/${taskId}/reopen`, userId, { method: 'POST' })
@@ -335,6 +383,8 @@ export const patchTask = (
       | 'due_date'
       | 'project_id'
       | 'task_group_id'
+      | 'assignee_id'
+      | 'assigned_agent_code'
       | 'title'
       | 'priority'
       | 'labels'
@@ -415,6 +465,192 @@ export const runTaskWithCodex = (userId: string, taskId: string, instruction: st
     userId,
     { method: 'POST', body: JSON.stringify({ instruction }) }
   )
+
+export async function runTaskAutomationStream(
+  userId: string,
+  taskId: string,
+  instruction: string,
+  handlers?: {
+    onAssistantDelta?: (delta: string) => void
+    onStatus?: (message: string) => void
+    signal?: AbortSignal
+  }
+): Promise<{ ok: boolean; task_id: string; automation_state: string; summary?: string; comment?: string }> {
+  const commandId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
+  const res = await fetch(`/api/tasks/${taskId}/automation/stream`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Command-Id': commandId,
+    },
+    body: JSON.stringify({ instruction }),
+    signal: handlers?.signal,
+  })
+  if (!res.ok) {
+    const raw = await res.text()
+    throw new Error(formatApiError(raw, res.status))
+  }
+  if (!res.body) {
+    throw new Error('Automation stream is unavailable')
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let finalResponse: { ok: boolean; task_id: string; automation_state: string; summary?: string; comment?: string } | null = null
+  let assistantDeltaSeen = false
+
+  const processLine = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    let event: any
+    try {
+      event = JSON.parse(trimmed)
+    } catch {
+      return
+    }
+    const type = String(event?.type || '').trim()
+    if (type === 'assistant_text') {
+      const delta = String(event?.delta || '')
+      if (delta) {
+        assistantDeltaSeen = true
+        handlers?.onAssistantDelta?.(delta)
+      }
+      return
+    }
+    if (type === 'status') {
+      const message = String(event?.message || '').trim()
+      if (message) handlers?.onStatus?.(message)
+      return
+    }
+    if (type === 'final' && event?.response) {
+      finalResponse = event.response
+    }
+  }
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    while (true) {
+      const newlineIdx = buffer.indexOf('\n')
+      if (newlineIdx < 0) break
+      const line = buffer.slice(0, newlineIdx)
+      buffer = buffer.slice(newlineIdx + 1)
+      processLine(line)
+    }
+  }
+  if (buffer.trim()) processLine(buffer)
+  let resolvedFinalResponse = finalResponse as {
+    ok: boolean
+    task_id: string
+    automation_state: string
+    summary?: string
+    comment?: string
+  } | null
+  if (!resolvedFinalResponse) {
+    try {
+      const liveStatus = await getTaskAutomationStatus(userId, taskId)
+      const automationState = String(liveStatus?.automation_state || 'running').trim() || 'running'
+      const derivedComment = String(
+        liveStatus?.last_agent_comment
+        || liveStatus?.last_agent_progress
+        || liveStatus?.last_agent_stream_status
+        || ''
+      ).trim()
+      resolvedFinalResponse = {
+        ok: automationState !== 'failed',
+        task_id: taskId,
+        automation_state: automationState,
+        summary:
+          automationState === 'failed'
+            ? 'Automation run failed.'
+            : automationState === 'completed'
+              ? 'Automation run completed.'
+              : 'Automation run accepted.',
+        comment: derivedComment,
+      }
+    } catch {
+      throw new Error('Automation stream ended without a final response')
+    }
+  }
+  if (!assistantDeltaSeen) {
+    const finalComment = String(resolvedFinalResponse.comment || '').trim()
+    if (finalComment) handlers?.onAssistantDelta?.(finalComment)
+  }
+  return resolvedFinalResponse
+}
+
+export async function runTaskAutomationLiveStream(
+  userId: string,
+  taskId: string,
+  runId: string,
+  sinceSeq: number,
+  handlers?: {
+    onAssistantDelta?: (delta: string) => void
+    onStatus?: (message: string) => void
+    onSeq?: (seq: number) => void
+    signal?: AbortSignal
+  }
+): Promise<void> {
+  const url = `/api/tasks/${taskId}/automation/stream${queryString({
+    run_id: runId,
+    since_seq: sinceSeq,
+  })}`
+  const res = await fetch(url, {
+    method: 'GET',
+    credentials: 'same-origin',
+    signal: handlers?.signal,
+  })
+  if (!res.ok) {
+    const raw = await res.text()
+    throw new Error(formatApiError(raw, res.status))
+  }
+  if (!res.body) throw new Error('Automation live stream is unavailable')
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  const processLine = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    let event: any
+    try {
+      event = JSON.parse(trimmed)
+    } catch {
+      return
+    }
+    const seq = Number(event?.seq || 0)
+    if (Number.isFinite(seq) && seq > 0) handlers?.onSeq?.(seq)
+    const type = String(event?.type || '').trim()
+    if (type === 'assistant_text') {
+      const delta = String(event?.delta || '')
+      if (delta) handlers?.onAssistantDelta?.(delta)
+      return
+    }
+    if (type === 'status') {
+      const message = String(event?.message || '').trim()
+      if (message) handlers?.onStatus?.(message)
+      return
+    }
+  }
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    while (true) {
+      const newlineIdx = buffer.indexOf('\n')
+      if (newlineIdx < 0) break
+      const line = buffer.slice(0, newlineIdx)
+      buffer = buffer.slice(newlineIdx + 1)
+      processLine(line)
+    }
+  }
+  if (buffer.trim()) processLine(buffer)
+}
+
 export const getTaskAutomationStatus = (userId: string, taskId: string) =>
   api<TaskAutomationStatus>(`/api/tasks/${taskId}/automation`, userId)
 
@@ -518,15 +754,20 @@ export async function runAgentChatStream(
     model?: string | null
     reasoning_effort?: ChatReasoningEffort | string | null
     allow_mutations?: boolean
+    command_id?: string | null
   },
   handlers?: {
     onAssistantDelta?: (delta: string) => void
     onStatus?: (message: string) => void
+    onRunId?: (runId: string) => void
+    onSeq?: (seq: number) => void
     onUsage?: (usage: AgentChatResponse['usage']) => void
     signal?: AbortSignal
   }
 ): Promise<AgentChatResponse> {
-  const commandId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
+  const commandId = String(payload.command_id || '').trim()
+    || (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`)
+  handlers?.onRunId?.(commandId)
   const res = await fetch('/api/agents/chat/stream', {
     method: 'POST',
     credentials: 'same-origin',
@@ -559,7 +800,14 @@ export async function runAgentChatStream(
     } catch {
       return
     }
+    const seq = Number(event?.seq || 0)
+    if (Number.isFinite(seq) && seq > 0) handlers?.onSeq?.(seq)
+    const runId = String(event?.run_id || '').trim()
+    if (runId) handlers?.onRunId?.(runId)
     const type = String(event?.type || '').trim()
+    if (type === 'stream_run') {
+      return
+    }
     if (type === 'assistant_text') {
       const delta = String(event?.delta || '')
       if (delta) handlers?.onAssistantDelta?.(delta)
@@ -601,10 +849,160 @@ export async function runAgentChatStream(
   return finalResponse
 }
 
+export async function runAgentChatLiveStream(
+  userId: string,
+  payload: {
+    workspace_id: string
+    session_id: string
+    run_id: string
+    since_seq: number
+  },
+  handlers?: {
+    onAssistantDelta?: (delta: string) => void
+    onStatus?: (message: string) => void
+    onRunId?: (runId: string) => void
+    onSeq?: (seq: number) => void
+    onUsage?: (usage: AgentChatResponse['usage']) => void
+    signal?: AbortSignal
+  }
+): Promise<AgentChatResponse | null> {
+  void userId
+  const url = `/api/agents/chat/stream${queryString({
+    workspace_id: payload.workspace_id,
+    session_id: payload.session_id,
+    run_id: payload.run_id,
+    since_seq: payload.since_seq,
+  })}`
+  const res = await fetch(url, {
+    method: 'GET',
+    credentials: 'same-origin',
+    signal: handlers?.signal,
+  })
+  if (!res.ok) {
+    const raw = await res.text()
+    throw new Error(formatApiError(raw, res.status))
+  }
+  if (!res.body) throw new Error('Chat live stream is unavailable')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let finalResponse: AgentChatResponse | null = null
+
+  const processLine = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    let event: any
+    try {
+      event = JSON.parse(trimmed)
+    } catch {
+      return
+    }
+    const seq = Number(event?.seq || 0)
+    if (Number.isFinite(seq) && seq > 0) handlers?.onSeq?.(seq)
+    const runId = String(event?.run_id || '').trim()
+    if (runId) handlers?.onRunId?.(runId)
+    const type = String(event?.type || '').trim()
+    if (type === 'stream_run') return
+    if (type === 'assistant_text') {
+      const delta = String(event?.delta || '')
+      if (delta) handlers?.onAssistantDelta?.(delta)
+      return
+    }
+    if (type === 'status') {
+      const message = String(event?.message || '').trim()
+      if (message) handlers?.onStatus?.(message)
+      return
+    }
+    if (type === 'usage') {
+      handlers?.onUsage?.(event?.usage ?? null)
+      return
+    }
+    if (type === 'final' && event?.response) {
+      finalResponse = event.response as AgentChatResponse
+    }
+  }
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    while (true) {
+      const newlineIdx = buffer.indexOf('\n')
+      if (newlineIdx < 0) break
+      const line = buffer.slice(0, newlineIdx)
+      buffer = buffer.slice(newlineIdx + 1)
+      processLine(line)
+    }
+  }
+  if (buffer.trim()) processLine(buffer)
+  return finalResponse
+}
+
+export const stopAgentChatStream = async (
+  userId: string,
+  payload: {
+    workspace_id: string
+    session_id: string
+    run_id?: string | null
+  }
+) =>
+  api<{ ok: boolean; cancel_requested: boolean; run_id: string }>(
+    '/api/agents/chat/stop',
+    userId,
+    { method: 'POST', body: JSON.stringify(payload) }
+  )
+
+export const getCodexAuthStatus = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/codex-auth', userId)
+
+export const startCodexDeviceAuth = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/codex-auth/device/start', userId, {
+    method: 'POST',
+  })
+
+export const cancelCodexDeviceAuth = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/codex-auth/device/cancel', userId, {
+    method: 'POST',
+  })
+
+export const deleteCodexAuthOverride = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/codex-auth/override', userId, {
+    method: 'DELETE',
+  })
+
+export const getClaudeAuthStatus = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/claude-auth', userId)
+
+export const startClaudeDeviceAuth = (userId: string, payload?: { login_method?: ClaudeAuthLoginMethod | null }) =>
+  api<CodexAuthStatus>('/api/agents/claude-auth/device/start', userId, {
+    method: 'POST',
+    body: JSON.stringify(payload ?? {}),
+  })
+
+export const cancelClaudeDeviceAuth = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/claude-auth/device/cancel', userId, {
+    method: 'POST',
+  })
+
+export const submitClaudeDeviceAuthCode = (userId: string, payload: { code: string }) =>
+  api<CodexAuthStatus>('/api/agents/claude-auth/device/submit', userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const deleteClaudeAuthOverride = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/claude-auth/override', userId, {
+    method: 'DELETE',
+  })
+
 export const getNotifications = (userId: string) => api<Notification[]>('/api/notifications', userId)
 
 export const markNotificationRead = (userId: string, id: string) =>
   api<{ ok: true }>(`/api/notifications/${id}/read`, userId, { method: 'POST' })
+
+export const markNotificationUnread = (userId: string, id: string) =>
+  api<{ ok: true }>(`/api/notifications/${id}/unread`, userId, { method: 'POST' })
 
 export const markAllNotificationsRead = (userId: string) =>
   api<{ ok: true; updated: number }>('/api/notifications/read-all', userId, { method: 'POST' })
@@ -619,8 +1017,11 @@ export const createProject = (
     embedding_enabled?: boolean
     embedding_model?: string | null
     context_pack_evidence_top_k?: number | null
+    automation_max_parallel_tasks?: number
     chat_index_mode?: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'
     chat_attachment_ingestion_mode?: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
+    vector_index_distill_enabled?: boolean
+    event_storming_enabled?: boolean
     member_user_ids?: string[]
     external_refs?: ExternalRef[]
     attachment_refs?: AttachmentRef[]
@@ -689,8 +1090,11 @@ export const patchProject = (
       | 'embedding_enabled'
       | 'embedding_model'
       | 'context_pack_evidence_top_k'
+      | 'automation_max_parallel_tasks'
       | 'chat_index_mode'
       | 'chat_attachment_ingestion_mode'
+      | 'vector_index_distill_enabled'
+      | 'event_storming_enabled'
     >
   >
 ) => api<Project>(`/api/projects/${projectId}`, userId, { method: 'PATCH', body: JSON.stringify(payload) })
@@ -757,6 +1161,122 @@ export const getProjectGraphSubgraph = (
     userId
   )
 
+export const getProjectTaskDependencyGraph = (
+  userId: string,
+  projectId: string,
+  params?: {
+    limit_nodes?: number
+    limit_edges?: number
+  }
+) =>
+  api<ProjectTaskDependencyGraph>(
+    `/api/projects/${projectId}/task-dependency-graph${queryString({
+      limit_nodes: params?.limit_nodes ?? 240,
+      limit_edges: params?.limit_edges ?? 1600,
+    })}`,
+    userId
+  )
+
+export const getProjectTaskDependencyEventDetail = (
+  userId: string,
+  projectId: string,
+  params: {
+    source_task_id: string
+    target_task_id: string
+    source: string
+    at?: string | null
+    correlation_id?: string | null
+  }
+) =>
+  api<TaskDependencyGraphEventDetail>(
+    `/api/projects/${projectId}/task-dependency-graph/event-detail${queryString({
+      source_task_id: params.source_task_id,
+      target_task_id: params.target_task_id,
+      source: params.source,
+      at: params.at || undefined,
+      correlation_id: params.correlation_id || undefined,
+    })}`,
+    userId
+  )
+
+export const getProjectDockerComposeRuntime = (
+  userId: string,
+  projectId: string
+) =>
+  api<ProjectDockerComposeRuntimeSnapshot>(
+    `/api/projects/${projectId}/docker-compose/runtime`,
+    userId
+  )
+
+export const getProjectGitRepositorySummary = (
+  userId: string,
+  projectId: string
+) =>
+  api<ProjectGitRepositorySummary>(
+    `/api/projects/${projectId}/git-delivery/repository`,
+    userId
+  )
+
+export const getProjectGitRepositoryBranches = (
+  userId: string,
+  projectId: string
+) =>
+  api<ProjectGitRepositoryBranchesResponse>(
+    `/api/projects/${projectId}/git-delivery/repository/branches`,
+    userId
+  )
+
+export const getProjectGitRepositoryTree = (
+  userId: string,
+  projectId: string,
+  params?: { ref?: string; path?: string }
+) =>
+  api<ProjectGitRepositoryTreeResponse>(
+    `/api/projects/${projectId}/git-delivery/repository/tree${queryString({
+      ref: params?.ref,
+      path: params?.path,
+    })}`,
+    userId
+  )
+
+export const getProjectGitRepositoryFile = (
+  userId: string,
+  projectId: string,
+  params: { ref?: string; path: string }
+) =>
+  api<ProjectGitRepositoryFileResponse>(
+    `/api/projects/${projectId}/git-delivery/repository/file${queryString({
+      ref: params.ref,
+      path: params.path,
+    })}`,
+    userId
+  )
+
+export function getProjectDockerComposeRuntimeLogsStreamUrl(
+  projectId: string,
+  params: { container_name: string; tail?: number }
+): string {
+  return `/api/projects/${projectId}/docker-compose/runtime/logs/stream${queryString({
+    container_name: params.container_name,
+    tail: params.tail ?? 200,
+  })}`
+}
+
+export const postProjectGraphAiLayout = (
+  userId: string,
+  projectId: string,
+  payload: {
+    nodes: Array<{ entity_id: string; entity_type: string; title: string; degree: number }>
+    edges: Array<{ source_entity_id: string; target_entity_id: string; relationship: string }>
+    node_width?: number
+    node_height?: number
+  }
+) =>
+  api<GraphAiLayoutResult>(`/api/projects/${projectId}/knowledge-graph/layout`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
 export const searchProjectKnowledge = (
   userId: string,
   projectId: string,
@@ -776,6 +1296,137 @@ export const searchProjectKnowledge = (
     })}`,
     userId
   )
+
+export const getProjectEventStormingOverview = (userId: string, projectId: string) =>
+  api<EventStormingOverview>(`/api/projects/${projectId}/event-storming/overview`, userId)
+
+export const getProjectPolicyChecksVerification = (userId: string, projectId: string) =>
+  api<ProjectPolicyChecksVerifyResponse>(`/api/projects/${projectId}/checks/verify`, userId)
+
+export const getProjectPluginConfig = (
+  userId: string,
+  projectId: string,
+  pluginKey: 'team_mode' | 'git_delivery' | 'docker_compose'
+) => api<ProjectPluginConfig>(`/api/projects/${projectId}/plugins/${pluginKey}`, userId)
+
+export const validateProjectPluginConfig = (
+  userId: string,
+  projectId: string,
+  pluginKey: 'team_mode' | 'git_delivery' | 'docker_compose',
+  payload: {
+    draft_config: Record<string, unknown>
+  }
+) =>
+  api<ProjectPluginConfigValidation>(`/api/projects/${projectId}/plugins/${pluginKey}/validate`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const applyProjectPluginConfig = (
+  userId: string,
+  projectId: string,
+  pluginKey: 'team_mode' | 'git_delivery' | 'docker_compose',
+  payload: {
+    config: Record<string, unknown>
+    expected_version?: number
+    enabled?: boolean
+  }
+) =>
+  api<ProjectPluginConfig>(`/api/projects/${projectId}/plugins/${pluginKey}/apply`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const setProjectPluginEnabled = (
+  userId: string,
+  projectId: string,
+  pluginKey: 'team_mode' | 'git_delivery' | 'docker_compose',
+  payload: {
+    enabled: boolean
+  }
+) =>
+  api<ProjectPluginConfig>(`/api/projects/${projectId}/plugins/${pluginKey}/enabled`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const diffProjectPluginConfig = (
+  userId: string,
+  projectId: string,
+  pluginKey: 'team_mode' | 'git_delivery' | 'docker_compose',
+  payload: {
+    draft_config: Record<string, unknown>
+  }
+) =>
+  api<ProjectPluginConfigDiff>(`/api/projects/${projectId}/plugins/${pluginKey}/diff`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const getProjectCapabilities = (userId: string, projectId: string) =>
+  api<ProjectCapabilities>(`/api/projects/${projectId}/capabilities`, userId)
+
+export const getProjectEventStormingSubgraph = (
+  userId: string,
+  projectId: string,
+  params?: {
+    limit_nodes?: number
+    limit_edges?: number
+  }
+) =>
+  api<EventStormingSubgraph>(
+    `/api/projects/${projectId}/event-storming/subgraph${queryString({
+      limit_nodes: params?.limit_nodes ?? 120,
+      limit_edges: params?.limit_edges ?? 220,
+    })}`,
+    userId
+  )
+
+export const getProjectEventStormingEntityLinks = (
+  userId: string,
+  projectId: string,
+  params: {
+    entity_type: string
+    entity_id: string
+  }
+) =>
+  api<EventStormingEntityLinks>(
+    `/api/projects/${projectId}/event-storming/entity-links${queryString({
+      entity_type: params.entity_type,
+      entity_id: params.entity_id,
+    })}`,
+    userId
+  )
+
+export const getProjectEventStormingComponentLinks = (
+  userId: string,
+  projectId: string,
+  params: {
+    component_id: string
+  }
+) =>
+  api<EventStormingComponentLinks>(
+    `/api/projects/${projectId}/event-storming/component-links${queryString({
+      component_id: params.component_id,
+    })}`,
+    userId
+  )
+
+export const patchProjectEventStormingLinkReview = (
+  userId: string,
+  projectId: string,
+  payload: {
+    entity_type: string
+    entity_id: string
+    component_id: string
+    review_status: 'candidate' | 'approved' | 'rejected'
+    confidence?: number
+  }
+) =>
+  api<EventStormingLinkReviewResult>(`/api/projects/${projectId}/event-storming/review-link`, userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
 
 export const getProjectMembers = (userId: string, projectId: string) =>
   api<ProjectMembersPage>(`/api/projects/${projectId}/members`, userId)
@@ -995,7 +1646,9 @@ export const patchMyPreferences = (
     timezone?: string
     notifications_enabled?: boolean
     agent_chat_model?: string | null
-    agent_chat_reasoning_effort?: ChatReasoningEffort | string | null
+  agent_chat_reasoning_effort?: ChatReasoningEffort | string | null
+  onboarding_quick_tour_completed?: boolean
+  onboarding_advanced_tour_completed?: boolean
   }
 ) => api<{
   id: string
@@ -1004,7 +1657,13 @@ export const patchMyPreferences = (
   notifications_enabled: boolean
   agent_chat_model?: string
   agent_chat_reasoning_effort?: ChatReasoningEffort | string
-}>('/api/me/preferences', userId, { method: 'PATCH', body: JSON.stringify(payload) })
+  onboarding_quick_tour_completed?: boolean
+  onboarding_advanced_tour_completed?: boolean
+}>('/api/me/preferences', userId, {
+  method: 'PATCH',
+  body: JSON.stringify(payload),
+  keepalive: true,
+})
 
 export const getNotes = (
   userId: string,

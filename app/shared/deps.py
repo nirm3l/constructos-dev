@@ -86,10 +86,7 @@ def get_db():
         db.close()
 
 
-def get_current_user(
-    request: Request,
-    db: Session = Depends(get_db),
-) -> User:
+def _load_current_user_from_db(*, db: Session, request: Request) -> User:
     session_token = request.cookies.get(AUTH_SESSION_COOKIE_NAME)
     if not session_token:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -117,7 +114,22 @@ def get_current_user(
         }
         if path not in allowed_paths:
             raise HTTPException(status_code=403, detail="Password change required")
+    db.expunge(user)
     return user
+
+
+def get_current_user(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> User:
+    return _load_current_user_from_db(db=db, request=request)
+
+
+def get_current_user_detached(
+    request: Request,
+) -> User:
+    with SessionLocal() as db:
+        return _load_current_user_from_db(db=db, request=request)
 
 
 def get_command_id(

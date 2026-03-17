@@ -10,13 +10,14 @@ type ProjectsPanelProps = {
 
 export function ProjectsPanel({ state }: ProjectsPanelProps) {
   return (
-    <section className="card">
+    <section className="card" data-tour-id="projects-panel">
       <ProjectsHeader
         totalProjects={state.bootstrap.data.projects.length}
         showProjectCreateForm={state.showProjectCreateForm}
         showProjectEditForm={state.showProjectEditForm}
-        projectIsDirty={state.projectIsDirty}
+        projectIsDirty={Boolean(state.projectIsDirty || state.projectEditorHasUnsavedChanges)}
         confirmDiscardChanges={state.confirmDiscardChanges}
+        requestDiscardChanges={state.requestDiscardChanges}
         setShowProjectEditForm={state.setShowProjectEditForm}
         setShowProjectCreateForm={state.setShowProjectCreateForm}
       />
@@ -59,6 +60,8 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
           setProjectChatIndexMode={state.setProjectChatIndexMode}
           projectChatAttachmentIngestionMode={state.projectChatAttachmentIngestionMode}
           setProjectChatAttachmentIngestionMode={state.setProjectChatAttachmentIngestionMode}
+          projectEventStormingEnabled={state.projectEventStormingEnabled}
+          setProjectEventStormingEnabled={state.setProjectEventStormingEnabled}
           embeddingAllowedModels={state.embeddingAllowedModels}
           embeddingDefaultModel={state.embeddingDefaultModel}
           vectorStoreEnabled={state.vectorStoreEnabled}
@@ -67,6 +70,11 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
           setProjectTemplateParametersText={state.setProjectTemplateParametersText}
           workspaceUsers={state.workspaceUsers}
           createProjectMemberIds={state.createProjectMemberIds}
+          createProjectWorkspaceSkillIds={state.createProjectWorkspaceSkillIds}
+          setCreateProjectWorkspaceSkillIds={state.setCreateProjectWorkspaceSkillIds}
+          workspaceSkills={state.workspaceSkills.data?.items ?? []}
+          workspaceSkillsLoading={Boolean(state.workspaceSkills.isLoading || state.workspaceSkills.isFetching)}
+          toggleCreateProjectWorkspaceSkill={state.toggleCreateProjectWorkspaceSkill}
           toggleCreateProjectMember={state.toggleCreateProjectMember}
         />
       )}
@@ -106,6 +114,7 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             projectSkills={state.projectSkills}
             projectGraphOverview={state.projectGraphOverview}
             projectGraphContextPack={state.projectGraphContextPack}
+            projectEventStormingOverview={state.projectEventStormingOverview}
             workspaceSkills={state.workspaceSkills}
             selectedProjectRuleId={state.selectedProjectRuleId}
             setSelectedProjectRuleId={state.setSelectedProjectRuleId}
@@ -137,12 +146,18 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             setEditProjectEmbeddingEnabled={state.setEditProjectEmbeddingEnabled}
             editProjectEmbeddingModel={state.editProjectEmbeddingModel}
             setEditProjectEmbeddingModel={state.setEditProjectEmbeddingModel}
+            editProjectVectorIndexDistillEnabled={state.editProjectVectorIndexDistillEnabled}
+            setEditProjectVectorIndexDistillEnabled={state.setEditProjectVectorIndexDistillEnabled}
             editProjectContextPackEvidenceTopKText={state.editProjectContextPackEvidenceTopKText}
             setEditProjectContextPackEvidenceTopKText={state.setEditProjectContextPackEvidenceTopKText}
+            editProjectAutomationMaxParallelTasksText={state.editProjectAutomationMaxParallelTasksText}
+            setEditProjectAutomationMaxParallelTasksText={state.setEditProjectAutomationMaxParallelTasksText}
             editProjectChatIndexMode={state.editProjectChatIndexMode}
             setEditProjectChatIndexMode={state.setEditProjectChatIndexMode}
             editProjectChatAttachmentIngestionMode={state.editProjectChatAttachmentIngestionMode}
             setEditProjectChatAttachmentIngestionMode={state.setEditProjectChatAttachmentIngestionMode}
+            editProjectEventStormingEnabled={state.editProjectEventStormingEnabled}
+            setEditProjectEventStormingEnabled={state.setEditProjectEventStormingEnabled}
             embeddingAllowedModels={state.embeddingAllowedModels}
             embeddingDefaultModel={state.embeddingDefaultModel}
             vectorStoreEnabled={state.vectorStoreEnabled}
@@ -159,6 +174,7 @@ export function ProjectsPanel({ state }: ProjectsPanelProps) {
             toggleEditProjectMember={state.toggleEditProjectMember}
             selectedProjectCreator={state.selectedProjectCreator}
             selectedProjectTimeMeta={state.selectedProjectTimeMeta}
+            onUnsavedChange={state.setProjectEditorHasUnsavedChanges}
           />
         )}
       />

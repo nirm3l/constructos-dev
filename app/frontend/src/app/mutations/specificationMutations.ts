@@ -39,7 +39,7 @@ export function useSpecificationMutations(c: any) {
     mutationFn: (payload?: {
       title?: string
       body?: string
-      status?: 'Draft' | 'Ready' | 'In progress' | 'Implemented' | 'Archived'
+      status?: 'Draft' | 'Ready' | 'In Progress' | 'Implemented' | 'Archived'
       force_new?: boolean
     }) =>
       createSpecification(c.userId, {

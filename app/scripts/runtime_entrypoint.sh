@@ -125,7 +125,7 @@ resolve_writable_workspace_dir() {
 
 main() {
   local app_dir="${APP_RUNTIME_APP_DIR:-/app}"
-  local requested_workspace_dir="${AGENT_CODEX_WORKDIR:-/home/app/workspace}"
+  local requested_workspace_dir="${AGENT_WORKDIR:-${AGENT_CODEX_WORKDIR:-/home/app/workspace}}"
   local app_workspace_dir
   local encrypted_enabled="${APP_ENCRYPTED_BUNDLE_ENABLED:-false}"
   local encrypted_bundle_path="${APP_ENCRYPTED_BUNDLE_PATH:-/opt/constructos/app.tar.gz.enc}"
@@ -138,6 +138,7 @@ main() {
   fi
 
   app_workspace_dir="$(resolve_writable_workspace_dir "${requested_workspace_dir}")"
+  export AGENT_WORKDIR="${app_workspace_dir}"
   export AGENT_CODEX_WORKDIR="${app_workspace_dir}"
 
   if ! is_truthy "${encrypted_enabled}"; then

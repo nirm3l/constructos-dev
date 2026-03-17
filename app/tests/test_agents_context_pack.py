@@ -3,10 +3,21 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
 import time
 import uuid
+from contextlib import contextmanager
 from importlib import reload
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from shared.models import ProjectMember, SessionLocal, Task, User as UserModel, WorkspaceAgentRuntime
+
+_MIN_EXECUTION_OUTCOME_CONTRACT_JSON = (
+    '"execution_outcome_contract":{"contract_version":1,"files_changed":[],"commit_sha":null,'
+    '"branch":null,"tests_run":false,"tests_passed":false,"artifacts":[]}'
+)
 
 
 def build_client(tmp_path: Path):
@@ -51,13 +62,16 @@ def test_execute_task_automation_includes_project_description_in_context(tmp_pat
 
     monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
     monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
-    monkeypatch.setattr(executor_module, "build_graph_context_markdown", lambda **_: "## Graph\nTask -> Specification")
 
     captured: dict = {}
 
     class DummyProcess:
         returncode = 0
-        stdout = '{"action":"comment","summary":"ok","comment":null}'
+        stdout = (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + "}"
+        )
         stderr = ""
 
     def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
@@ -87,7 +101,9 @@ def test_execute_task_automation_includes_project_description_in_context(tmp_pat
     assert captured["project_rules"][0]["title"] == "Definition of done"
     assert captured["project_rules"][0]["body"] == "Always add or update tests."
     assert captured["actor_user_id"] == bootstrap["current_user"]["id"]
-    assert captured["graph_context_markdown"] == "## Graph\nTask -> Specification"
+    assert captured["actor_project_role"] == "Owner"
+    assert isinstance(captured["graph_context_markdown"], str)
+    assert captured["graph_context_markdown"]
 
 
 def test_execute_task_automation_includes_project_skills_in_context(tmp_path, monkeypatch):
@@ -129,13 +145,16 @@ def test_execute_task_automation_includes_project_skills_in_context(tmp_path, mo
 
     monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
     monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
-    monkeypatch.setattr(executor_module, "build_graph_context_markdown", lambda **_: "## Graph\nTask -> Specification")
 
     captured: dict = {}
 
     class DummyProcess:
         returncode = 0
-        stdout = '{"action":"comment","summary":"ok","comment":null}'
+        stdout = (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + "}"
+        )
         stderr = ""
 
     def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
@@ -174,13 +193,16 @@ def test_execute_task_automation_includes_chat_and_codex_session_ids(tmp_path, m
 
     monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
     monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
-    monkeypatch.setattr(executor_module, "build_graph_context_markdown", lambda **_: "## Graph\nTask -> Specification")
 
     captured: dict = {}
 
     class DummyProcess:
         returncode = 0
-        stdout = '{"action":"comment","summary":"ok","comment":null}'
+        stdout = (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + "}"
+        )
         stderr = ""
 
     def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
@@ -210,6 +232,258 @@ def test_execute_task_automation_includes_chat_and_codex_session_ids(tmp_path, m
     assert captured["codex_session_id"] == "thread-001"
 
 
+def test_execute_task_automation_includes_team_mode_actor_role_in_context(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+    actor_user_id = str(uuid.uuid4())
+
+    with SessionLocal() as db:
+        db.add(
+            UserModel(
+                id=actor_user_id,
+                username="agent.qa.ctx",
+                full_name="Quality Assurance Agent Context",
+                user_type="agent",
+                password_hash=None,
+                must_change_password=False,
+                password_changed_at=None,
+                is_active=True,
+                theme="dark",
+                timezone="UTC",
+                notifications_enabled=True,
+                agent_chat_model="",
+                agent_chat_reasoning_effort="medium",
+            )
+        )
+        db.add(
+            ProjectMember(
+                workspace_id=ws_id,
+                project_id=project_id,
+                user_id=actor_user_id,
+                role="QAAgent",
+            )
+        )
+        db.commit()
+
+    from features.agents import executor as executor_module
+
+    monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
+    monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
+
+    captured: dict = {}
+
+    class DummyProcess:
+        returncode = 0
+        stdout = (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + "}"
+        )
+        stderr = ""
+
+    def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
+        _ = (command, text, capture_output, timeout, check, cwd)
+        captured.update(json.loads(input))
+        return DummyProcess()
+
+    monkeypatch.setattr(executor_module.subprocess, "run", fake_run)
+
+    outcome = executor_module.execute_task_automation(
+        task_id="task-ctx-role",
+        title="Role context check",
+        description="ctx",
+        status="To do",
+        instruction="Summarize role-specific policy",
+        workspace_id=ws_id,
+        project_id=project_id,
+        actor_user_id=actor_user_id,
+        allow_mutations=True,
+    )
+    assert outcome.summary == "ok"
+    assert captured["actor_user_id"] == actor_user_id
+    assert captured["actor_project_role"] == "QA"
+
+
+def test_execute_task_automation_sets_task_worktree_context_for_team_mode_developer(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project = client.post(
+        "/api/projects",
+        json={"workspace_id": ws_id, "name": "Team Mode Worktree Context"},
+    ).json()
+    actor_user_id = str(uuid.uuid4())
+
+    from shared.models import ProjectSkill
+
+    with SessionLocal() as db:
+        db.add(
+            UserModel(
+                id=actor_user_id,
+                username="agent.dev.ctx",
+                full_name="Developer Agent Context",
+                user_type="agent",
+                password_hash=None,
+                must_change_password=False,
+                password_changed_at=None,
+                is_active=True,
+                theme="dark",
+                timezone="UTC",
+                notifications_enabled=True,
+                agent_chat_model="",
+                agent_chat_reasoning_effort="medium",
+            )
+        )
+        db.add(
+            ProjectMember(
+                workspace_id=ws_id,
+                project_id=project["id"],
+                user_id=actor_user_id,
+                role="DeveloperAgent",
+            )
+        )
+        db.commit()
+
+    enable_team_mode = client.post(
+        f"/api/projects/{project['id']}/plugins/team_mode/enabled",
+        json={"enabled": True},
+    )
+    assert enable_team_mode.status_code == 200
+
+    from features.agents import executor as executor_module
+
+    monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
+    monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
+    monkeypatch.setattr(
+        executor_module,
+        "_ensure_task_worktree",
+        lambda **_kwargs: (
+            Path("/home/app/workspace/team-mode-worktree/.constructos/worktrees/task1234"),
+            "task/task1234-feature",
+            Path("/home/app/workspace/team-mode-worktree"),
+        ),
+    )
+
+    captured: dict = {}
+
+    class DummyProcess:
+        returncode = 0
+        stdout = (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + "}"
+        )
+        stderr = ""
+
+    def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
+        _ = (command, text, capture_output, timeout, check, cwd)
+        captured.update(json.loads(input))
+        return DummyProcess()
+
+    monkeypatch.setattr(executor_module.subprocess, "run", fake_run)
+
+    outcome = executor_module.execute_task_automation(
+        task_id="task-1234-worktree",
+        title="Implement feature",
+        description="ctx",
+        status="In Progress",
+        instruction="Implement in isolated worktree",
+        workspace_id=ws_id,
+        project_id=project["id"],
+        actor_user_id=actor_user_id,
+        allow_mutations=True,
+    )
+    assert outcome.summary == "ok"
+    assert captured["actor_project_role"] == "Developer"
+    assert captured["team_mode_enabled"] is True
+    assert captured["task_workdir"] == "/home/app/workspace/team-mode-worktree/.constructos/worktrees/task1234"
+    assert captured["task_branch"] == "task/task1234-feature"
+    assert captured["repo_root"] == "/home/app/workspace/team-mode-worktree"
+
+
+def test_execute_task_automation_uses_assigned_bot_runtime_before_workspace_selection(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    ws_id = bootstrap["workspaces"][0]["id"]
+    project_id = bootstrap["projects"][0]["id"]
+
+    from shared.settings import AGENT_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID
+
+    task_id = str(uuid.uuid4())
+    with SessionLocal() as db:
+        db.add(
+            WorkspaceAgentRuntime(
+                workspace_id=ws_id,
+                user_id=AGENT_SYSTEM_USER_ID,
+                model="codex:gpt-5-codex",
+                reasoning_effort="high",
+                is_background_default=False,
+            )
+        )
+        db.add(
+            WorkspaceAgentRuntime(
+                workspace_id=ws_id,
+                user_id=CLAUDE_SYSTEM_USER_ID,
+                model="claude:sonnet",
+                reasoning_effort="",
+                is_background_default=True,
+            )
+        )
+        db.add(
+            Task(
+                id=task_id,
+                workspace_id=ws_id,
+                project_id=project_id,
+                title="Assigned bot runtime",
+                description="ctx",
+                status="To do",
+                assignee_id=AGENT_SYSTEM_USER_ID,
+            )
+        )
+        db.commit()
+
+    from features.agents import executor as executor_module
+
+    monkeypatch.setattr(executor_module, "AGENT_EXECUTOR_MODE", "command")
+    monkeypatch.setattr(executor_module, "AGENT_CODEX_COMMAND", "dummy-exec")
+
+    captured: dict = {}
+
+    class DummyProcess:
+        returncode = 0
+        stdout = (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + "}"
+        )
+        stderr = ""
+
+    def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
+        _ = (command, text, capture_output, timeout, check, cwd)
+        captured.update(json.loads(input))
+        return DummyProcess()
+
+    monkeypatch.setattr(executor_module.subprocess, "run", fake_run)
+
+    outcome = executor_module.execute_task_automation(
+        task_id=task_id,
+        title="Assigned bot runtime",
+        description="ctx",
+        status="To do",
+        instruction="Use the assigned bot runtime.",
+        workspace_id=ws_id,
+        project_id=project_id,
+        actor_user_id=bootstrap["current_user"]["id"],
+        allow_mutations=True,
+    )
+
+    assert outcome.summary == "ok"
+    assert captured["model"] == "codex:gpt-5-codex"
+    assert captured["reasoning_effort"] == "high"
+
+
 def test_codex_prompt_includes_soul_md_section():
     from features.agents.codex_mcp_adapter import _build_prompt
 
@@ -223,6 +497,7 @@ def test_codex_prompt_includes_soul_md_section():
             "workspace_id": "ws-1",
             "project_id": "pr-1",
             "actor_user_id": "user-1",
+            "actor_project_role": "DeveloperAgent",
             "project_name": "Alpha",
             "project_description": "## Soul\nUse strict acceptance criteria.",
             "project_rules": [{"title": "Quality", "body": "Do not skip tests."}],
@@ -236,9 +511,41 @@ def test_codex_prompt_includes_soul_md_section():
     assert "File: ProjectRules.md (source: project_rules)" in prompt
     assert "Quality: Do not skip tests." in prompt
     assert "Current User ID: user-1" in prompt
+    assert "Current User Project Role: DeveloperAgent" in prompt
     assert "File: GraphContext.md (source: knowledge_graph)" in prompt
     assert "Task A IMPLEMENTS Spec B" in prompt
     assert "Read each MCP tool description and follow its payload contract and operational guidance." in prompt
+
+
+def test_codex_prompt_includes_task_workspace_context():
+    from features.agents.codex_mcp_adapter import _build_prompt
+
+    prompt = _build_prompt(
+        {
+            "task_id": "task-1",
+            "title": "Implement feature",
+            "description": "worktree-aware run",
+            "status": "In Progress",
+            "instruction": "Start implementation",
+            "workspace_id": "ws-1",
+            "project_id": "pr-1",
+            "actor_user_id": "user-1",
+            "actor_project_role": "DeveloperAgent",
+            "project_name": "Alpha",
+            "project_description": "",
+            "project_rules": [],
+            "project_skills": [{"skill_key": "team_mode"}],
+            "task_workdir": "/home/app/workspace/alpha/.constructos/worktrees/task-1",
+            "task_branch": "task/task-1-implement-feature",
+            "repo_root": "/home/app/workspace/alpha",
+            "graph_context_markdown": "",
+        }
+    )
+
+    assert "Task Branch: task/task-1-implement-feature" in prompt
+    assert "Task Workdir: /home/app/workspace/alpha/.constructos/worktrees/task-1" in prompt
+    assert "execute implementation from that workdir and commit only on that branch" in prompt
+    assert "Treat `Task Workdir` as the only valid editing root for task automation." in prompt
 
 
 def test_codex_resume_prompt_is_compact_and_turn_focused():
@@ -253,6 +560,7 @@ def test_codex_resume_prompt_is_compact_and_turn_focused():
         "workspace_id": "ws-1",
         "project_id": "pr-1",
         "actor_user_id": "user-1",
+        "actor_project_role": "TeamLeadAgent",
         "project_name": "Alpha",
         "project_description": "## Soul\nUse strict acceptance criteria.",
         "project_rules": [{"title": "Quality", "body": "Do not skip tests."}],
@@ -266,7 +574,9 @@ def test_codex_resume_prompt_is_compact_and_turn_focused():
     assert "Context Pack:" not in resume_prompt
     assert "File: Soul.md" not in resume_prompt
     assert "Instruction: Plan this feature" in resume_prompt
+    assert "Current User Project Role: TeamLeadAgent" in resume_prompt
     assert "Fresh Cross-Session Memory Snapshot" in resume_prompt
+    assert "If Team Mode is requested, prefer this setup flow" in resume_prompt
     assert "Read each MCP tool description and follow its payload contract and operational guidance." in resume_prompt
     assert len(resume_prompt) < len(full_prompt)
 
@@ -293,7 +603,7 @@ def test_codex_resume_prompt_includes_compact_fresh_evidence_snapshot():
                         "entity_type": "ChatMessage",
                         "source_type": "chat_message.content",
                         "final_score": 0.992,
-                        "snippet": "Tajni broj je 44",
+                        "snippet": "The secret number is 44",
                     }
                 ]
             ),
@@ -303,8 +613,63 @@ def test_codex_resume_prompt_includes_compact_fresh_evidence_snapshot():
     assert "Fresh Cross-Session Memory Snapshot" in prompt
     assert "Fresh Summary:" in prompt
     assert "Fresh Evidence:" in prompt
-    assert "Tajni broj je 44" in prompt
+    assert "The secret number is 44" in prompt
     assert "score=0.992" in prompt
+
+
+def test_prompt_segment_char_stats_uses_instruction_breakdown():
+    from features.agents.codex_mcp_adapter import _prompt_segment_char_stats
+
+    stats = _prompt_segment_char_stats(
+        {
+            "instruction": "short",
+            "prompt_instruction_segments": {
+                "user_instruction": 120,
+                "attachment_context": 450,
+                "cross_session_updates": 210,
+            },
+            "trigger_task_id": "",
+            "trigger_from_status": "",
+            "trigger_to_status": "",
+            "trigger_timestamp": "",
+            "plugin_policy_json": "{}",
+            "plugin_required_checks": "",
+            "graph_summary_markdown": "",
+            "graph_evidence_json": "[]",
+        },
+        mode="resume",
+    )
+
+    assert stats["instruction"] == 780
+    assert stats["instruction_user_instruction"] == 120
+    assert stats["instruction_attachment_context"] == 450
+    assert stats["instruction_cross_session_updates"] == 210
+    assert "fresh_memory_snapshot" in stats
+
+
+def test_codex_resume_prompt_includes_task_workspace_context():
+    from features.agents.codex_mcp_adapter import _build_resume_prompt
+
+    prompt = _build_resume_prompt(
+        {
+            "task_id": "task-1",
+            "title": "Implement feature",
+            "description": "worktree-aware run",
+            "status": "In Progress",
+            "instruction": "Resume implementation",
+            "workspace_id": "ws-1",
+            "project_id": "pr-1",
+            "actor_user_id": "user-1",
+            "project_name": "Alpha",
+            "task_workdir": "/home/app/workspace/alpha/.constructos/worktrees/task-1",
+            "task_branch": "task/task-1-implement-feature",
+            "repo_root": "/home/app/workspace/alpha",
+        }
+    )
+
+    assert "Task Branch: task/task-1-implement-feature" in prompt
+    assert "Task Workdir: /home/app/workspace/alpha/.constructos/worktrees/task-1" in prompt
+    assert "Treat `Task Workdir` as the only valid editing root for task automation." in prompt
 
 
 def test_codex_prompt_includes_project_skills_section():
@@ -363,6 +728,15 @@ def test_codex_prompt_includes_interactive_project_creation_guidance():
     )
 
     assert "Read each MCP tool description and follow its payload contract and operational guidance." in prompt
+    assert "prefer `setup_project_orchestration(...)` once required inputs are complete" in prompt
+    assert "call `setup_project_orchestration(...)` as early as possible" in prompt
+    assert "returns HTTP 422 with `missing_inputs`" in prompt
+    assert "ask only the `next_question`" in prompt
+    assert "present a user-friendly completion summary" in prompt
+    assert "To do, In Progress, In Review, Awaiting decision, Blocked, Completed" in prompt
+    assert "at least one recurring scheduled Team Lead oversight task" in prompt
+    assert "If Team Mode is requested, prefer this setup flow" in prompt
+    assert "If the user requests an exact task count, keep that exact count" in prompt
 
 
 def test_mcp_tool_descriptions_include_operation_specific_guidance():
@@ -384,6 +758,11 @@ def test_mcp_tool_descriptions_include_operation_specific_guidance():
     assert "chat default profile" in mcp_server.PREVIEW_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION.lower()
     assert "chat default profile" in mcp_server.CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION.lower()
     assert "preview_project_from_template" in mcp_server.CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION
+    assert "in-app notification" in mcp_server.SEND_IN_APP_NOTIFICATION_TOOL_DESCRIPTION.lower()
+    assert "staged project setup in one call" in mcp_server.SETUP_PROJECT_ORCHESTRATION_TOOL_DESCRIPTION
+    assert "missing_inputs" in mcp_server.SETUP_PROJECT_ORCHESTRATION_TOOL_DESCRIPTION
+    assert "deprecated" in mcp_server.ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION.lower()
+    assert "backward compatibility" in mcp_server.ENSURE_TEAM_MODE_PROJECT_TOOL_DESCRIPTION.lower()
     source = inspect.getsource(mcp_server)
     assert "embedding_enabled: bool = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED" in source
     assert "chat_index_mode: str = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE" in source
@@ -391,6 +770,248 @@ def test_mcp_tool_descriptions_include_operation_specific_guidance():
     assert "embedding_enabled: bool | None = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED" in source
     assert "chat_index_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE" in source
     assert "chat_attachment_ingestion_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE" in source
+    assert "def send_in_app_notification(" in source
+
+
+def test_create_mcp_registers_and_executes_setup_project_orchestration_tool(monkeypatch):
+    from features.agents import mcp_server
+
+    class FakeFastMCP:
+        def __init__(self, name: str):
+            self.name = name
+            self._tools: dict[str, dict[str, object]] = {}
+
+        def tool(self, description: str = ""):
+            def _decorator(fn):
+                self._tools[fn.__name__] = {"fn": fn, "description": description}
+                return fn
+
+            return _decorator
+
+    captured: dict[str, object] = {}
+
+    class FakeGateway:
+        def setup_project_orchestration(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "contract_version": 1,
+                "ok": True,
+                "project": {"id": "project-e2e", "link": "?tab=projects&project=project-e2e"},
+            }
+
+    monkeypatch.setitem(sys.modules, "fastmcp", SimpleNamespace(FastMCP=FakeFastMCP))
+    monkeypatch.setattr(mcp_server, "build_mcp_gateway", lambda: FakeGateway())
+    monkeypatch.setattr(mcp_server, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(mcp_server, "AGENT_ENABLED_PLUGINS", ["team_mode", "git_delivery", "docker_compose"])
+
+    mcp = mcp_server.create_mcp()
+    setup_tool = mcp._tools.get("setup_project_orchestration")
+    assert setup_tool is not None
+    fn = setup_tool["fn"]
+    payload = fn(
+        name="MCP E2E",
+        short_description="End-to-end registration test.",
+        workspace_id="ws-1",
+        enable_team_mode=True,
+        enable_docker_compose=True,
+        docker_port=6768,
+        seed_team_tasks=True,
+        command_id="e2e-setup-001",
+    )
+
+    assert payload["ok"] is True
+    assert payload["project"]["id"] == "project-e2e"
+    assert captured["name"] == "MCP E2E"
+    assert captured["enable_team_mode"] is True
+    assert captured["enable_docker_compose"] is True
+    assert captured["docker_port"] == 6768
+
+
+def test_create_mcp_setup_project_orchestration_tool_runs_real_service_flow(tmp_path, monkeypatch):
+    from features.agents import mcp_server
+    from features.agents.service import AgentTaskService
+
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    actor_user_id = bootstrap["current_user"]["id"]
+
+    class FakeFastMCP:
+        def __init__(self, name: str):
+            self.name = name
+            self._tools: dict[str, dict[str, object]] = {}
+
+        def tool(self, description: str = ""):
+            def _decorator(fn):
+                self._tools[fn.__name__] = {"fn": fn, "description": description}
+                return fn
+
+            return _decorator
+
+    monkeypatch.setitem(sys.modules, "fastmcp", SimpleNamespace(FastMCP=FakeFastMCP))
+    monkeypatch.setattr(
+        mcp_server,
+        "build_mcp_gateway",
+        lambda: AgentTaskService(
+            require_token=False,
+            actor_user_id=actor_user_id,
+            allowed_workspace_ids={workspace_id},
+            allowed_project_ids=set(),
+            default_workspace_id=workspace_id,
+        ),
+    )
+    monkeypatch.setattr(mcp_server, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(mcp_server, "AGENT_ENABLED_PLUGINS", ["team_mode", "git_delivery", "docker_compose"])
+
+    mcp = mcp_server.create_mcp()
+    setup_tool = mcp._tools.get("setup_project_orchestration")
+    assert setup_tool is not None
+    fn = setup_tool["fn"]
+    payload = fn(
+        name="MCP Integration Project",
+        short_description="Setup via MCP tool layer.",
+        workspace_id=workspace_id,
+        enable_team_mode=True,
+        enable_git_delivery=True,
+        enable_docker_compose=True,
+        docker_port=6768,
+        seed_team_tasks=False,
+        kickoff_after_setup=False,
+        command_id="mcp-e2e-setup-001",
+    )
+
+    assert payload["contract_version"] == 1
+    assert payload["execution_state"] in {"setup_complete", "setup_failed"}
+    assert payload["project"]["id"]
+    assert payload["effective"]["team_mode_enabled"] is True
+    assert payload["effective"]["git_delivery_enabled"] is True
+    assert payload["effective"]["docker_compose_enabled"] is True
+    assert isinstance(payload["steps"], list)
+    assert payload["steps"]
+
+
+def test_create_mcp_setup_project_orchestration_tool_supports_kickoff_after_setup(tmp_path, monkeypatch):
+    from features.agents import mcp_server
+    from features.agents.service import AgentTaskService
+
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    actor_user_id = bootstrap["current_user"]["id"]
+
+    class FakeFastMCP:
+        def __init__(self, name: str):
+            self.name = name
+            self._tools: dict[str, dict[str, object]] = {}
+
+        def tool(self, description: str = ""):
+            def _decorator(fn):
+                self._tools[fn.__name__] = {"fn": fn, "description": description}
+                return fn
+
+            return _decorator
+
+    monkeypatch.setitem(sys.modules, "fastmcp", SimpleNamespace(FastMCP=FakeFastMCP))
+    monkeypatch.setattr(
+        mcp_server,
+        "build_mcp_gateway",
+        lambda: AgentTaskService(
+            require_token=False,
+            actor_user_id=actor_user_id,
+            allowed_workspace_ids={workspace_id},
+            allowed_project_ids=set(),
+            default_workspace_id=workspace_id,
+        ),
+    )
+    monkeypatch.setattr(mcp_server, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(mcp_server, "AGENT_ENABLED_PLUGINS", ["team_mode", "git_delivery", "docker_compose"])
+
+    mcp = mcp_server.create_mcp()
+    setup_tool = mcp._tools.get("setup_project_orchestration")
+    assert setup_tool is not None
+    fn = setup_tool["fn"]
+    payload = fn(
+        name="MCP Integration Project Kickoff",
+        short_description="Setup via MCP tool layer with kickoff.",
+        workspace_id=workspace_id,
+        enable_team_mode=True,
+        enable_git_delivery=True,
+        enable_docker_compose=True,
+        docker_port=6768,
+        seed_team_tasks=True,
+        kickoff_after_setup=True,
+        command_id="mcp-e2e-setup-kickoff-001",
+    )
+
+    assert payload["contract_version"] == 1
+    assert payload["project"]["id"]
+    assert payload["effective"]["team_mode_enabled"] is True
+    assert payload["effective"]["git_delivery_enabled"] is True
+    assert payload["effective"]["docker_compose_enabled"] is True
+    requested = payload.get("requested")
+    assert isinstance(requested, dict)
+    assert requested.get("kickoff_after_setup") is True
+    kickoff = payload.get("kickoff")
+    if isinstance(kickoff, dict):
+        assert isinstance(kickoff.get("ok"), bool)
+        assert isinstance(kickoff.get("summary"), str)
+        assert "kickoff" in str(kickoff.get("summary") or "").lower()
+
+
+def test_create_mcp_setup_project_orchestration_tool_returns_missing_inputs_contract(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+    from features.agents import mcp_server
+    from features.agents.service import AgentTaskService
+
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    actor_user_id = bootstrap["current_user"]["id"]
+
+    class FakeFastMCP:
+        def __init__(self, name: str):
+            self.name = name
+            self._tools: dict[str, dict[str, object]] = {}
+
+        def tool(self, description: str = ""):
+            def _decorator(fn):
+                self._tools[fn.__name__] = {"fn": fn, "description": description}
+                return fn
+
+            return _decorator
+
+    monkeypatch.setitem(sys.modules, "fastmcp", SimpleNamespace(FastMCP=FakeFastMCP))
+    monkeypatch.setattr(
+        mcp_server,
+        "build_mcp_gateway",
+        lambda: AgentTaskService(
+            require_token=False,
+            actor_user_id=actor_user_id,
+            allowed_workspace_ids={workspace_id},
+            allowed_project_ids=set(),
+            default_workspace_id=workspace_id,
+        ),
+    )
+    monkeypatch.setattr(mcp_server, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(mcp_server, "AGENT_ENABLED_PLUGINS", ["team_mode", "git_delivery", "docker_compose"])
+
+    mcp = mcp_server.create_mcp()
+    setup_tool = mcp._tools.get("setup_project_orchestration")
+    assert setup_tool is not None
+    fn = setup_tool["fn"]
+    with pytest.raises(HTTPException) as exc:
+        fn(
+            workspace_id=workspace_id,
+            name="",
+            short_description="",
+            command_id="mcp-missing-inputs-001",
+        )
+    assert exc.value.status_code == 422
+    detail = exc.value.detail
+    assert isinstance(detail, dict)
+    assert detail.get("code") == "missing_setup_inputs"
+    assert isinstance(detail.get("missing_inputs"), list)
+    assert str(detail.get("next_question") or "").strip() != ""
 
 
 def test_codex_usage_extraction_from_json_stream():
@@ -413,7 +1034,11 @@ def test_executor_parses_usage_payload():
     from features.agents.executor import _parse_command_outcome
 
     outcome = _parse_command_outcome(
-        '{"action":"comment","summary":"ok","comment":null,"usage":{"input_tokens":25,"cached_input_tokens":9,"output_tokens":7,"context_limit_tokens":4096}}'
+        (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + ',"usage":{"input_tokens":25,"cached_input_tokens":9,"output_tokens":7,"context_limit_tokens":4096}}'
+        )
     )
     assert outcome.summary == "ok"
     assert outcome.usage is not None
@@ -427,7 +1052,11 @@ def test_executor_parses_codex_session_id():
     from features.agents.executor import _parse_command_outcome
 
     outcome = _parse_command_outcome(
-        '{"action":"comment","summary":"ok","comment":null,"codex_session_id":"thread-abc-123"}'
+        (
+            '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + ',"codex_session_id":"thread-abc-123"}'
+        )
     )
     assert outcome.summary == "ok"
     assert outcome.codex_session_id == "thread-abc-123"
@@ -439,6 +1068,8 @@ def test_executor_parses_resume_flags():
     outcome = _parse_command_outcome(
         (
             '{"action":"comment","summary":"ok","comment":null,'
+            + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+            + ","
             '"resume_attempted":true,"resume_succeeded":false,"resume_fallback_used":true}'
         )
     )
@@ -488,11 +1119,26 @@ def test_extract_delta_text_supports_nested_delta_payload():
     assert _extract_delta_text(params) == "Partial response"
 
 
+def test_extract_delta_text_preserves_leading_space_for_claude_text_delta():
+    from features.agents.codex_mcp_adapter import _extract_delta_text
+
+    params = {
+        "delta": {
+            "type": "text_delta",
+            "text": " on various",
+        }
+    }
+    assert _extract_delta_text(params) == " on various"
+
+
 def test_message_delta_method_recognizes_assistant_event_names():
     from features.agents.codex_mcp_adapter import _is_message_delta_method
 
     assert _is_message_delta_method("item/assistantMessage/delta")
     assert _is_message_delta_method("item/agentMessage/delta")
+    assert _is_message_delta_method("item/assistant-message/delta")
+    assert _is_message_delta_method("item.assistantMessage.delta")
+    assert _is_message_delta_method("item.delta")
     assert not _is_message_delta_method("item/userMessage/delta")
     assert not _is_message_delta_method("item/systemMessage/delta")
     assert not _is_message_delta_method("item/toolCall/delta")
@@ -503,6 +1149,7 @@ def test_assistant_message_item_type_filter():
 
     assert _is_assistant_message_item_type("assistant_message")
     assert _is_assistant_message_item_type("agent_message")
+    assert _is_assistant_message_item_type("message")
     assert _is_assistant_message_item_type("assistant-message")
     assert not _is_assistant_message_item_type("user_message")
     assert not _is_assistant_message_item_type("system_message")
@@ -582,10 +1229,20 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
     captured: dict[str, object] = {}
 
     @contextmanager
-    def _fake_home_env(*, mcp_config_text: str, workspace_id: str | None = None, chat_session_id: str | None = None):
+    def _fake_home_env(
+        *,
+        provider: str,
+        mcp_config_text: str,
+        runtime_config_text: str = "",
+        workspace_id: str | None = None,
+        chat_session_id: str | None = None,
+        actor_user_id: str | None = None,
+    ):
+        captured["home_env_provider"] = provider
         captured["home_env_workspace_id"] = workspace_id
         captured["home_env_chat_session_id"] = chat_session_id
-        _ = mcp_config_text
+        captured["home_env_runtime_config_text"] = runtime_config_text
+        _ = (mcp_config_text, actor_user_id)
         yield {"HOME": "/tmp/fake-codex-home"}
 
     @contextmanager
@@ -604,16 +1261,22 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
 
     def _fake_run_codex_app_server_with_optional_stream(
         *,
+        provider: str,
         start_prompt: str,
         resume_prompt: str | None,
         timeout_seconds: float,
         stream_events: bool,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        model_provider: str | None = None,
+        local_provider: str | None = None,
         output_schema: dict | None = None,
         preferred_thread_id: str | None = None,
+        mcp_config_payload: dict | None = None,
+        run_cwd: str | None = None,
         env: dict[str, str] | None = None,
     ) -> tuple[str, dict[str, int] | None, str | None, bool, bool]:
+        captured["run_provider"] = provider
         captured["stream_events"] = stream_events
         captured["preferred_thread_id"] = preferred_thread_id
         captured["timeout_seconds"] = timeout_seconds
@@ -622,9 +1285,13 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
         captured["start_prompt_contains_context_pack"] = "Context Pack:" in start_prompt
         captured["resume_prompt_contains_context_pack"] = "Context Pack:" in str(resume_prompt or "")
         captured["resume_prompt_text"] = str(resume_prompt or "")
-        _ = (model, reasoning_effort)
+        _ = (model, reasoning_effort, model_provider, local_provider, mcp_config_payload, run_cwd)
         return (
-            '{"action":"comment","summary":"ok","comment":null}',
+            (
+                '{"action":"comment","summary":"ok","comment":null,'
+                + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+                + "}"
+            ),
             {"input_tokens": 12, "output_tokens": 3},
             "thread-new-2",
             True,
@@ -672,3 +1339,203 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
     assert captured["env_home"] == "/tmp/fake-codex-home"
     assert captured["lock_workspace_id"] == "ws-main"
     assert captured["lock_chat_session_id"] == "chat-42"
+
+
+def test_strip_mcp_server_tables_preserves_non_mcp_config():
+    from features.agents.codex_mcp_adapter import _strip_mcp_server_tables
+
+    input_config = """
+model_provider = "openai"
+model = "gpt-5.3-codex-spark"
+
+[mcp_servers.task-management-tools]
+url = "http://mcp-tools:8091/mcp"
+
+[mcp_servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+bearer_token_env_var = "GITHUB_PAT"
+
+[profiles.default]
+approval_policy = "never"
+""".strip()
+    stripped = _strip_mcp_server_tables(input_config)
+    assert 'model_provider = "openai"' in stripped
+    assert 'model = "gpt-5.3-codex-spark"' in stripped
+    assert "[profiles.default]" in stripped
+    assert "[mcp_servers.task-management-tools]" not in stripped
+    assert "[mcp_servers.github]" not in stripped
+
+
+def test_prepare_codex_home_merges_base_config_with_selected_mcp_servers(monkeypatch, tmp_path):
+    from features.agents.codex_mcp_adapter import _prepare_codex_home
+
+    source_home = tmp_path / "source-home"
+    source_codex_dir = source_home / ".codex"
+    source_codex_dir.mkdir(parents=True, exist_ok=True)
+    (source_codex_dir / "config.toml").write_text(
+        """
+model_provider = "openai"
+model = "gpt-5.3-codex-spark"
+
+[mcp_servers.old]
+url = "http://old.example/mcp"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(source_home))
+
+    target_home = tmp_path / "target-home"
+    selected_mcp_text = """
+[mcp_servers.task-management-tools]
+url = "http://mcp-tools:8091/mcp"
+""".strip()
+    _prepare_codex_home(target_home, provider="codex", mcp_config_text=selected_mcp_text)
+    output = (target_home / ".codex" / "config.toml").read_text(encoding="utf-8")
+
+    assert 'model_provider = "openai"' in output
+    assert 'model = "gpt-5.3-codex-spark"' in output
+    assert "[mcp_servers.old]" not in output
+    assert "[mcp_servers.task-management-tools]" in output
+
+
+def test_prepare_codex_home_applies_runtime_provider_overrides(monkeypatch, tmp_path):
+    from features.agents.codex_mcp_adapter import _prepare_codex_home
+
+    source_home = tmp_path / "source-home"
+    source_codex_dir = source_home / ".codex"
+    source_codex_dir.mkdir(parents=True, exist_ok=True)
+    (source_codex_dir / "config.toml").write_text(
+        """
+model_provider = "openai"
+model = "gpt-5.3-codex-spark"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(source_home))
+
+    target_home = tmp_path / "target-home"
+    _prepare_codex_home(
+        target_home,
+        provider="codex",
+        mcp_config_text="",
+        runtime_config_text='model_provider = "openai"\nreasoning_effort = "medium"\n',
+    )
+    output = (target_home / ".codex" / "config.toml").read_text(encoding="utf-8")
+
+    assert output.count('model_provider = "openai"') >= 1
+    assert 'reasoning_effort = "medium"' in output
+
+
+def test_run_structured_prompt_uses_cache_when_input_unchanged(monkeypatch):
+    from features.agents import codex_mcp_adapter as adapter_module
+
+    adapter_module._STRUCTURED_PROMPT_CACHE.clear()
+
+    @contextmanager
+    def _noop_lock(**kwargs):
+        _ = kwargs
+        yield
+
+    @contextmanager
+    def _noop_home_env(**kwargs):
+        _ = kwargs
+        yield {}
+
+    calls = {"count": 0}
+
+    def _fake_runner(**kwargs):
+        _ = kwargs
+        calls["count"] += 1
+        return ('{"ok": true}', {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}, None, False, False)
+
+    monkeypatch.setattr(adapter_module, "_chat_session_run_lock", _noop_lock)
+    monkeypatch.setattr(adapter_module, "_codex_home_env", _noop_home_env)
+    monkeypatch.setattr(adapter_module, "run_codex_home_cleanup_if_due", lambda **_: {"ran": False, "removed": 0, "failures": 0})
+    monkeypatch.setattr(adapter_module, "_run_codex_app_server_with_optional_stream", _fake_runner)
+
+    payload1, usage1 = adapter_module.run_structured_codex_prompt_with_usage(
+        prompt="classify this",
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+        },
+        workspace_id="ws-1",
+        session_key="session-1",
+        mcp_servers=[],
+    )
+    payload2, usage2 = adapter_module.run_structured_codex_prompt_with_usage(
+        prompt="classify this",
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+        },
+        workspace_id="ws-1",
+        session_key="session-1",
+        mcp_servers=[],
+    )
+
+    assert calls["count"] == 1
+    assert payload1 == {"ok": True}
+    assert payload2 == {"ok": True}
+    assert usage1 == usage2
+
+
+def test_run_structured_prompt_recomputes_when_input_changes(monkeypatch):
+    from features.agents import codex_mcp_adapter as adapter_module
+
+    adapter_module._STRUCTURED_PROMPT_CACHE.clear()
+
+    @contextmanager
+    def _noop_lock(**kwargs):
+        _ = kwargs
+        yield
+
+    @contextmanager
+    def _noop_home_env(**kwargs):
+        _ = kwargs
+        yield {}
+
+    calls = {"count": 0}
+
+    def _fake_runner(**kwargs):
+        _ = kwargs
+        calls["count"] += 1
+        return ('{"ok": true}', {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}, None, False, False)
+
+    monkeypatch.setattr(adapter_module, "_chat_session_run_lock", _noop_lock)
+    monkeypatch.setattr(adapter_module, "_codex_home_env", _noop_home_env)
+    monkeypatch.setattr(adapter_module, "run_codex_home_cleanup_if_due", lambda **_: {"ran": False, "removed": 0, "failures": 0})
+    monkeypatch.setattr(adapter_module, "_run_codex_app_server_with_optional_stream", _fake_runner)
+
+    adapter_module.run_structured_codex_prompt_with_usage(
+        prompt="classify this",
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+        },
+        workspace_id="ws-1",
+        session_key="session-1",
+        mcp_servers=[],
+    )
+    adapter_module.run_structured_codex_prompt_with_usage(
+        prompt="classify this changed",
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+        },
+        workspace_id="ws-1",
+        session_key="session-1",
+        mcp_servers=[],
+    )
+
+    assert calls["count"] == 2

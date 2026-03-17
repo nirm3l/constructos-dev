@@ -229,3 +229,52 @@ export type ContactRequestsListResponse = {
   limit: number
   offset: number
 }
+
+export type AppNotificationAudienceKind = 'all' | 'customer_ref' | 'customer_email' | 'installation_id'
+
+export type AppNotificationRecord = {
+  id: string
+  title: string | null
+  message: string
+  severity: 'info' | 'warning' | 'critical' | string
+  notification_type: string
+  audience_kind: AppNotificationAudienceKind | string
+  audience_values: string[]
+  is_active: boolean
+  active_from: string | null
+  active_until: string | null
+  payload: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export type AppNotificationsListResponse = {
+  ok: boolean
+  items: AppNotificationRecord[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export type AdminAppNotificationCreateRequest = {
+  title: string | null
+  message: string
+  severity: 'info' | 'warning' | 'critical' | string
+  notification_type: string
+  audience_kind: AppNotificationAudienceKind | string
+  audience_values: string[]
+  active_from: string | null
+  active_until: string | null
+  is_active: boolean
+  payload: Record<string, unknown>
+}
+
+export type AdminAppNotificationCreateResponse = {
+  ok: boolean
+  notification: AppNotificationRecord
+}
+
+export type AdminAppNotificationDeactivateResponse = {
+  ok: boolean
+  notification: AppNotificationRecord
+}

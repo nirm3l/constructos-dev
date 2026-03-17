@@ -7,6 +7,8 @@ export type User = {
   theme: 'light' | 'dark'
   agent_chat_model?: string
   agent_chat_reasoning_effort?: ChatReasoningEffort | string
+  onboarding_quick_tour_completed?: boolean
+  onboarding_advanced_tour_completed?: boolean
 }
 
 export type AuthUser = {
@@ -18,6 +20,8 @@ export type AuthUser = {
   theme: 'light' | 'dark'
   agent_chat_model?: string
   agent_chat_reasoning_effort?: ChatReasoningEffort | string
+  onboarding_quick_tour_completed?: boolean
+  onboarding_advanced_tour_completed?: boolean
   must_change_password: boolean
   memberships: Array<{ workspace_id: string; role: string }>
 }
@@ -37,6 +41,15 @@ export type AdminWorkspaceUser = {
   must_change_password: boolean
   can_reset_password?: boolean
   can_deactivate?: boolean
+  can_update_role?: boolean
+  background_agent_model?: string | null
+  background_agent_provider?: 'codex' | 'claude' | string | null
+  background_agent_available?: boolean
+  background_agent_reasoning_effort?: string | null
+  background_agent_model_is_fallback?: boolean | null
+  background_agent_reasoning_is_fallback?: boolean | null
+  is_background_execution_selected?: boolean
+  can_configure_background_execution?: boolean
 }
 
 export type AdminUsersPage = {
@@ -77,6 +90,16 @@ export type AdminUserDeactivateResponse = {
   workspace_id: string
   user_id: string
   is_active: boolean
+}
+
+export type AdminUserAgentRuntimeUpdateResponse = {
+  ok: boolean
+  workspace_id: string
+  user_id: string
+  provider: 'codex' | 'claude' | string
+  model: string
+  reasoning_effort?: string | null
+  is_background_execution_selected: boolean
 }
 
 export type ExternalRef = {
@@ -146,8 +169,11 @@ export type Project = {
   embedding_enabled: boolean
   embedding_model: string | null
   context_pack_evidence_top_k: number | null
+  automation_max_parallel_tasks: number
   chat_index_mode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' | string
   chat_attachment_ingestion_mode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' | string
+  vector_index_distill_enabled: boolean
+  event_storming_enabled: boolean
   embedding_index_status: 'not_indexed' | 'indexing' | 'ready' | 'stale'
   embedding_index_progress_pct: number | null
   embedding_indexed_entities: number
@@ -289,6 +315,7 @@ export type Task = {
   priority: string
   due_date: string | null
   assignee_id: string | null
+  assigned_agent_code: string | null
   labels: string[]
   subtasks: Array<Record<string, unknown>>
   attachments: Array<Record<string, unknown>>
@@ -297,12 +324,15 @@ export type Task = {
   linked_note_count?: number
   instruction: string | null
   execution_triggers: TaskExecutionTrigger[]
+  task_relationships?: Array<Record<string, unknown>>
+  delivery_mode?: 'deployable_slice' | 'merged_increment' | string | null
   recurring_rule: string | null
   task_type: 'manual' | 'scheduled_instruction'
   scheduled_instruction: string | null
   scheduled_at_utc: string | null
   schedule_timezone: string | null
   schedule_state: 'idle' | 'queued' | 'running' | 'done' | 'failed'
+  automation_state?: 'idle' | 'queued' | 'running' | 'completed' | 'failed'
   last_schedule_run_at: string | null
   last_schedule_error: string | null
   archived: boolean
@@ -341,11 +371,21 @@ export type LicenseStatus = {
   last_validated_at: string | null
   token_expires_at: string | null
   metadata: Record<string, unknown>
+  notifications?: Notification[]
 }
 
 export type LicenseStatusResponse = {
   ok: boolean
   license: LicenseStatus
+}
+
+export type LicenseAutoUpdateResponse = {
+  ok: boolean
+  queued: boolean
+  running: boolean
+  run_id: string | null
+  started_at: string | null
+  log_path: string | null
 }
 
 export type LicenseActivationSeatUsage = {
@@ -437,22 +477,59 @@ export type TaskAutomationStatus = {
   task_id: string
   automation_state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'
   last_agent_run_at: string | null
+  last_agent_progress: string | null
+  last_agent_stream_status: string | null
+  last_agent_stream_updated_at: string | null
+  last_agent_run_id: string | null
   last_agent_error: string | null
   last_agent_comment: string | null
+  last_agent_usage?: Record<string, unknown> | null
+  last_agent_prompt_mode?: 'full' | 'resume' | string | null
+  last_agent_prompt_segment_chars?: Record<string, number> | null
+  last_agent_codex_session_id?: string | null
+  last_agent_codex_resume_attempted?: boolean | null
+  last_agent_codex_resume_succeeded?: boolean | null
+  last_agent_codex_resume_fallback_used?: boolean | null
   last_requested_instruction: string | null
-  last_requested_source: 'manual' | 'schedule' | 'status_change' | string | null
+  last_requested_source: 'manual' | 'schedule' | 'status_change' | 'lead_handoff' | string | null
+  last_requested_source_task_id?: string | null
+  last_requested_reason?: string | null
+  last_requested_trigger_link?: string | null
+  last_requested_correlation_id?: string | null
   last_requested_trigger_task_id: string | null
   last_requested_from_status: string | null
   last_requested_to_status: string | null
   last_requested_triggered_at: string | null
+  last_dispatch_decision?: Record<string, unknown> | null
+  last_ignored_request_source?: 'status_change' | string | null
+  last_ignored_request_source_task_id?: string | null
+  last_ignored_request_reason?: string | null
+  last_ignored_request_trigger_link?: string | null
+  last_ignored_request_correlation_id?: string | null
+  last_ignored_request_trigger_task_id?: string | null
+  last_ignored_request_from_status?: string | null
+  last_ignored_request_to_status?: string | null
+  last_ignored_request_triggered_at?: string | null
+  last_lead_handoff_token?: string | null
+  last_lead_handoff_at?: string | null
+  last_lead_handoff_refs?: Array<Record<string, unknown>> | null
+  team_mode_phase?: string | null
   instruction: string | null
   execution_triggers: TaskExecutionTrigger[]
+  task_relationships?: Array<Record<string, unknown>>
   task_type: 'manual' | 'scheduled_instruction'
   schedule_state: 'idle' | 'queued' | 'running' | 'done' | 'failed'
   scheduled_at_utc: string | null
   scheduled_instruction: string | null
   last_schedule_run_at: string | null
   last_schedule_error: string | null
+  execution_gates?: Array<{
+    id: string
+    label: string
+    status: 'pass' | 'fail' | 'waiting' | 'not_applicable' | string
+    blocking: boolean
+    message?: string | null
+  }>
 }
 
 export type ProjectBoard = {
@@ -572,6 +649,9 @@ export type GraphSubgraphEdge = {
   source_entity_id: string
   target_entity_id: string
   relationship: string
+  review_status?: 'candidate' | 'approved' | 'rejected' | string
+  inference_method?: string
+  confidence?: number
 }
 
 export type GraphProjectSubgraph = {
@@ -581,6 +661,445 @@ export type GraphProjectSubgraph = {
   edge_count: number
   nodes: GraphSubgraphNode[]
   edges: GraphSubgraphEdge[]
+}
+
+export type TaskDependencyGraphNode = {
+  entity_type: 'Task' | string
+  entity_id: string
+  title: string
+  status: string
+  priority: string
+  automation_state: string
+  role: string
+  assigned_agent_code?: string | null
+  assignee_id?: string | null
+  specification_id?: string | null
+  team_mode_phase?: string | null
+  team_mode_blocking_gate?: string | null
+  last_requested_source?: string | null
+  last_requested_source_task_id?: string | null
+  last_requested_triggered_at?: string | null
+  last_activity_at?: string | null
+  inbound_count: number
+  outbound_count: number
+  runtime_inbound_count: number
+  runtime_outbound_count: number
+  structural_inbound_count: number
+  structural_outbound_count: number
+  status_trigger_inbound_count: number
+  status_trigger_outbound_count: number
+}
+
+export type TaskDependencyGraphEdgeChannel = {
+  kind: 'relationship' | 'status_trigger' | 'runtime_request' | string
+  label: string
+  source: string
+  statuses?: string[]
+  to_statuses?: string[]
+  scope?: string | null
+  match_mode?: string | null
+  count?: number
+  latest_at?: string | null
+  correlation_ids?: string[]
+  active?: boolean
+}
+
+export type TaskDependencyGraphRuntimeEvent = {
+  at?: string | null
+  source: string
+  reason?: string | null
+  trigger_link?: string | null
+  correlation_id?: string | null
+  active?: boolean
+}
+
+export type TaskDependencyGraphEventDetail = {
+  project_id: string
+  source_task_id: string
+  source_task_title: string
+  target_task_id: string
+  target_task_title: string
+  source: string
+  requested_at?: string | null
+  correlation_id?: string | null
+  trigger_link?: string | null
+  reason?: string | null
+  origin_chat_session_id?: string | null
+  origin_prompt_markdown?: string | null
+  origin_prompt_at?: string | null
+  origin_classifier?: Record<string, unknown> | null
+  runtime_classifier?: Record<string, unknown> | null
+  request_markdown?: string | null
+  response_markdown?: string | null
+  response_status?: string | null
+  response_at?: string | null
+  response_summary?: string | null
+  response_error?: string | null
+  response_comment_body?: string | null
+  response_comment_at?: string | null
+}
+
+export type TaskDependencyGraphEdge = {
+  source_entity_id: string
+  target_entity_id: string
+  relationship: string
+  structural: boolean
+  trigger_dependency: boolean
+  runtime_dependency: boolean
+  active_runtime: boolean
+  runtime_requests_total: number
+  lead_handoffs_total: number
+  latest_runtime_at?: string | null
+  latest_runtime_source?: string | null
+  relationship_kinds?: string[]
+  trigger_conditions?: Array<Record<string, unknown>>
+  runtime_sources?: Record<string, number>
+  channels: TaskDependencyGraphEdgeChannel[]
+  runtime_events?: TaskDependencyGraphRuntimeEvent[]
+}
+
+export type ProjectTaskDependencyGraph = {
+  project_id: string
+  project_name: string
+  node_count: number
+  edge_count: number
+  counts: {
+    tasks: number
+    structural_edges: number
+    status_trigger_edges: number
+    runtime_edges: number
+    active_runtime_edges: number
+    running_tasks: number
+    queued_tasks: number
+    blocked_tasks: number
+    done_tasks: number
+  }
+  relationship_counts?: Record<string, number>
+  runtime_source_counts?: Record<string, number>
+  nodes: TaskDependencyGraphNode[]
+  edges: TaskDependencyGraphEdge[]
+}
+
+export type ProjectDockerComposeRuntimePublisher = {
+  url?: string | null
+  target_port?: number | null
+  published_port?: number | null
+  protocol?: string | null
+}
+
+export type ProjectDockerComposeRuntimeContainer = {
+  name: string
+  service: string
+  state: string
+  status: string
+  health?: string | null
+  image?: string | null
+  command?: string | null
+  exit_code?: number | null
+  publishers: ProjectDockerComposeRuntimePublisher[]
+}
+
+export type ProjectDockerComposeRuntimeLogEvent = {
+  project_id: string
+  project_name: string
+  container_name: string
+  timestamp?: string | null
+  message: string
+}
+
+export type ProjectDockerComposeRuntimeSnapshot = {
+  project_id: string
+  project_name: string
+  enabled: boolean
+  stack: string
+  port?: number | null
+  health_path?: string | null
+  require_http_200: boolean
+  has_runtime: boolean
+  error?: string | null
+  stderr?: string | null
+  containers: ProjectDockerComposeRuntimeContainer[]
+  health?: Record<string, unknown>
+}
+
+export type ProjectGitRepositoryBranch = {
+  name: string
+  commit_sha?: string | null
+  committed_at?: string | null
+  author_name?: string | null
+  subject?: string | null
+  is_current: boolean
+  is_default: boolean
+  merged_to_main: boolean
+}
+
+export type ProjectGitRepositorySummary = {
+  project_id: string
+  project_name: string
+  available: boolean
+  repo_root: string
+  current_branch?: string | null
+  default_branch?: string | null
+  branch_count: number
+  branches_preview: ProjectGitRepositoryBranch[]
+}
+
+export type ProjectGitRepositoryBranchesResponse = {
+  project_id: string
+  project_name: string
+  branches: ProjectGitRepositoryBranch[]
+}
+
+export type ProjectGitRepositoryTreeEntry = {
+  name: string
+  path: string
+  kind: 'directory' | 'file'
+  object_id: string
+  mode: string
+}
+
+export type ProjectGitRepositoryTreeResponse = {
+  project_id: string
+  project_name: string
+  ref: string
+  path: string
+  entries: ProjectGitRepositoryTreeEntry[]
+}
+
+export type ProjectGitRepositoryFileResponse = {
+  project_id: string
+  project_name: string
+  ref: string
+  path: string
+  size_bytes?: number | null
+  encoding?: string | null
+  previewable: boolean
+  truncated: boolean
+  binary: boolean
+  content?: string | null
+}
+
+export type GraphLayoutPosition = {
+  entity_id: string
+  x: number
+  y: number
+}
+
+export type GraphAiLayoutResult = {
+  project_id: string
+  project_name: string
+  graph_signature: string
+  strategy: string
+  positions: GraphLayoutPosition[]
+}
+
+export type EventStormingOverview = {
+  project_id: string
+  project_name: string
+  component_counts: Record<string, number>
+  artifact_link_count: number
+  event_storming_enabled: boolean
+  context_frame?: {
+    mode?: 'full' | 'delta' | string | null
+    revision?: string | null
+    updated_at?: string | null
+  }
+  processing: {
+    artifact_total: number
+    processed: number
+    queued: number
+    running: number
+    failed: number
+    done: number
+    progress_pct: number
+  }
+}
+
+export type EventStormingSubgraph = {
+  project_id: string
+  project_name: string
+  node_count: number
+  edge_count: number
+  nodes: GraphSubgraphNode[]
+  edges: GraphSubgraphEdge[]
+}
+
+export type ProjectPolicyCheckResult = {
+  project_id: string
+  active?: boolean
+  kickoff_required?: boolean
+  kickoff_hint?: string
+  checks: Record<string, boolean | string | number | null>
+  available_checks?: string[]
+  check_descriptions?: Record<string, string>
+  required_checks?: string[]
+  required_failed_checks?: string[]
+  plugin_policy?: Record<string, unknown>
+  plugin_policy_source?: string
+  counts?: Record<string, number>
+  ok: boolean
+}
+
+export type ProjectPolicyCheckCatalogItem = {
+  id: string
+  label?: string
+  description?: string
+  default_required?: boolean
+}
+
+export type ProjectPolicyChecksVerifyResponse = {
+  project_id: string
+  team_mode?: ProjectPolicyCheckResult
+  delivery?: ProjectPolicyCheckResult & {
+    runtime_deploy_health?: Record<string, unknown>
+  }
+  execution_gates?: {
+    tasks: Array<{
+      task_id: string
+      title: string
+      status: string
+      gates_total: number
+      blocking_total: number
+      pass: number
+      fail: number
+      waiting: number
+      not_applicable: number
+    }>
+    totals: {
+      tasks_with_gates: number
+      gates_total: number
+      blocking_total: number
+      pass: number
+      fail: number
+      waiting: number
+      not_applicable: number
+    }
+  }
+  workflow_communication?: {
+    events: Array<{
+      delivery?: 'requested' | 'ignored' | string
+      task_id: string
+      title: string
+      status: string
+      source: string
+      source_task_id?: string | null
+      reason?: string | null
+      trigger_link?: string | null
+      correlation_id?: string | null
+      lead_handoff_token?: string | null
+      dispatch_decision?: Record<string, unknown> | null
+      requested_at?: string | null
+    }>
+    totals: Record<string, number>
+    events_total: number
+  }
+  catalog?: Record<string, ProjectPolicyCheckCatalogItem[] | undefined>
+  ok: boolean
+} & Record<string, unknown>
+
+export type ProjectPluginConfig = {
+  workspace_id: string
+  project_id: string
+  plugin_key: 'team_mode' | 'git_delivery' | 'docker_compose' | string
+  enabled: boolean
+  version: number
+  schema_version: number
+  config: Record<string, unknown>
+  compiled_policy: Record<string, unknown>
+  last_validation_errors?: Array<Record<string, unknown>>
+  last_validated_at?: string | null
+  exists?: boolean
+  created?: boolean
+}
+
+export type ProjectPluginConfigValidation = {
+  workspace_id: string
+  project_id: string
+  plugin_key: 'team_mode' | 'git_delivery' | 'docker_compose' | string
+  schema_version: number
+  errors: Array<Record<string, unknown>>
+  warnings: string[]
+  blocking: boolean
+  normalized_config: Record<string, unknown>
+  compiled_policy: Record<string, unknown>
+}
+
+export type ProjectPluginConfigDiff = {
+  workspace_id: string
+  project_id: string
+  plugin_key: 'team_mode' | 'git_delivery' | 'docker_compose' | string
+  current_version: number
+  exists: boolean
+  blocking: boolean
+  errors: Array<Record<string, unknown>>
+  warnings: string[]
+  config_changes: Array<Record<string, unknown>>
+  compiled_policy_changes: Array<Record<string, unknown>>
+  current_config: Record<string, unknown>
+  next_config: Record<string, unknown>
+  current_compiled_policy: Record<string, unknown>
+  next_compiled_policy: Record<string, unknown>
+  changed: boolean
+}
+
+export type ProjectCapabilities = {
+  workspace_id: string
+  project_id: string
+  enabled_plugin_keys: string[]
+  plugins: Array<{
+    plugin_key: string
+    exists: boolean
+    enabled: boolean
+    version: number
+    schema_version: number
+  }>
+  capabilities: {
+    team_mode: boolean
+    git_delivery: boolean
+    docker_compose: boolean
+  }
+}
+
+export type EventStormingLinkReviewResult = {
+  project_id: string
+  entity_type: string
+  entity_id: string
+  component_id: string
+  review_status: 'candidate' | 'approved' | 'rejected' | string
+  inference_method: string
+  confidence: number
+  updated_at: string
+}
+
+export type EventStormingEntityLinks = {
+  project_id: string
+  entity_type: string
+  entity_id: string
+  items: Array<{
+    component_id: string
+    component_type: string
+    component_title: string
+    confidence: number
+    review_status: 'candidate' | 'approved' | 'rejected' | string
+    inference_method: string
+    updated_at: string
+  }>
+}
+
+export type EventStormingComponentLinks = {
+  project_id: string
+  component_id: string
+  component_type: string
+  component_title: string
+  items: Array<{
+    entity_id: string
+    entity_type: string
+    entity_title: string
+    confidence: number
+    review_status: 'candidate' | 'approved' | 'rejected' | string
+    inference_method: string
+    updated_at: string
+  }>
 }
 
 export type ProjectKnowledgeSearchItem = {
@@ -711,6 +1230,42 @@ export type AgentChatResponse = {
   resume_fallback_used?: boolean
 }
 
+export type AgentAuthProvider = 'codex' | 'claude'
+export type AgentAuthEffectiveSource = 'system_override' | 'host_mount' | 'none'
+export type ClaudeAuthLoginMethod = 'claudeai' | 'console'
+
+export type AgentAuthLoginSession = {
+  id: string
+  status: 'pending' | 'succeeded' | 'failed' | 'cancelled'
+  started_at: string
+  updated_at: string
+  login_method?: ClaudeAuthLoginMethod | string | null
+  verification_uri?: string | null
+  user_code?: string | null
+  error?: string | null
+  output_excerpt?: string[]
+}
+
+export type AgentAuthStatus = {
+  provider?: AgentAuthProvider | string
+  provider_label?: string | null
+  configured: boolean
+  effective_source: AgentAuthEffectiveSource
+  host_auth_available: boolean
+  override_available: boolean
+  override_updated_at?: string | null
+  scope?: 'system' | string
+  target_actor_user_id?: string | null
+  target_actor_username?: string | null
+  target_actor_full_name?: string | null
+  selected_login_method?: ClaudeAuthLoginMethod | string | null
+  supported_login_methods?: Array<ClaudeAuthLoginMethod | string>
+  login_session?: AgentAuthLoginSession | null
+}
+
+export type CodexAuthStatus = AgentAuthStatus
+export type ClaudeAuthStatus = AgentAuthStatus
+
 export type ChatMcpServer = string
 export type ChatReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -727,6 +1282,10 @@ export type AgentChatUsage = {
   cached_input_tokens?: number
   output_tokens: number
   context_limit_tokens?: number
+  graph_context_frame_mode?: 'full' | 'delta' | string
+  graph_context_frame_revision?: string
+  prompt_mode?: 'full' | 'resume' | string
+  prompt_segment_chars?: Record<string, number>
   codex_resume_attempted?: boolean
   codex_resume_succeeded?: boolean
   codex_resume_fallback_used?: boolean
@@ -759,7 +1318,7 @@ export type ChatMessageRecord = {
   content: string
   order_index: number
   attachment_refs: AttachmentRef[]
-  usage: AgentChatUsage | null
+  usage: Record<string, unknown> | null
   is_deleted: boolean
   created_at: string | null
   updated_at: string | null
@@ -836,7 +1395,7 @@ export type Specification = {
   project_id: string
   title: string
   body: string
-  status: 'Draft' | 'Ready' | 'In progress' | 'Implemented' | 'Archived'
+  status: 'Draft' | 'Ready' | 'In Progress' | 'Implemented' | 'Archived'
   tags: string[]
   external_refs: ExternalRef[]
   attachment_refs: AttachmentRef[]

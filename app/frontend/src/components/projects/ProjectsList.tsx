@@ -214,21 +214,21 @@ export function ProjectsList({
         }}
       >
         <AlertDialog.Portal>
-          <AlertDialog.Overlay className="drawer-backdrop" />
-          <AlertDialog.Content className="dialog-content">
-            <AlertDialog.Title>Remove project</AlertDialog.Title>
-            <AlertDialog.Description className="meta" style={{ marginTop: 6 }}>
+          <AlertDialog.Overlay className="codex-chat-alert-overlay" />
+          <AlertDialog.Content className="codex-chat-alert-content">
+            <AlertDialog.Title className="codex-chat-alert-title">Remove project</AlertDialog.Title>
+            <AlertDialog.Description className="codex-chat-alert-description">
               {removeProjectPrompt
                 ? `Delete "${removeProjectPrompt.name}"? This permanently deletes project resources.`
                 : 'This action cannot be undone.'}
             </AlertDialog.Description>
-            <div className="dialog-actions">
+            <div className="codex-chat-alert-actions">
               <AlertDialog.Cancel asChild>
-                <button className="status-chip" type="button">Cancel</button>
+                <button className="pill subtle" type="button">Cancel</button>
               </AlertDialog.Cancel>
               <AlertDialog.Action asChild>
                 <button
-                  className="status-chip danger-ghost"
+                  className="status-chip"
                   type="button"
                   onClick={() => {
                     if (!removeProjectPrompt) return

@@ -8,13 +8,13 @@ from sqlalchemy.orm import Session
 
 from shared.core import (
     AggregateEventRepository,
-    Project,
     SavedViewCreate,
     User,
     allocate_id,
     coerce_originator_id,
     ensure_project_access,
     ensure_role,
+    load_project_command_state,
     load_saved_view,
 )
 from .domain import SavedViewAggregate
@@ -41,8 +41,8 @@ class CreateSavedViewHandler:
             self.ctx.user.id,
             role_required,
         )
-        project = self.ctx.db.get(Project, self.payload.project_id)
-        if not project or project.is_deleted:
+        project = load_project_command_state(self.ctx.db, self.payload.project_id)
+        if project is None or project.is_deleted:
             raise HTTPException(status_code=404, detail="Project not found")
         if project.workspace_id != self.payload.workspace_id:
             raise HTTPException(status_code=400, detail="Project does not belong to workspace")

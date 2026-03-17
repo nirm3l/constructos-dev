@@ -18,6 +18,7 @@ from .command_handlers import (
     PatchTaskHandler,
     ReopenTaskHandler,
     ReorderTasksHandler,
+    ReviewTaskHandler,
     RequestAutomationRunHandler,
     RestoreTaskHandler,
     ToggleWatchHandler,
@@ -56,6 +57,15 @@ class TaskApplicationService:
             user_id=self.user.id,
             command_id=self.command_id,
             handler=CompleteTaskHandler(self.ctx, task_id),
+        )
+
+    def review_task(self, task_id: str, *, action: str, comment: str | None = None) -> dict:
+        return execute_command(
+            self.db,
+            command_name="Task.ReviewDecision",
+            user_id=self.user.id,
+            command_id=self.command_id,
+            handler=ReviewTaskHandler(self.ctx, task_id, action, comment),
         )
 
     def reopen_task(self, task_id: str) -> dict:
@@ -139,13 +149,34 @@ class TaskApplicationService:
             handler=ToggleWatchHandler(self.ctx, task_id),
         )
 
-    def request_automation_run(self, task_id: str, payload: TaskAutomationRun) -> dict:
+    def request_automation_run(
+        self,
+        task_id: str,
+        payload: TaskAutomationRun,
+        *,
+        wake_runner: bool = True,
+    ) -> dict:
         return execute_command(
             self.db,
             command_name="Task.Automation.RequestRun",
             user_id=self.user.id,
             command_id=self.command_id,
-            handler=RequestAutomationRunHandler(self.ctx, task_id, payload.instruction),
+            handler=RequestAutomationRunHandler(
+                self.ctx,
+                task_id,
+                payload.instruction,
+                payload.source,
+                payload.source_task_id,
+                payload.chat_session_id,
+                payload.execution_intent,
+                payload.execution_kickoff_intent,
+                payload.project_creation_intent,
+                payload.workflow_scope,
+                payload.execution_mode,
+                payload.task_completion_requested,
+                payload.classifier_reason,
+                wake_runner=wake_runner,
+            ),
         )
 
 

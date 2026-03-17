@@ -6,23 +6,23 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from shared.core import (
     AggregateEventRepository,
     Note,
     NoteCreate,
-    NoteGroup,
     NotePatch,
     Project,
-    Specification,
-    Task,
     User,
     coerce_originator_id,
     ensure_project_access,
     ensure_role,
+    load_project_command_state,
+    load_note_group_command_state,
     load_note_command_state,
+    load_specification_command_state,
+    load_task_command_state,
     load_note_view,
 )
 
@@ -144,7 +144,7 @@ def _resolve_note_create_id(
 
 
 def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -> Project:
-    project = db.get(Project, project_id)
+    project = load_project_command_state(db, project_id)
     if not project or project.is_deleted:
         raise HTTPException(status_code=404, detail="Project not found")
     if project.workspace_id != workspace_id:
@@ -152,30 +152,28 @@ def _require_project_scope(db: Session, *, workspace_id: str, project_id: str) -
     return project
 
 
-def _require_task_scope(db: Session, *, workspace_id: str, project_id: str, task_id: str) -> Task:
-    task = db.execute(select(Task).where(Task.id == task_id, Task.is_deleted == False)).scalar_one_or_none()
-    if not task:
+def _require_task_scope(db: Session, *, workspace_id: str, project_id: str, task_id: str) -> None:
+    task = load_task_command_state(db, task_id)
+    if not task or task.is_deleted:
         raise HTTPException(status_code=404, detail="Task not found")
     if task.workspace_id != workspace_id:
         raise HTTPException(status_code=400, detail="Task does not belong to workspace")
     if task.project_id != project_id:
         raise HTTPException(status_code=400, detail="Task does not belong to project")
-    return task
 
 
-def _require_note_group_scope(db: Session, *, workspace_id: str, project_id: str, note_group_id: str) -> NoteGroup:
-    note_group = db.get(NoteGroup, note_group_id)
+def _require_note_group_scope(db: Session, *, workspace_id: str, project_id: str, note_group_id: str) -> None:
+    note_group = load_note_group_command_state(db, note_group_id)
     if not note_group or note_group.is_deleted:
         raise HTTPException(status_code=404, detail="Note group not found")
     if note_group.workspace_id != workspace_id:
         raise HTTPException(status_code=400, detail="Note group does not belong to workspace")
     if note_group.project_id != project_id:
         raise HTTPException(status_code=400, detail="Note group does not belong to project")
-    return note_group
 
 
-def _require_specification_scope(db: Session, *, workspace_id: str, project_id: str, specification_id: str) -> Specification:
-    specification = db.get(Specification, specification_id)
+def _require_specification_scope(db: Session, *, workspace_id: str, project_id: str, specification_id: str) -> None:
+    specification = load_specification_command_state(db, specification_id)
     if not specification or specification.is_deleted:
         raise HTTPException(status_code=404, detail="Specification not found")
     if specification.workspace_id != workspace_id:
@@ -184,7 +182,28 @@ def _require_specification_scope(db: Session, *, workspace_id: str, project_id: 
         raise HTTPException(status_code=400, detail="Specification does not belong to project")
     if specification.archived:
         raise HTTPException(status_code=409, detail="Specification is archived")
-    return specification
+
+
+def _note_view_from_aggregate(*, note_id: str, aggregate: NoteAggregate) -> dict:
+    return {
+        "id": note_id,
+        "workspace_id": getattr(aggregate, "workspace_id", None),
+        "project_id": getattr(aggregate, "project_id", None),
+        "note_group_id": getattr(aggregate, "note_group_id", None),
+        "task_id": getattr(aggregate, "task_id", None),
+        "specification_id": getattr(aggregate, "specification_id", None),
+        "title": getattr(aggregate, "title", "") or "",
+        "body": getattr(aggregate, "body", "") or "",
+        "tags": getattr(aggregate, "tags", []) or [],
+        "external_refs": getattr(aggregate, "external_refs", []) or [],
+        "attachment_refs": getattr(aggregate, "attachment_refs", []) or [],
+        "pinned": bool(getattr(aggregate, "pinned", False)),
+        "archived": bool(getattr(aggregate, "archived", False)),
+        "created_by": getattr(aggregate, "created_by", "") or "",
+        "updated_by": getattr(aggregate, "updated_by", "") or "",
+        "created_at": None,
+        "updated_at": None,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,9 +294,9 @@ class CreateNoteHandler:
         )
         self.ctx.db.commit()
         view = load_note_view(self.ctx.db, nid)
-        if view is None:
-            raise HTTPException(status_code=404, detail="Note not found after create")
-        return view
+        if view is not None:
+            return view
+        return _note_view_from_aggregate(note_id=nid, aggregate=aggregate)
 
 
 @dataclass(frozen=True, slots=True)

@@ -39,8 +39,35 @@ function formatRecurringRuleCompact(recurringRule: string | null | undefined): s
 
 function formatScheduleState(state: Task['schedule_state'] | null | undefined): string {
   const raw = String(state ?? '').trim()
-  if (!raw) return 'State: Unknown'
-  return `State: ${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
+  if (!raw) return 'Unknown'
+  return `${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
+}
+
+function formatAutomationState(state: string | null | undefined): string {
+  const raw = String(state ?? '').trim()
+  if (!raw || raw.toLowerCase() === 'idle') return 'Idle'
+  if (raw === 'completed') return 'Execution Completed'
+  return `Execution ${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
+}
+
+function toExecutionChipClassState(state: string | null | undefined): string {
+  const raw = String(state ?? 'idle').trim().toLowerCase()
+  if (!raw) return 'idle'
+  if (raw === 'completed') return 'done'
+  return raw
+}
+
+function resolveEffectiveExecutionState(task: Task): string {
+  const automation = String(task.automation_state ?? '').trim().toLowerCase()
+  if (automation && automation !== 'idle') return automation
+  const schedule = String(task.schedule_state ?? '').trim().toLowerCase()
+  if (task.task_type === 'scheduled_instruction' && schedule) return schedule
+  return automation || 'idle'
+}
+
+function isCompletedTaskStatus(status: string | null | undefined): boolean {
+  const raw = String(status ?? '').trim().toLowerCase()
+  return raw === 'done' || raw === 'completed'
 }
 
 const BOTTOM_TAB_ITEMS: Array<{ value: Tab; label: string; shortLabel: string; iconPath: string }> = [
@@ -76,7 +103,34 @@ const BOTTOM_TAB_ITEMS: Array<{ value: Tab; label: string; shortLabel: string; i
   },
 ]
 
-function ChipTooltip({
+const DESKTOP_EXTRA_TAB_ITEMS: Array<{ value: Tab; label: string; shortLabel: string; iconPath: string }> = [
+  {
+    value: 'search',
+    label: 'Search',
+    shortLabel: 'Search',
+    iconPath: 'M11 4a7 7 0 1 1 0 14 7 7 0 0 1 0-14m10 17-4.2-4.2',
+  },
+  {
+    value: 'task-flow',
+    label: 'Task Flow',
+    shortLabel: 'Flow',
+    iconPath: 'M5 6h5v5H5zm9 0h5v5h-5zM9 16h6v5H9zM10 8.5h4M12 11v5',
+  },
+  {
+    value: 'knowledge-graph',
+    label: 'Knowledge graph',
+    shortLabel: 'Knowledge',
+    iconPath: 'M12 3v6m0 6v6M3 12h6m6 0h6M6.5 6.5l4.2 4.2m2.6 2.6 4.2 4.2m0-11-4.2 4.2m-2.6 2.6-4.2 4.2',
+  },
+  {
+    value: 'settings',
+    label: 'Settings',
+    shortLabel: 'Settings',
+    iconPath: 'M19.14 12.94a7.97 7.97 0 0 0 .06-.94 7.97 7.97 0 0 0-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.46 7.46 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.58.23-1.12.55-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.7 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.05.63-.05.94s.01.63.05.94L2.82 14.52a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.51.39 1.05.71 1.63.94l.36 2.54a.5.5 0 0 0 .5.42h3.84a.5.5 0 0 0 .5-.42l.36-2.54c.58-.23 1.12-.55 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5z',
+  },
+]
+
+export function ChipTooltip({
   label,
   children,
 }: {
@@ -84,15 +138,17 @@ function ChipTooltip({
   children: React.ReactElement
 }) {
   return (
-    <Tooltip.Root>
-      <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
-      <Tooltip.Portal>
-        <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
-          <span>{label}</span>
-          <Tooltip.Arrow className="header-tooltip-arrow" />
-        </Tooltip.Content>
-      </Tooltip.Portal>
-    </Tooltip.Root>
+    <Tooltip.Provider delayDuration={120}>
+      <Tooltip.Root>
+        <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
+        <Tooltip.Portal>
+          <Tooltip.Content className="header-tooltip-content" side="top" sideOffset={6}>
+            <span>{label}</span>
+            <Tooltip.Arrow className="header-tooltip-arrow" />
+          </Tooltip.Content>
+        </Tooltip.Portal>
+      </Tooltip.Root>
+    </Tooltip.Provider>
   )
 }
 
@@ -108,6 +164,7 @@ export function TaskListItem({
   showProject = false,
   projectName,
   specificationName,
+  assigneeLabel,
 }: {
   task: Task
   onOpen: (taskId: string) => void
@@ -120,6 +177,7 @@ export function TaskListItem({
   showProject?: boolean
   projectName?: string
   specificationName?: string
+  assigneeLabel?: string
 }) {
   const descriptionPreviewText = taskDescriptionPreview(task.description)
   const isScheduled = task.task_type === 'scheduled_instruction'
@@ -129,13 +187,17 @@ export function TaskListItem({
   const scheduleTrigger = formatScheduleTrigger(task.scheduled_at_utc)
   const scheduleRepeat = formatRecurringRuleCompact(task.recurring_rule)
   const scheduleState = formatScheduleState(task.schedule_state)
+  const effectiveExecutionState = resolveEffectiveExecutionState(task)
+  const hasVisibleAutomationState = effectiveExecutionState !== 'idle'
+  const executionStateLabel = formatAutomationState(effectiveExecutionState)
+  const executionStateClass = toExecutionChipClassState(effectiveExecutionState)
   const primaryAction = task.archived
     ? {
         label: 'Restore task',
         iconPath: 'M20 16v5H4v-5M12 3v12M7 8l5-5 5 5',
         onSelect: () => onRestore(task.id),
       }
-    : task.status === 'Done'
+    : isCompletedTaskStatus(task.status)
       ? {
           label: 'Reopen task',
           iconPath: 'M3 12a9 9 0 1 0 3-6.7M3 4v5h5',
@@ -149,24 +211,61 @@ export function TaskListItem({
 
   return (
     <Tooltip.Provider delayDuration={120}>
-      <div key={task.id} className={`task-item ${isScheduled ? 'scheduled' : ''}`}>
-      <div className="task-main" role="button" onClick={() => onOpen(task.id)}>
+      <div
+        key={task.id}
+        className={`task-item ${isScheduled ? 'scheduled' : ''}`}
+        role="button"
+        onClick={() => onOpen(task.id)}
+      >
+      <div className="task-main">
         <div className="task-title">
           <strong>{task.title}</strong>
-          {semanticHit || isScheduled ? (
-            <div className="task-title-badges">
-              {semanticHit ? (
-                <ChipTooltip label="Ranked as a semantic search hit">
-                  <span className="task-kind-pill task-kind-pill-semantic">SEMANTIC</span>
-                </ChipTooltip>
-              ) : null}
-              {isScheduled ? (
-                <ChipTooltip label="Scheduled task">
-                  <span className="task-kind-pill">Scheduled</span>
-                </ChipTooltip>
-              ) : null}
-            </div>
-          ) : null}
+          <div className="task-title-controls" onClick={(event) => event.stopPropagation()}>
+            {semanticHit || isScheduled ? (
+              <div className="task-title-badges">
+                {semanticHit ? (
+                  <ChipTooltip label="Ranked as a semantic search hit">
+                    <span className="task-kind-pill task-kind-pill-semantic">SEMANTIC</span>
+                  </ChipTooltip>
+                ) : null}
+                {isScheduled ? (
+                  <ChipTooltip label="Scheduled task">
+                    <span className="task-kind-pill">Scheduled</span>
+                  </ChipTooltip>
+                ) : null}
+              </div>
+            ) : null}
+            <ChipTooltip label={`Priority: ${task.priority}`}>
+              <span className={`prio prio-${priorityTone(task.priority)}`}>
+                {task.priority}
+              </span>
+            </ChipTooltip>
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger asChild>
+                <button
+                  className="action-icon task-item-actions-trigger"
+                  type="button"
+                  title="Task actions"
+                  aria-label="Task actions"
+                >
+                  <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
+                </button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content className="task-group-menu-content task-item-actions-menu-content" sideOffset={8} align="end">
+                  <DropdownMenu.Item className="task-group-menu-item" onSelect={() => onOpen(task.id)}>
+                    <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
+                    <span>Open task</span>
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Separator className="task-group-menu-separator" />
+                  <DropdownMenu.Item className="task-group-menu-item" onSelect={primaryAction.onSelect}>
+                    <Icon path={primaryAction.iconPath} />
+                    <span>{primaryAction.label}</span>
+                  </DropdownMenu.Item>
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
+          </div>
         </div>
         {descriptionPreviewText && (
           <p className="task-desc-preview" title={descriptionPreviewText}>
@@ -188,16 +287,61 @@ export function TaskListItem({
               </span>
             </ChipTooltip>
             <ChipTooltip label={scheduleState}>
-              <span className={`task-schedule-chip task-schedule-state task-schedule-state-${task.schedule_state}`}>
-                {scheduleState}
+              <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
+                {executionStateLabel}
               </span>
             </ChipTooltip>
           </div>
         )}
-        <span className="meta">
-          {task.status} | {task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'}
-          {showProject && <> | Project: {projectName || task.project_id}</>}
-        </span>
+        <div className="task-meta-compact">
+          <div className="task-meta-left">
+            <span className="meta">
+              {task.status} | {task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'}
+              {showProject && <> | Project: {projectName || task.project_id}</>}
+            </span>
+            {assigneeLabel && (
+              <div className="task-assignee-compact" title={`Assigned to ${assigneeLabel}`}>
+                <Icon path="M20 21a8 8 0 0 0-16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8" />
+                <span>{assigneeLabel}</span>
+              </div>
+            )}
+          </div>
+          <div className="task-meta-right">
+            {!isScheduled && hasVisibleAutomationState && (
+              <ChipTooltip label={executionStateLabel}>
+                <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
+                  {executionStateLabel}
+                </span>
+              </ChipTooltip>
+            )}
+            <div className="task-badges">
+              {linkedNoteCount > 0 && (
+                <ChipTooltip label={`${linkedNoteCount} linked note${linkedNoteCount === 1 ? '' : 's'}`}>
+                  <span className="task-resource-chip">
+                    <Icon path="M6 2h9l3 3v17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1v3h3" />
+                    <span>{linkedNoteCount}</span>
+                  </span>
+                </ChipTooltip>
+              )}
+              {externalRefCount > 0 && (
+                <ChipTooltip label={`${externalRefCount} external link${externalRefCount === 1 ? '' : 's'}`}>
+                  <span className="task-resource-chip">
+                    <Icon path="M14 3h7v7m0-7L10 14M5 7v12h12v-5" />
+                    <span>{externalRefCount}</span>
+                  </span>
+                </ChipTooltip>
+              )}
+              {attachmentCount > 0 && (
+                <ChipTooltip label={`${attachmentCount} attachment${attachmentCount === 1 ? '' : 's'}`}>
+                  <span className="task-resource-chip">
+                    <Icon path="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.2-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.2a2 2 0 0 1-2.82-2.83l8.49-8.48" />
+                    <span>{attachmentCount}</span>
+                  </span>
+                </ChipTooltip>
+              )}
+            </div>
+          </div>
+        </div>
         {(task.labels ?? []).length > 0 && (
           <div className="task-tags">
             {(task.labels ?? []).map((t) => (
@@ -221,80 +365,6 @@ export function TaskListItem({
             ))}
           </div>
         )}
-        {task.specification_id && (
-          <div className="row wrap" style={{ marginTop: 2 }}>
-            <button
-              className="pill subtle task-project-pill task-spec-pill"
-              onClick={(e) => {
-                e.stopPropagation()
-                onOpenSpecification?.(task.specification_id as string, task.project_id)
-              }}
-              title="Open linked specification"
-              aria-label="Open linked specification"
-            >
-              <Icon path="M6 2h12a2 2 0 0 1 2 2v16l-4 2-4-2-4 2-4-2V4a2 2 0 0 1 2-2zm3 5h6m-6 4h6m-6 4h4" />
-              <span>{specificationName || `Specification ${String(task.specification_id).slice(0, 8)}`}</span>
-            </button>
-          </div>
-        )}
-        <div className="task-badges">
-          {linkedNoteCount > 0 && (
-            <ChipTooltip label={`${linkedNoteCount} linked note${linkedNoteCount === 1 ? '' : 's'}`}>
-              <span className="task-resource-chip">
-                <Icon path="M6 2h9l3 3v17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1v3h3" />
-                <span>{linkedNoteCount}</span>
-              </span>
-            </ChipTooltip>
-          )}
-          {externalRefCount > 0 && (
-            <ChipTooltip label={`${externalRefCount} external link${externalRefCount === 1 ? '' : 's'}`}>
-              <span className="task-resource-chip">
-                <Icon path="M14 3h7v7m0-7L10 14M5 7v12h12v-5" />
-                <span>{externalRefCount}</span>
-              </span>
-            </ChipTooltip>
-          )}
-          {attachmentCount > 0 && (
-            <ChipTooltip label={`${attachmentCount} attachment${attachmentCount === 1 ? '' : 's'}`}>
-              <span className="task-resource-chip">
-                <Icon path="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.2-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.2a2 2 0 0 1-2.82-2.83l8.49-8.48" />
-                <span>{attachmentCount}</span>
-              </span>
-            </ChipTooltip>
-          )}
-          <ChipTooltip label={`Priority: ${task.priority}`}>
-            <span className={`prio prio-${priorityTone(task.priority)}`}>
-              {task.priority}
-            </span>
-          </ChipTooltip>
-        </div>
-      </div>
-      <div className="task-item-actions">
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
-            <button
-              className="action-icon task-item-actions-trigger"
-              type="button"
-              title="Task actions"
-              aria-label="Task actions"
-            >
-              <Icon path="M5 12h.01M12 12h.01M19 12h.01M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0m7 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0" />
-            </button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content className="task-group-menu-content task-item-actions-menu-content" sideOffset={8} align="end">
-              <DropdownMenu.Item className="task-group-menu-item" onSelect={() => onOpen(task.id)}>
-                <Icon path="M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6zm9 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" />
-                <span>Open task</span>
-              </DropdownMenu.Item>
-              <DropdownMenu.Separator className="task-group-menu-separator" />
-              <DropdownMenu.Item className="task-group-menu-item" onSelect={primaryAction.onSelect}>
-                <Icon path={primaryAction.iconPath} />
-                <span>{primaryAction.label}</span>
-              </DropdownMenu.Item>
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
       </div>
       </div>
     </Tooltip.Provider>
@@ -309,10 +379,29 @@ export function BottomTabs({
   onSelectTab: (tab: Tab) => void
 }) {
   const [portalTarget, setPortalTarget] = React.useState<HTMLElement | null>(null)
-  const tabValue = BOTTOM_TAB_ITEMS.some((item) => item.value === tab) ? tab : '__none__'
+  const [showDesktopExtras, setShowDesktopExtras] = React.useState(false)
+  const visibleTabItems = React.useMemo(
+    () => (showDesktopExtras ? [...BOTTOM_TAB_ITEMS, ...DESKTOP_EXTRA_TAB_ITEMS] : BOTTOM_TAB_ITEMS),
+    [showDesktopExtras]
+  )
+  const tabValue = visibleTabItems.some((item) => item.value === tab) ? tab : '__none__'
 
   React.useEffect(() => {
     setPortalTarget(document.body)
+  }, [])
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    const mediaQuery = window.matchMedia('(min-width: 1200px)')
+    const apply = () => setShowDesktopExtras(mediaQuery.matches)
+    apply()
+    const onChange = () => apply()
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', onChange)
+      return () => mediaQuery.removeEventListener('change', onChange)
+    }
+    mediaQuery.addListener(onChange)
+    return () => mediaQuery.removeListener(onChange)
   }, [])
 
   const nav = (
@@ -327,12 +416,18 @@ export function BottomTabs({
         }}
       >
         <Tabs.List className="bottom-tabs-list" aria-label="Primary sections">
-          {BOTTOM_TAB_ITEMS.map((item) => (
-            <Tabs.Trigger key={item.value} value={item.value} className="bottom-tab-trigger" title={item.label} aria-label={item.label}>
-              <Icon path={item.iconPath} />
-              <span className="tab-label">{item.shortLabel}</span>
-            </Tabs.Trigger>
-          ))}
+          {visibleTabItems.map((item, index) => {
+            const isFirstExtra = showDesktopExtras && index === BOTTOM_TAB_ITEMS.length
+            return (
+              <React.Fragment key={item.value}>
+                {isFirstExtra && <span className="bottom-tabs-divider" aria-hidden="true" />}
+                <Tabs.Trigger value={item.value} className="bottom-tab-trigger" title={item.label} aria-label={item.label}>
+                  <Icon path={item.iconPath} />
+                  <span className="tab-label">{item.shortLabel}</span>
+                </Tabs.Trigger>
+              </React.Fragment>
+            )
+          })}
         </Tabs.List>
       </Tabs.Root>
     </nav>

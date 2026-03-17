@@ -9,7 +9,10 @@ type SnapshotSourceKey =
   | 'soul'
   | 'rules'
   | 'skills'
+  | 'plugin_policy'
+  | 'plugin_required_checks'
   | 'knowledge_graph_context'
+  | 'knowledge_graph_summary'
   | 'knowledge_graph_fresh_snapshot'
   | 'knowledge_graph_evidence_non_chat'
   | 'knowledge_graph_evidence_chat'
@@ -59,12 +62,12 @@ type CodexResumeStateLike = {
   fallbackUsed?: boolean
 } | null
 
-type PromptMode = 'start' | 'start_fallback' | 'resume'
+type PromptMode = 'full' | 'full_fallback' | 'resume'
 
 const CHAT_HISTORY_WINDOW_SIZE = 12
 const CONTEXT_OCCUPANCY_TILE_COUNT = 480
 
-const START_PROMPT_SCAFFOLD_TEMPLATE = [
+const FULL_PROMPT_SCAFFOLD_TEMPLATE = [
   'You are an automation agent for task management.',
   'Use available MCP tools to satisfy the instruction.',
   'Return plain Markdown text for the end user.',
@@ -77,8 +80,12 @@ const START_PROMPT_SCAFFOLD_TEMPLATE = [
   'Workspace ID: {workspace_id}',
   'Project ID: {project_id}',
   'Current User ID: {actor_user_id}',
+  'Current User Project Role: {actor_project_role}',
   'Project Name: {project_name}',
   'Instruction: {instruction}',
+  'Task Branch: {task_branch}',
+  'Task Workdir: {task_workdir}',
+  'Repository Root: {repo_root}',
   'Status Change Trigger Context:',
   '{status_change_trigger_context}',
   '',
@@ -86,6 +93,8 @@ const START_PROMPT_SCAFFOLD_TEMPLATE = [
   'File: Soul.md (source: project.description)',
   'File: ProjectRules.md (source: project_rules)',
   'File: ProjectSkills.md (source: project_skills)',
+  'File: PluginPolicy.json (source: project_plugin_configs[*].compiled_policy_json)',
+  'File: PluginRequiredChecks.md (source: plugin_policy.required_checks)',
   'File: GraphContext.md (source: knowledge_graph)',
   'File: GraphEvidence.json (source: knowledge_graph.evidence)',
   'File: GraphSummary.md (source: knowledge_graph.summary)',
@@ -98,12 +107,13 @@ const START_PROMPT_SCAFFOLD_TEMPLATE = [
   '- Respond directly to the user with clear, actionable text.',
 ].join('\n')
 
-const START_PROMPT_GUIDANCE_TEMPLATE = [
+const FULL_PROMPT_GUIDANCE_TEMPLATE = [
   '- Treat Soul.md, ProjectRules.md, ProjectSkills.md, GraphContext.md, GraphEvidence.json, and GraphSummary.md as durable project-level context.',
   '- ProjectRules.md defines how you should behave within this project.',
   '- ProjectSkills.md captures reusable skills configured for this project.',
   '- Apply ProjectSkills with mode=enforced before advisory skills.',
   '- If no enforced skill applies, use advisory skills as guidance alongside project rules.',
+  '- Treat PluginPolicy.json + PluginRequiredChecks.md as explicit execution constraints for this project.',
   '- GraphContext.md captures resource relations and should guide dependency-aware decisions.',
   '- GraphEvidence.json is the canonical evidence source for grounded claims.',
   '- GraphSummary.md can be used as a concise overview, but validate against GraphEvidence.json before acting.',
@@ -189,7 +199,6 @@ function normalizeChatIndexMode(mode: unknown): 'OFF' | 'VECTOR_ONLY' | 'KG_AND_
 function normalizeChatAttachmentIngestionMode(mode: unknown): 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' {
   const normalized = String(mode || '').trim().toUpperCase()
   if (normalized === 'OFF' || normalized === 'FULL_TEXT') return normalized
-  if (normalized === 'FULL_TEXT_OCR') return 'FULL_TEXT'
   return 'METADATA_ONLY'
 }
 
@@ -222,16 +231,10 @@ function formatPercent(value: number): string {
   return `${value.toFixed(1)}%`
 }
 
-function resolvePromptMode(resumeState: CodexResumeStateLike): PromptMode {
-  if (resumeState?.succeeded) return 'resume'
-  if (resumeState?.attempted && !resumeState?.succeeded) return 'start_fallback'
-  return 'start'
-}
-
 function promptModeLabel(mode: PromptMode): string {
   if (mode === 'resume') return 'Resume'
-  if (mode === 'start_fallback') return 'Start (resume fallback)'
-  return 'Start'
+  if (mode === 'full_fallback') return 'Full (resume fallback)'
+  return 'Full'
 }
 
 function buildConversationHistoryText({
@@ -304,6 +307,7 @@ function renderRulesMarkdown(projectRules: ProjectRule[]): string {
   const lines: string[] = []
   for (const item of projectRules) {
     const title = String(item.title || '').trim()
+    if (title.toLowerCase() === 'plugin policy') continue
     const body = String(item.body || '').trim()
     if (!title && !body) continue
     const label = title || 'Untitled rule'
@@ -312,6 +316,61 @@ function renderRulesMarkdown(projectRules: ProjectRule[]): string {
   }
   if (lines.length === 0) return '_(no project rules)_'
   return lines.join('\n')
+}
+
+function renderPluginPolicyMarkdown(projectRules: ProjectRule[]): { pluginPolicy: string; pluginRequiredChecks: string } {
+  const pluginRule = projectRules.find((item) => String(item?.title || '').trim().toLowerCase() === 'plugin policy')
+  if (!pluginRule) {
+    return {
+      pluginPolicy: '_(Plugin Policy unavailable)_',
+      pluginRequiredChecks: '_(none)_',
+    }
+  }
+  const rawBody = String(pluginRule.body || '').trim()
+  if (!rawBody) {
+    return {
+      pluginPolicy: '_(Plugin Policy body is empty)_',
+      pluginRequiredChecks: '_(none)_',
+    }
+  }
+  let body = rawBody
+  const fencedMatch = rawBody.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/i)
+  if (fencedMatch?.[1]) body = String(fencedMatch[1]).trim()
+  try {
+    const parsed = JSON.parse(body) as unknown
+    if (!parsed || typeof parsed !== 'object') {
+      return {
+        pluginPolicy: rawBody,
+        pluginRequiredChecks: '_(required_checks unavailable)_',
+      }
+    }
+    const pluginPolicy = JSON.stringify(parsed, null, 2)
+    const requiredChecksRaw = (parsed as { required_checks?: unknown }).required_checks
+    if (!requiredChecksRaw || typeof requiredChecksRaw !== 'object' || Array.isArray(requiredChecksRaw)) {
+      return {
+        pluginPolicy,
+        pluginRequiredChecks: '_(required_checks unavailable)_',
+      }
+    }
+    const requiredChecks = requiredChecksRaw as Record<string, unknown>
+    const lines: string[] = []
+    for (const [scope, checks] of Object.entries(requiredChecks)) {
+      const scopeName = String(scope || '').trim() || 'unknown'
+      const checkNames = Array.isArray(checks)
+        ? checks.map((item) => String(item || '').trim()).filter(Boolean)
+        : []
+      lines.push(checkNames.length > 0 ? `- ${scopeName}: ${checkNames.join(', ')}` : `- ${scopeName}: _(none)_`)
+    }
+    return {
+      pluginPolicy,
+      pluginRequiredChecks: lines.join('\n').trim() || '_(none)_',
+    }
+  } catch {
+    return {
+      pluginPolicy: rawBody,
+      pluginRequiredChecks: '_(required_checks unavailable)_',
+    }
+  }
 }
 
 function renderSkillsMarkdown(projectSkills: ProjectSkill[]): string {
@@ -470,6 +529,7 @@ export function ProjectContextSnapshotPanel({
   const normalizedChatAttachmentMode = normalizeChatAttachmentIngestionMode(projectChatAttachmentIngestionMode)
   const rulesMarkdown = React.useMemo(() => renderRulesMarkdown(projectRules), [projectRules])
   const skillsMarkdown = React.useMemo(() => renderSkillsMarkdown(projectSkills), [projectSkills])
+  const pluginPolicyContext = React.useMemo(() => renderPluginPolicyMarkdown(projectRules), [projectRules])
   const graphSummaryMarkdown = React.useMemo(() => renderGraphSummaryMarkdown(contextPack?.summary), [contextPack?.summary])
   const graphContextMarkdown = String(contextPack?.markdown || '')
   const resumeFreshMemorySnapshot = React.useMemo(
@@ -491,14 +551,22 @@ export function ProjectContextSnapshotPanel({
     () => evidenceItems.filter((item) => !isChatEntityType(item.entity_type)),
     [evidenceItems]
   )
-  const activePromptMode = resolvePromptMode(codexChatResumeState ?? null)
+  const usagePromptMode = String(codexChatUsage?.prompt_mode || '').trim().toLowerCase()
+  const activePromptMode = React.useMemo<PromptMode>(() => {
+    if (usagePromptMode === 'resume') return 'resume'
+    const resumeFallbackUsed = Boolean(
+      codexChatResumeState?.attempted
+      && !codexChatResumeState?.succeeded
+    )
+    return resumeFallbackUsed ? 'full_fallback' : 'full'
+  }, [codexChatResumeState?.attempted, codexChatResumeState?.succeeded, usagePromptMode])
   const activePromptLabel = promptModeLabel(activePromptMode)
   const activePromptScaffoldTemplate = activePromptMode === 'resume'
     ? RESUME_PROMPT_SCAFFOLD_TEMPLATE
-    : START_PROMPT_SCAFFOLD_TEMPLATE
+    : FULL_PROMPT_SCAFFOLD_TEMPLATE
   const activePromptGuidanceTemplate = activePromptMode === 'resume'
     ? RESUME_PROMPT_GUIDANCE_TEMPLATE
-    : START_PROMPT_GUIDANCE_TEMPLATE
+    : FULL_PROMPT_GUIDANCE_TEMPLATE
   const observedInputTokens = typeof codexChatUsage?.input_tokens === 'number' && codexChatUsage.input_tokens >= 0
     ? Math.floor(codexChatUsage.input_tokens)
     : null
@@ -511,6 +579,29 @@ export function ProjectContextSnapshotPanel({
   const observedContextLimitTokens = typeof codexChatUsage?.context_limit_tokens === 'number' && codexChatUsage.context_limit_tokens > 0
     ? Math.floor(codexChatUsage.context_limit_tokens)
     : null
+  const promptSegmentChars = codexChatUsage?.prompt_segment_chars && typeof codexChatUsage.prompt_segment_chars === 'object'
+    ? codexChatUsage.prompt_segment_chars
+    : null
+  const promptSegmentMap = React.useMemo(() => {
+    const out = new Map<string, number>()
+    if (!promptSegmentChars) return out
+    for (const [rawKey, rawValue] of Object.entries(promptSegmentChars)) {
+      const key = String(rawKey || '').trim().toLowerCase()
+      const value = Number(rawValue)
+      if (!key || !Number.isFinite(value) || value < 0) continue
+      out.set(key, Math.floor(value))
+    }
+    return out
+  }, [promptSegmentChars])
+  const observedSegmentChars = React.useCallback(
+    (key: string): number | null => {
+      const normalizedKey = String(key || '').trim().toLowerCase()
+      if (!normalizedKey) return null
+      const value = promptSegmentMap.get(normalizedKey)
+      return Number.isFinite(value) ? Number(value) : null
+    },
+    [promptSegmentMap]
+  )
   const graphEvidenceJsonChat = chatEvidenceItems.length > 0 ? JSON.stringify(chatEvidenceItems) : ''
   const graphEvidenceJsonNonChat = nonChatEvidenceItems.length > 0 ? JSON.stringify(nonChatEvidenceItems) : ''
   const chatHistoryText = React.useMemo(() => {
@@ -545,7 +636,7 @@ export function ProjectContextSnapshotPanel({
         group: 'project',
         label: 'Project description (Soul.md)',
         color: '#0f766e',
-        chars: activePromptMode === 'resume' ? 0 : projectDescription.length,
+        chars: activePromptMode === 'resume' ? 0 : (observedSegmentChars('soul') ?? projectDescription.length),
         lines: activePromptMode === 'resume' ? 0 : countLines(projectDescription),
       },
       {
@@ -553,7 +644,7 @@ export function ProjectContextSnapshotPanel({
         group: 'project',
         label: 'Project rules (ProjectRules.md)',
         color: '#ea580c',
-        chars: activePromptMode === 'resume' ? 0 : rulesMarkdown.length,
+        chars: activePromptMode === 'resume' ? 0 : (observedSegmentChars('project_rules') ?? rulesMarkdown.length),
         lines: activePromptMode === 'resume' ? 0 : countLines(rulesMarkdown),
       },
       {
@@ -561,23 +652,49 @@ export function ProjectContextSnapshotPanel({
         group: 'project',
         label: 'Project skills (ProjectSkills.md)',
         color: '#7c3aed',
-        chars: activePromptMode === 'resume' ? 0 : skillsMarkdown.length,
+        chars: activePromptMode === 'resume' ? 0 : (observedSegmentChars('project_skills') ?? skillsMarkdown.length),
         lines: activePromptMode === 'resume' ? 0 : countLines(skillsMarkdown),
+      },
+      {
+        key: 'plugin_policy',
+        group: 'project',
+        label: 'Plugin policy (PluginPolicy.json)',
+        color: '#8b5e34',
+        chars: observedSegmentChars('plugin_policy') ?? pluginPolicyContext.pluginPolicy.length,
+        lines: countLines(pluginPolicyContext.pluginPolicy),
+      },
+      {
+        key: 'plugin_required_checks',
+        group: 'project',
+        label: 'Plugin required checks (PluginRequiredChecks.md)',
+        color: '#a16207',
+        chars:
+          observedSegmentChars('plugin_required_checks') ??
+          pluginPolicyContext.pluginRequiredChecks.length,
+        lines: countLines(pluginPolicyContext.pluginRequiredChecks),
       },
       {
         key: 'knowledge_graph_context',
         group: 'knowledge_graph',
-        label: 'Knowledge graph context + summary',
+        label: 'Knowledge graph context (GraphContext.md)',
         color: '#2563eb',
-        chars: activePromptMode === 'resume' ? 0 : graphContextMarkdown.length + graphSummaryMarkdown.length,
-        lines: activePromptMode === 'resume' ? 0 : countLines(graphContextMarkdown) + countLines(graphSummaryMarkdown),
+        chars: activePromptMode === 'resume' ? 0 : (observedSegmentChars('graph_context') ?? graphContextMarkdown.length),
+        lines: activePromptMode === 'resume' ? 0 : countLines(graphContextMarkdown),
+      },
+      {
+        key: 'knowledge_graph_summary',
+        group: 'knowledge_graph',
+        label: 'Knowledge graph summary (GraphSummary.md)',
+        color: '#14b8a6',
+        chars: activePromptMode === 'resume' ? 0 : (observedSegmentChars('graph_summary') ?? graphSummaryMarkdown.length),
+        lines: activePromptMode === 'resume' ? 0 : countLines(graphSummaryMarkdown),
       },
       {
         key: 'knowledge_graph_fresh_snapshot',
         group: 'knowledge_graph',
         label: 'Fresh cross-session memory snapshot',
         color: '#2563eb',
-        chars: activePromptMode === 'resume' ? resumeFreshMemorySnapshot.length : 0,
+        chars: activePromptMode === 'resume' ? (observedSegmentChars('fresh_memory_snapshot') ?? resumeFreshMemorySnapshot.length) : 0,
         lines: activePromptMode === 'resume' ? countLines(resumeFreshMemorySnapshot) : 0,
       },
       {
@@ -585,7 +702,7 @@ export function ProjectContextSnapshotPanel({
         group: 'knowledge_graph',
         label: 'Indexed project corpus (non-chat evidence)',
         color: '#0ea5e9',
-        chars: activePromptMode === 'resume' ? 0 : graphEvidenceJsonNonChat.length,
+        chars: activePromptMode === 'resume' ? 0 : (observedSegmentChars('graph_evidence') ?? graphEvidenceJsonNonChat.length),
         lines: activePromptMode === 'resume' ? 0 : countLines(graphEvidenceJsonNonChat),
       },
       {
@@ -700,8 +817,8 @@ export function ProjectContextSnapshotPanel({
       sourceBase
         .filter((section) => section.group === 'hardcoded')
         .reduce((sum, section) => sum + section.chars, 0)
-    const startHardcodedChars = START_PROMPT_SCAFFOLD_TEMPLATE.length + START_PROMPT_GUIDANCE_TEMPLATE.length
-    const coldStartChars = Math.max(0, totalChars - hardcodedChars + startHardcodedChars)
+    const fullHardcodedChars = FULL_PROMPT_SCAFFOLD_TEMPLATE.length + FULL_PROMPT_GUIDANCE_TEMPLATE.length
+    const coldStartChars = Math.max(0, totalChars - hardcodedChars + fullHardcodedChars)
     const coldStartTokens = estimateTokenCount(coldStartChars)
     const coldStartWindowUsedPercent = contextWindowTokens > 0 ? (coldStartTokens / contextWindowTokens) * 100 : 0
     const observedWindowUsedPercent = contextWindowTokens > 0 && observedInputTokens !== null
@@ -754,10 +871,13 @@ export function ProjectContextSnapshotPanel({
     counts.specifications,
     counts.tasks,
     evidenceItems,
+    pluginPolicyContext.pluginPolicy,
+    pluginPolicyContext.pluginRequiredChecks,
     graphContextMarkdown,
     graphEvidenceJsonChat,
     graphEvidenceJsonNonChat,
     graphSummaryMarkdown,
+    observedSegmentChars,
     projectDescription,
     normalizedChatAttachmentMode,
     normalizedChatIndexMode,
@@ -960,10 +1080,10 @@ export function ProjectContextSnapshotPanel({
             </div>
             <div className="context-snapshot-footnotes">
               <div className="meta">
-                Uses the active prompt profile for this session ({snapshot.promptModeLabel}). Conversation history is only included for start-profile turns.
+                Uses the active prompt profile for this session ({snapshot.promptModeLabel}). Conversation history is only included for full-profile turns.
               </div>
               <div className="meta">
-                Cold-start estimate keeps the same project/runtime payload but replaces hardcoded prompt blocks with the start profile.
+                Cold-start estimate keeps the same project/runtime payload but replaces hardcoded prompt blocks with the full profile.
               </div>
               <div className="meta">
                 Indexed chat corpus remains available when active session is empty, as long as project chat indexing policy is enabled.

@@ -3,8 +3,11 @@ import { AppHeader } from './AppHeader'
 import { AppNotices } from './AppNotices'
 import { AppPrimaryPanels } from './AppPrimaryPanels'
 import { AppOverlays } from './AppOverlays'
+import { OnboardingTour } from './OnboardingTour'
 
 export function AppContent({ state }: { state: any }) {
+  const tourControlsRef = React.useRef<{ startQuick: () => void; startAdvanced: () => void } | null>(null)
+
   const handleHeaderProjectSelect = React.useCallback((projectId: string) => {
     const normalizedProjectId = String(projectId || '').trim()
     if (!normalizedProjectId) return
@@ -15,12 +18,42 @@ export function AppContent({ state }: { state: any }) {
     const scrollX = shouldStabilizeScroll ? window.scrollX : 0
 
     if (state.tab === 'projects' && state.showProjectEditForm) {
-      if (state.projectIsDirty && !state.confirmDiscardChanges()) return
+      if (state.projectIsDirty || state.projectEditorHasUnsavedChanges) {
+        state.requestDiscardChanges?.('You have unsaved project changes. Discard them?', () => {
+          state.setShowProjectCreateForm(false)
+          state.setShowProjectEditForm(false)
+          state.setProjectEditorHasUnsavedChanges?.(false)
+          state.setSelectedProjectId(normalizedProjectId)
+          if (shouldStabilizeScroll) {
+            window.requestAnimationFrame(() => {
+              window.requestAnimationFrame(() => {
+                window.scrollTo({ top: scrollY, left: scrollX, behavior: 'auto' })
+              })
+            })
+          }
+        })
+        return
+      }
       state.setShowProjectCreateForm(false)
       state.setShowProjectEditForm(false)
     }
     if (state.tab === 'notes' && state.selectedNoteId) {
-      if (state.noteIsDirty && !state.confirmDiscardChanges()) return
+      if (state.noteIsDirty) {
+        state.requestDiscardChanges?.('You have unsaved note changes. Discard them?', () => {
+          state.setSelectedNoteId(null)
+          state.setShowTagPicker(false)
+          state.setTagPickerQuery('')
+          state.setSelectedProjectId(normalizedProjectId)
+          if (shouldStabilizeScroll) {
+            window.requestAnimationFrame(() => {
+              window.requestAnimationFrame(() => {
+                window.scrollTo({ top: scrollY, left: scrollX, behavior: 'auto' })
+              })
+            })
+          }
+        })
+        return
+      }
       state.setSelectedNoteId(null)
       state.setShowTagPicker(false)
       state.setTagPickerQuery('')
@@ -55,6 +88,7 @@ export function AppContent({ state }: { state: any }) {
     <div className="page">
       <AppHeader
         bootstrapData={state.bootstrap.data}
+        license={state.licenseStatus?.data?.license ?? null}
         tab={state.tab}
         setTab={state.setTab}
         theme={state.theme}
@@ -69,17 +103,46 @@ export function AppContent({ state }: { state: any }) {
         setSelectedProjectId={handleHeaderProjectSelect}
         showNotificationsPanel={state.showNotificationsPanel}
         setShowNotificationsPanel={state.setShowNotificationsPanel}
-        notifications={state.notifications.data ?? []}
+        notifications={state.notificationsForHeader ?? state.notifications.data ?? []}
         unreadCount={state.unreadCount}
-        onMarkRead={(notificationId) => state.markReadMutation.mutate(notificationId)}
+        onMarkRead={(notificationId) =>
+          typeof state.handleMarkNotificationRead === 'function'
+            ? state.handleMarkNotificationRead(notificationId)
+            : state.markReadMutation.mutate(notificationId)}
+        onMarkUnread={(notificationId) =>
+          typeof state.handleMarkNotificationUnread === 'function'
+            ? state.handleMarkNotificationUnread(notificationId)
+            : state.markUnreadMutation.mutate(notificationId)}
         onMarkAllRead={() => state.markAllReadMutation.mutate()}
         isMarkAllReadPending={Boolean(state.markAllReadMutation?.isPending)}
+        onNotificationAction={(notificationId, action) => {
+          if (typeof state.handleNotificationAction === 'function') {
+            state.handleNotificationAction(notificationId, action)
+          }
+        }}
         onOpenTask={state.openTask}
         onOpenNote={state.openNote}
         onOpenSpecification={state.openSpecification}
         onOpenProject={(projectId) => {
           state.setSelectedProjectId(projectId)
           state.setTab('projects')
+        }}
+        onStartQuickTour={() => tourControlsRef.current?.startQuick()}
+        onStartAdvancedTour={() => tourControlsRef.current?.startAdvanced()}
+      />
+
+      <OnboardingTour
+        userId={state.userId}
+        workspaceId={state.workspaceId}
+        tourPreferencesLoaded={Boolean(state.bootstrap.data?.current_user)}
+        quickTourCompleted={state.bootstrap.data?.current_user?.onboarding_quick_tour_completed === true}
+        advancedTourCompleted={state.bootstrap.data?.current_user?.onboarding_advanced_tour_completed === true}
+        setTab={state.setTab}
+        setShowQuickAdd={state.setShowQuickAdd}
+        setShowCodexChat={state.setShowCodexChat}
+        saveTourProgress={state.saveOnboardingTourProgress}
+        registerControls={(controls) => {
+          tourControlsRef.current = controls
         }}
       />
 

@@ -51,10 +51,12 @@ def test_sync_license_once_updates_local_entitlement(tmp_path: Path, monkeypatch
     import shared.models as shared_models
     import shared.licensing as shared_licensing
     import shared.settings as shared_settings
+    import features.licensing.read_models as licensing_read_models
 
     reload(shared_settings)
     reload(shared_models)
     reload(shared_licensing)
+    reload(licensing_read_models)
     shared_licensing.reset_license_installation_id_cache()
 
     import main
@@ -142,6 +144,112 @@ def test_sync_license_once_updates_local_entitlement(tmp_path: Path, monkeypatch
         ).scalars().first()
         assert validation is not None
         assert validation.result == "active"
+
+
+def test_sync_license_once_persists_control_plane_notifications(tmp_path: Path, monkeypatch):
+    db_file = tmp_path / "notifications.db"
+    os.environ["DATABASE_URL"] = f"sqlite:///{db_file}"
+    os.environ["ATTACHMENTS_DIR"] = str(tmp_path / "uploads")
+    os.environ.pop("DB_PATH", None)
+    os.environ["EVENTSTORE_URI"] = ""
+    os.environ["LICENSE_ENFORCEMENT_ENABLED"] = "true"
+    os.environ["LICENSE_INSTALLATION_ID"] = "sync-notifications-installation"
+    os.environ["LICENSE_SERVER_TOKEN"] = "dev-license-token"
+    os.environ["LICENSE_TRIAL_DAYS"] = "7"
+    os.environ.pop("LICENSE_PUBLIC_KEY", None)
+
+    import shared.models as shared_models
+    import shared.licensing as shared_licensing
+    import shared.settings as shared_settings
+    import features.licensing.read_models as licensing_read_models
+
+    reload(shared_settings)
+    reload(shared_models)
+    reload(shared_licensing)
+    reload(licensing_read_models)
+    shared_licensing.reset_license_installation_id_cache()
+
+    import main
+
+    main = reload(main)
+    main.bootstrap_data()
+
+    from features.licensing import sync
+
+    sync = reload(sync)
+
+    class _MockResponse:
+        def __init__(self, payload: dict):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class _MockClient:
+        def __init__(self, timeout: float):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url: str, headers: dict, json: dict):
+            if url.endswith("/v1/installations/register"):
+                return _MockResponse({"ok": True})
+            if url.endswith("/v1/installations/heartbeat"):
+                return _MockResponse(
+                    {
+                        "ok": True,
+                        "notifications": [
+                            {
+                                "id": "cpn-test-notice",
+                                "message": "ConstructOS update is available.",
+                                "notification_type": "AppUpdateAvailable",
+                                "severity": "info",
+                                "dedupe_key": "cpn-test-notice",
+                                "payload": {"action": "auto_update_app_images"},
+                            }
+                        ],
+                        "entitlement": {
+                            "status": "active",
+                            "plan_code": "monthly",
+                            "valid_from": "2026-02-21T00:00:00Z",
+                            "valid_until": "2026-03-21T00:00:00Z",
+                            "trial_ends_at": "2026-02-28T00:00:00Z",
+                            "token_expires_at": "2026-02-21T01:00:00Z",
+                            "metadata": {"billing_provider": "external-billing-app"},
+                        },
+                    }
+                )
+            raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(sync.httpx, "Client", _MockClient)
+
+    ok = sync.sync_license_once()
+    assert ok is True
+
+    from shared.models import LicenseInstallation, Notification, SessionLocal
+
+    with SessionLocal() as db:
+        installation = db.execute(
+            select(LicenseInstallation).where(LicenseInstallation.installation_id == "sync-notifications-installation")
+        ).scalar_one()
+        metadata = json.loads(installation.metadata_json or "{}")
+        assert isinstance(metadata.get("control_plane_notifications"), list)
+        assert metadata["control_plane_notifications"][0]["id"] == "cpn-test-notice"
+        notification = db.execute(
+            select(Notification)
+            .where(Notification.dedupe_key == "license-notification:sync-notifications-installation:cpn-test-notice")
+            .order_by(Notification.created_at.desc())
+        ).scalars().first()
+        assert notification is not None
+        assert notification.notification_type == "AppUpdateAvailable"
+        assert notification.is_read is False
 
 
 def test_activate_with_code_once_sends_operating_system(tmp_path: Path, monkeypatch):

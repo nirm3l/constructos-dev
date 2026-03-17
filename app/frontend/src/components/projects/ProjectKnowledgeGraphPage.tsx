@@ -1,7 +1,14 @@
 import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { searchProjectKnowledge } from '../../api'
-import type { GraphContextPack, GraphProjectOverview, GraphProjectSubgraph, ProjectKnowledgeSearchResult } from '../../types'
+import type {
+  EventStormingOverview,
+  EventStormingSubgraph,
+  GraphContextPack,
+  GraphProjectOverview,
+  GraphProjectSubgraph,
+  ProjectKnowledgeSearchResult,
+} from '../../types'
 import { ProjectKnowledgeGraphPanel } from './ProjectKnowledgeGraphPanel'
 
 type QueryLike<T> = {
@@ -22,6 +29,8 @@ type ProjectKnowledgeGraphPageProps = {
   overviewQuery: QueryLike<GraphProjectOverview>
   contextPackQuery: QueryLike<GraphContextPack>
   subgraphQuery: QueryLike<GraphProjectSubgraph>
+  eventStormingOverviewQuery: QueryLike<EventStormingOverview>
+  eventStormingSubgraphQuery: QueryLike<EventStormingSubgraph>
   onCreateTaskFromSummary: (payload: { title: string; description: string }) => Promise<void> | void
   onCreateNoteFromSummary: (payload: { title: string; body: string }) => Promise<void> | void
   onLinkFocusTaskToSpecification: (taskId: string, specificationId: string) => Promise<void> | void
@@ -36,6 +45,8 @@ export function ProjectKnowledgeGraphPage({
   overviewQuery,
   contextPackQuery,
   subgraphQuery,
+  eventStormingOverviewQuery,
+  eventStormingSubgraphQuery,
   onCreateTaskFromSummary,
   onCreateNoteFromSummary,
   onLinkFocusTaskToSpecification,
@@ -68,12 +79,16 @@ export function ProjectKnowledgeGraphPage({
   return (
     <section className="card">
       <ProjectKnowledgeGraphPanel
+        userId={userId}
+        projectId={selectedProjectId}
         projectName={selectedProjectName || 'Selected project'}
         projectChatIndexMode={selectedProjectChatIndexMode}
         projectChatAttachmentIngestionMode={selectedProjectChatAttachmentIngestionMode}
         overviewQuery={overviewQuery}
         contextPackQuery={contextPackQuery}
         subgraphQuery={subgraphQuery}
+        eventStormingOverviewQuery={eventStormingOverviewQuery}
+        eventStormingSubgraphQuery={eventStormingSubgraphQuery}
         knowledgeSearchQuery={knowledgeSearchQuery}
         setKnowledgeSearchQuery={setKnowledgeSearchQuery}
         knowledgeSearchResultsQuery={knowledgeSearchResultsQuery}

@@ -22,6 +22,7 @@ class TaskAggregate(Aggregate):
         priority: str,
         due_date: str | None,
         assignee_id: str | None,
+        assigned_agent_code: str | None,
         labels: list[str],
         subtasks: list[dict[str, Any]],
         attachments: list[dict[str, Any]],
@@ -31,6 +32,8 @@ class TaskAggregate(Aggregate):
         order_index: int,
         instruction: str | None = None,
         execution_triggers: list[dict[str, Any]] | None = None,
+        task_relationships: list[dict[str, Any]] | None = None,
+        delivery_mode: str | None = None,
         task_type: str = "manual",
         scheduled_instruction: str | None = None,
         scheduled_at_utc: str | None = None,
@@ -48,6 +51,7 @@ class TaskAggregate(Aggregate):
         self.priority = priority
         self.due_date = due_date
         self.assignee_id = assignee_id
+        self.assigned_agent_code = assigned_agent_code
         self.labels = labels
         self.subtasks = subtasks
         self.attachments = attachments
@@ -55,6 +59,8 @@ class TaskAggregate(Aggregate):
         self.attachment_refs = attachment_refs
         self.instruction = instruction
         self.execution_triggers = execution_triggers or []
+        self.task_relationships = task_relationships or []
+        self.delivery_mode = delivery_mode
         self.recurring_rule = recurring_rule
         self.task_type = task_type
         self.scheduled_instruction = scheduled_instruction
@@ -75,10 +81,18 @@ class TaskAggregate(Aggregate):
         self.last_automation_error = None
         self.last_requested_instruction = None
         self.last_requested_source = None
+        self.last_requested_chat_session_id = None
         self.last_requested_trigger_task_id = None
         self.last_requested_from_status = None
         self.last_requested_to_status = None
         self.last_requested_triggered_at = None
+        self.last_requested_execution_intent = None
+        self.last_requested_execution_kickoff_intent = None
+        self.last_requested_project_creation_intent = None
+        self.last_requested_workflow_scope = None
+        self.last_requested_execution_mode = None
+        self.last_requested_task_completion_requested = None
+        self.last_requested_classifier_reason = None
 
     @event("Updated")
     def update(self, changes: dict[str, Any]) -> None:
@@ -92,12 +106,12 @@ class TaskAggregate(Aggregate):
             self.status = status
 
     @event("Completed")
-    def complete(self, completed_at: str) -> None:
-        self.status = "Done"
+    def complete(self, completed_at: str, status: str = "Completed") -> None:
+        self.status = status
         self.completed_at = completed_at
 
     @event("Reopened")
-    def reopen(self, status: str = "To do") -> None:
+    def reopen(self, status: str = "To Do") -> None:
         self.status = status
         self.completed_at = None
 
@@ -136,19 +150,37 @@ class TaskAggregate(Aggregate):
         requested_at: str,
         instruction: str | None = None,
         source: str | None = None,
+        source_task_id: str | None = None,
+        chat_session_id: str | None = None,
         trigger_task_id: str | None = None,
         from_status: str | None = None,
         to_status: str | None = None,
         triggered_at: str | None = None,
+        execution_intent: bool | None = None,
+        execution_kickoff_intent: bool | None = None,
+        project_creation_intent: bool | None = None,
+        workflow_scope: str | None = None,
+        execution_mode: str | None = None,
+        task_completion_requested: bool | None = None,
+        classifier_reason: str | None = None,
     ) -> None:
         self.automation_state = "queued"
         self.automation_requested_at = requested_at
         self.last_requested_instruction = instruction
         self.last_requested_source = source
+        self.last_requested_source_task_id = source_task_id
+        self.last_requested_chat_session_id = chat_session_id
         self.last_requested_trigger_task_id = trigger_task_id
         self.last_requested_from_status = from_status
         self.last_requested_to_status = to_status
         self.last_requested_triggered_at = triggered_at
+        self.last_requested_execution_intent = execution_intent
+        self.last_requested_execution_kickoff_intent = execution_kickoff_intent
+        self.last_requested_project_creation_intent = project_creation_intent
+        self.last_requested_workflow_scope = workflow_scope
+        self.last_requested_execution_mode = execution_mode
+        self.last_requested_task_completion_requested = task_completion_requested
+        self.last_requested_classifier_reason = classifier_reason
 
     @event("AutomationStarted")
     def mark_automation_started(self, started_at: str) -> None:

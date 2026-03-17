@@ -90,3 +90,14 @@ def delete_project_rule(
 ):
     gateway = build_ui_gateway(actor_user_id=user.id)
     return gateway.delete_project_rule(rule_id=rule_id, command_id=command_id)
+
+
+@router.delete("/api/project-rules/{rule_id}")
+def delete_project_rule_compat(
+    rule_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    command_id: str | None = Depends(get_command_id),
+):
+    gateway = build_ui_gateway(actor_user_id=user.id)
+    return gateway.delete_project_rule(rule_id=rule_id, command_id=command_id)

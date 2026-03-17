@@ -2,12 +2,14 @@ import type { AttachmentRef, ExternalRef } from '../types'
 
 const DEFAULT_USER_ID = '00000000-0000-0000-0000-000000000001'
 
-export type Tab = 'inbox' | 'tasks' | 'notes' | 'specifications' | 'projects' | 'knowledge-graph' | 'search' | 'profile' | 'admin'
+export type Tab = 'inbox' | 'tasks' | 'notes' | 'specifications' | 'projects' | 'task-flow' | 'knowledge-graph' | 'search' | 'settings'
 
-export const TAB_ORDER: Tab[] = ['inbox', 'tasks', 'notes', 'specifications', 'projects', 'knowledge-graph', 'search', 'profile', 'admin']
+export const TAB_ORDER: Tab[] = ['inbox', 'tasks', 'notes', 'specifications', 'projects', 'task-flow', 'knowledge-graph', 'search', 'settings']
 
 const LEGACY_TAB_REDIRECTS: Record<string, Tab> = {
-  admin: 'profile',
+  admin: 'settings',
+  profile: 'settings',
+  workspace: 'settings',
   today: 'inbox',
 }
 
@@ -106,7 +108,7 @@ export function formatActivitySummary(
     case 'TaskReopened':
       return {
         title: `${actorName} reopened the task`,
-        detail: `Status: ${String(details.status ?? 'To do')}`,
+        detail: `Status: ${String(details.status ?? 'To Do')}`,
       }
     case 'TaskArchived':
       return { title: `${actorName} archived the task`, detail: 'Task moved to archive' }
@@ -199,9 +201,11 @@ export function parseCommaTags(raw: string): string[] {
   return out
 }
 
-export const DEFAULT_PROJECT_STATUSES: string[] = ['To do', 'In progress', 'Done']
+export const DEFAULT_PROJECT_STATUSES: string[] = ['To Do', 'In Progress', 'Done']
 export const PROJECT_EVIDENCE_TOP_K_MIN = 1
 export const PROJECT_EVIDENCE_TOP_K_MAX = 40
+export const PROJECT_AUTOMATION_MAX_PARALLEL_MIN = 1
+export const PROJECT_AUTOMATION_MAX_PARALLEL_MAX = 50
 
 export function parseProjectStatusesText(raw: string): string[] {
   const seen = new Set<string>()
@@ -232,6 +236,25 @@ export function parseProjectEvidenceTopKInput(raw: string): number | null {
   const value = Number(text)
   if (!Number.isInteger(value) || value < PROJECT_EVIDENCE_TOP_K_MIN || value > PROJECT_EVIDENCE_TOP_K_MAX) {
     throw new Error(`Evidence top K must be between ${PROJECT_EVIDENCE_TOP_K_MIN} and ${PROJECT_EVIDENCE_TOP_K_MAX}.`)
+  }
+  return value
+}
+
+export function parseProjectAutomationMaxParallelInput(raw: string): number {
+  const text = String(raw || '').trim()
+  if (!text) return 4
+  if (!/^\d+$/.test(text)) {
+    throw new Error('Project automation max parallel tasks must be a whole number.')
+  }
+  const value = Number(text)
+  if (
+    !Number.isInteger(value) ||
+    value < PROJECT_AUTOMATION_MAX_PARALLEL_MIN ||
+    value > PROJECT_AUTOMATION_MAX_PARALLEL_MAX
+  ) {
+    throw new Error(
+      `Project automation max parallel tasks must be between ${PROJECT_AUTOMATION_MAX_PARALLEL_MIN} and ${PROJECT_AUTOMATION_MAX_PARALLEL_MAX}.`
+    )
   }
   return value
 }

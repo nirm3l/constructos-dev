@@ -1,0 +1,154 @@
+- Team Mode intent must come from structured classifier output, not prompt keyword matching.
+- Prefer `setup_project_orchestration(...)` as the primary staged setup tool when creating/configuring project setup for Team Mode/Git Delivery/Docker Compose in one flow.
+- Do not set `expected_event_storming_enabled` (and do not toggle project `event_storming_enabled`) unless the user explicitly requested a target value.
+- If required setup inputs are complete, call `setup_project_orchestration(...)` directly instead of long per-step sequences.
+- If instruction is execution-oriented (for example `start implementation`, `begin implementation`, `finish implementation`, `execute tasks`) and Team Mode is enabled:
+  - treat chat request as **dispatch-only kickoff**,
+  - queue Team Mode automation runs and stop,
+  - do NOT directly implement code, run tests, or perform deploy steps from the chat turn itself.
+- For execution-oriented instructions, setup-only/status-only updates are not enough; kickoff must queue runnable Team Mode tasks.
+- Kickoff dispatch policy is deterministic Lead-first with bounded parallelism:
+  - queue runnable implementation tasks first,
+  - kickoff must not depend on a dedicated Lead task,
+  - QA automation must be queued only by explicit Lead handoff/events after deploy readiness,
+  - if kickoff completes and implementation tasks remain `idle`, do not issue ad hoc manual retries; report kickoff as incomplete and surface the persisted blocker instead,
+  - never exceed current project kickoff parallel capacity after accounting for already queued/running automation.
+- Never call `run_task_with_codex` for the same task that is currently executing this instruction; do not create self-queue loops.
+- Execution completion contract:
+  1) implement planned scope for active Dev tasks,
+  2) run tests/validation and include concrete results,
+  3) update task statuses from real outcomes,
+  4) provide artifact evidence per task:
+     - internal artifacts must be stored as linked task notes,
+     - `external_refs` should use real external URLs when available; if no remote exists, include a commit id reference (for example `commit:<sha>`), never internal `?tab=...` links.
+     - if `git remote -v` is empty, do not block on push/PR; treat local commit+task-branch evidence as sufficient for Developer completion.
+     - each Developer task must carry unique commit evidence (do not reuse one SHA across multiple Developer tasks).
+     - each Developer task must also include explicit task-branch evidence using `task/<task-id-prefix>-...` (in note/comment/external ref).
+     - each Developer task must include at least one execution artifact in `execution_outcome_contract.artifacts` (objects with non-empty `kind` + `ref`).
+     - do not commit known-broken implementation; if validation fails, keep task blocked and record failure evidence instead of finalizing.
+     - For git-delivery gating, evidence must be present in `external_refs`; summary/comment text alone does not satisfy checks.
+     - QA evidence must include explicit outcome markers (pass/fail) and at least one verifiable artifact signal.
+     - when a Lead deploy task exists, include deployment execution evidence (command + health/status result) before claiming delivery complete.
+     - never mark a QA or Lead task `Completed` while its automation state is still `queued` or `running`.
+- Git Delivery test policy is deterministic:
+  - Read `git_delivery.execution.require_dev_tests` from Plugin Policy.
+  - If `true`, run deterministic tests and return `execution_outcome_contract.tests_run=true` and `tests_passed=true` only when they really passed.
+  - If `false`, tests are optional; do not fail completion only because tests were not run.
+- Return `BLOCKED` only when execution cannot continue without external intervention or a concrete missing prerequisite that is not currently being executed.
+- If kickoff or another workflow phase is actively running and the next handoff has not persisted yet, report that as `In Progress`, not `BLOCKED`.
+- If Team Mode is requested, prefer this setup flow:
+  1) `setup_project_orchestration(...)` as primary staged setup.
+  2) Do not use `ensure_team_mode_project(...)`; it is deprecated and kept only for backward compatibility.
+  3) Use `get_project_plugin_config` -> `validate_project_plugin_config` -> `apply_project_plugin_config` for explicit user overrides after setup.
+  4) Before final response, run `verify_team_mode_workflow` and `verify_delivery_workflow` if orchestration did not already return verification.
+- Honor explicit user constraints first: exact task count, required artifacts (specifications/notes/tasks), and explicitly requested project flags.
+- If the user requests an exact task count, keep that exact count.
+- If a required project flag is not satisfied at create time, call `update_project` immediately and verify the final project state before reporting success.
+- Team Mode defaults (unless user overrides): statuses `To Do, In Progress, In Review, Awaiting Decision, Blocked, Completed`; `review_policy.require_code_review=false`; kickoff queues runnable implementation tasks first; Lead acts as a project-level controller; QA runs on the same task only after explicit Lead handoff.
+- Do not invent recurring Team Lead oversight tasks as normal project work items.
+- If creating a `scheduled_instruction` task, include `scheduled_at_utc` in the initial create call.
+- Initial Team Mode implementation tasks must be explicit (unless user overrides): use runnable implementation states such as `To Do` or `In Progress`. Do not create separate Lead-only or QA-only tasks unless the user explicitly requests them outside the normal Team Mode model.
+- Multi-task planning rule for Team Mode implementation work:
+  - Before creating tasks, reason about execution order and isolation.
+  - Prefer vertical slices: split work into parts that can each move through Developer -> Lead -> QA and be validated as independently as the project allows.
+  - If deploy execution is part of the requested outcome and Docker Compose deploy is enabled for the project, prefer a first deployable slice that includes the minimal runtime/deploy scaffolding required for Lead to produce a real deployment later (for example app entrypoint, Dockerfile or runtime signal, compose-compatible structure, health endpoint when applicable).
+  - First maximize independence: split work into parts that can be implemented and tested in parallel with minimal overlap.
+  - Use `delivery_mode="deployable_slice"` by default for Team Mode implementation tasks.
+  - Only use `delivery_mode="merged_increment"` when a task is intentionally non-deployable on its own but still needs task-branch implementation and merge evidence.
+  - If a task is intentionally non-deployable, make that explicit in scope and set `delivery_mode="merged_increment"` instead of silently relying on Lead to guess around missing deploy prerequisites.
+  - If a task cannot start safely on an empty repo or before another task lands, encode that explicitly with `task_relationships` using `depends_on`.
+  - When a downstream task only needs upstream code integrated, prefer dependency milestone `statuses=["merged"]` instead of waiting for upstream `Completed`.
+  - Use `statuses=["deployed"]` only when downstream work truly requires the upstream task to have reached Lead deploy readiness first.
+  - Set `priority` deliberately:
+    - `High` for foundation/blocker work that unlocks other tasks,
+    - `Med` for important parallel work,
+    - `Low` for polish/follow-up work that should wait behind foundations when capacity is limited.
+  - Do not leave all implementation tasks at the same priority when the work clearly has foundations and downstream tasks.
+  - Kickoff/dispatch will respect `depends_on`, so only create dependency edges when they are truly needed; otherwise keep tasks independent.
+- Staged mutation rule for Team Mode task setup:
+  - create baseline tasks with explicit statuses first,
+  - if structural dependencies are needed, create all intended tasks first, capture their real task ids, then patch downstream tasks with `task_relationships`,
+  - if you intentionally planned dependency order, kickoff is forbidden until the saved tasks or task graph show those structural edges,
+  - if priorities differ because some tasks unlock others, do not leave `task_relationships=[]` unless you are explicitly treating those tasks as independent,
+  - never claim dependency edges were added until a read-back confirms the stored `task_relationships` on the affected tasks,
+  - if a task is intentionally not deployable on its own, persist `delivery_mode="merged_increment"` on that task before kickoff and do not describe it as a deployable slice,
+  - if dependency persistence fails, report that failure explicitly and do not describe the tasks as dependency-wired,
+  - add `execution_triggers` only for runtime behavior that is truly needed (for example recurring Lead oversight or explicitly requested status-driven automation),
+  - when patching non-manual `execution_triggers`, include/update non-empty `instruction` in the same patch call,
+  - run verification only after topology and any required runtime triggers are persisted.
+- Task-count guardrail:
+  - if the user requests an exact number of Team Mode tasks under one specification, try to keep that exact count unless doing so would make the work decomposition misleading or unsafe
+  - decompose the requested work into the requested count while maximizing independence and minimizing overlap
+  - do not create dedicated Lead-only or QA-only tasks just to satisfy Team Mode
+  - each implementation task must later move through the shared lifecycle on the same task: Developer work, Lead review/deploy coordination, then QA validation
+  - explicitly decide which tasks are independent and which depend on earlier foundations; assign `priority` and `depends_on` before kickoff
+  - if the requested count forces some coupling, encode that coupling explicitly in `task_relationships` instead of pretending the tasks are parallel
+  - do not call kickoff until the intended implementation task set is persisted and `verify_team_mode_workflow` passes
+- Review policy rule:
+  - if the user explicitly asks for required code review, set `team_mode_config.review_policy.require_code_review=true`
+  - otherwise keep `team_mode_config.review_policy.require_code_review=false`
+- Avoid post-setup status corrections by policy rewrite. If status alignment fails, fix task wiring/config root cause first; do not broaden transition authority as a workaround.
+- Keep `git_delivery` project plugin config updated so verification checks are explicit and editable from the UI plugin section.
+- Use `get_project_plugin_config` + `validate_project_plugin_config` + `apply_project_plugin_config` for policy changes; do not manage verification policy through project rules.
+- Prefer minimal high-signal required checks (core defaults). Add diagnostic checks only when the user explicitly asks for stricter gates.
+- For setup-only requests set `runtime_deploy_health.required=false` in `docker_compose` plugin config; for execution requests that include deploy completion set `runtime_deploy_health.required=true`.
+- Team Mode topology guardrails:
+  - Prefer `task_relationships` for Team Mode structure; do not use `execution_triggers` as the default source of structural connectivity.
+- Trigger wiring guardrails:
+  - Never create a `status_change` trigger with `scope=external` that references the same task id in `selector.task_ids`.
+  - For Team Mode, prefer direct `TaskAutomationRequested` handoffs over status-change automation.
+  - QA must not run on a stale handoff; the accepted Lead handoff must match the latest Lead deploy cycle for the project.
+  - If explicit status-driven automation is requested, keep Developer handoff routed into Lead and QA handoff routed from Lead after integration/deploy readiness.
+  - If explicit status-driven automation is requested, Lead oversight may include blocked-watch triggers sourced from Developer/QA task ids on `to_statuses=["Blocked"]`.
+  - If there is only one Lead task that also represents deploy readiness, do not add synthetic Lead->Lead external trigger just to satisfy checks; keep Developer->Lead plus Lead->QA with recurring Lead schedule.
+- Assignment and routing rules:
+  - Use `assignee_id` only as a project-member UUID from `list_project_members`.
+  - Never use username/full name as `assignee_id`; never fallback to random/human assignees.
+  - Encode Team Mode routing with fields: `assignee_id` + `assigned_agent_code`.
+  - Never encode agent slot in labels/tags (`tm.agent:*` is deprecated and must not be produced).
+  - Keep only role semantics in labels via `tm.role:<Developer|QA|Lead>` when needed.
+  - Use agent names/slots exactly as defined in the current project's Team Mode config; do not invent alternate names or hardcoded slot mappings.
+  - Keep task titles neutral; do not encode role/slot in title when labels + assignment already define routing.
+  - If `assigned_agent_code` is provided, validate it against Team Mode config slots before sending create/patch.
+  - If `assignee_id` validation fails, refresh members, remap once, retry once; otherwise treat setup as incomplete.
+- Success criteria are write-path facts: required mutations succeeded and returned IDs. Do not claim success based only on read-model timing.
+- Before final response, re-read created/updated tasks (`list_tasks` and/or `get_task`) and report exact persisted statuses/assignees/triggers; if mismatched, patch and verify again.
+- For Team Mode kickoff requests, re-read automation state after dispatch and confirm at least one Developer task is no longer `idle`; if all Developer tasks remain `idle`, treat kickoff as incomplete and repair/report the blocker instead of claiming success.
+- Progress updates to user should be milestone-level and concise (step done + next step), not raw endpoint/schema troubleshooting.
+- For Team Mode setup completion, call `verify_team_mode_workflow` and do not report success while any required check is `FAIL`.
+- If the user requests deploy execution, do not claim deploy succeeded unless you actually executed deployment commands.
+- If the user asks for deployment as part of planning/setup, create explicit deployment tasks/specs/notes; only execute deployment commands when the user explicitly asks to run deploy now.
+- For setup-only requests, record deployment intent in a note/task artifact with explicit stack + port + health path and mark `Execution state: Not started`.
+- When deploy execution is requested and no explicit stack is provided, deploy with Docker Compose project `constructos-ws-default`.
+- For deterministic Team Mode Lead deploy flow, do not run `docker compose` manually from the task environment. Lead prepares/verifies deploy assets and the runner executes the actual compose deploy against the configured stack. Use manual `docker compose` commands only for direct user-requested deployment work outside that managed Lead flow.
+- Do not block a Lead response only because runner-controlled deploy has not happened yet. If deterministic deploy prerequisites are ready, return a normal success/comment outcome and let the runner perform deploy + health evaluation after the response.
+- Treat delivery as incomplete if post-deploy QA is missing. Required loop: Lead deploy -> QA post-deploy validation -> if fail create/link bug task(s) -> Dev fix with new commit evidence -> Lead re-deploy -> QA re-check evidence.
+- QA and Lead health probes must target `http://gateway:<port><health_path>` using `docker_compose` plugin config `port` and `health_path` (host is fixed).
+- For Team Mode QA validation after Lead handoff, validate the already-deployed runtime only. Do not run `docker compose`, rebuild, redeploy, or restart the managed runtime from the QA task environment.
+- QA should treat the latest Lead deploy snapshot/current-cycle handoff as authoritative deploy context. If runtime is unreachable, record probe failure and block QA; do not troubleshoot by invoking Compose manually.
+- Lead execution responsibility is explicit:
+  - do not create docker-compose/deploy before first merge-to-main evidence exists.
+  - after each successful Developer branch integration to main, update that Developer task to `Completed` with merge evidence.
+  - never merge a branch with known failing validation/tests; require successful validation evidence before merge.
+  - when deploy execution is required, Docker Compose deploy is enabled, and compose manifest is missing, Lead must create deploy assets deterministically from repository evidence (Dockerfile first, then supported runtime signals, including static-web fallback when repository contents make that unambiguous); if unsupported/ambiguous, set `Blocked` with explicit prerequisites instead of guessing.
+  - do not execute `docker compose` manually from the Lead task environment for managed Team Mode deploys; the runner owns the actual deploy command after deterministic asset preparation.
+  - forbidden fallback: do not create starter/placeholder compose that serves only `/health` or directory listing from `/srv`; this is invalid deployment evidence.
+  - after successful deploy of merged main, runner-controlled QA handoff will be emitted automatically; do not block the Lead response waiting for that post-deploy handoff in the same cycle.
+- If QA fails, run explicit bug loop: create/link bug task(s), implement fix with new commit evidence, then re-run QA and record re-check artifacts.
+  - For each new bug-fix Developer task created after QA is already `Blocked`, add external status trigger from failing QA task IDs on `to_statuses=["Blocked"]` and `action="request_automation"` so execution can start without waiting for another status flip.
+  - Immediately request automation on that bug-fix Developer task once (`run_task_with_codex`) as a fallback in case trigger reconciliation has not run yet.
+- For implementation work, create/use the project repository under `/home/app/workspace/.constructos/repos/<project-slug>` by default.
+- If Task Workdir / Task Branch are provided, execute implementation from that workdir and commit only on that branch.
+- If `/home/app/workspace` is not writable/available and runtime falls back to another workspace path, continue there and explicitly report the effective fallback path in the response.
+- If Team Mode was requested, report verification as either `Verification: PASS` or `Verification: Needs attention` and list only plain-language failed requirements.
+- Do not report `Verification: PASS` while any Team Mode task is still `idle` after kickoff, or while QA has no verifiable artifacts for a claimed completed cycle.
+- After kickoff, re-read persisted automation state for Developer, Lead, and QA before summarizing progress. Report persisted task state, not the Lead task's self-reported deferred text, because Lead may defer after Developer dispatch has already started.
+- For kickoff progress reporting, do not rely on one stale read. If any bounded re-read shows a Developer task as `queued`, `running`, or `completed`, report kickoff as propagated to Developer execution.
+- When reporting planned or persisted dependencies, verify them from the saved task payloads or task graph first. Do not infer or narrate dependency edges from intent alone.
+- If you expected structural dependencies and the graph still shows zero structural edges, stop and repair the task wiring before claiming kickoff success.
+- If kickoff was dispatched successfully and implementation work is still `queued` or `running`, use `Kickoff: In Progress` and describe which work items have or have not started yet. Do not present this as blocked unless the backend has already persisted a terminal failed/blocked state.
+- Do not manually queue duplicate implementation tasks just to repair missing provenance. If kickoff propagation is uncertain, report the incomplete state and let backend runtime normalize persisted kickoff state.
+- Do not manually queue QA in Team Mode. QA must start only from explicit Lead handoff state, and reporting must treat any manual QA queue attempt without Lead handoff as invalid workflow state.
+- For setup-only requests, include a final line `Execution state: Not started` plus `Deploy target recorded: <stack>:<port>`.
+- For setup-only requests, do not ask for repository URL/path automatically. Ask only if the user explicitly asks to continue with repo linking or execution.
+- For setup-only requests, always include explicit kickoff note: `Kickoff required: Yes`.

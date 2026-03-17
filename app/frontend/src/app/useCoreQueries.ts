@@ -5,8 +5,11 @@ import {
   getNotes,
   getProjectBoard,
   getProjectGraphContextPack,
+  getProjectEventStormingOverview,
+  getProjectEventStormingSubgraph,
   getProjectGraphOverview,
   getProjectGraphSubgraph,
+  getProjectTaskDependencyGraph,
   getProjectRules,
   getProjectSkills,
   getNote,
@@ -158,7 +161,7 @@ export function useCoreQueries(c: any) {
   const workspaceSkills = useQuery({
     queryKey: ['workspace-skills', c.userId, c.workspaceId],
     queryFn: () => getWorkspaceSkills(c.userId, c.workspaceId),
-    enabled: Boolean(c.workspaceId) && (c.tab === 'projects' || c.tab === 'profile' || c.tab === 'admin'),
+    enabled: Boolean(c.workspaceId) && (c.tab === 'projects' || c.tab === 'settings'),
   })
 
   const projectTemplates = useQuery({
@@ -183,6 +186,24 @@ export function useCoreQueries(c: any) {
     queryKey: ['project-graph-subgraph', c.userId, c.selectedProjectId],
     queryFn: () => getProjectGraphSubgraph(c.userId, c.selectedProjectId, { limit_nodes: 48, limit_edges: 160 }),
     enabled: Boolean(c.selectedProjectId) && (c.tab === 'projects' || c.tab === 'knowledge-graph'),
+  })
+
+  const projectEventStormingOverview = useQuery({
+    queryKey: ['project-event-storming-overview', c.userId, c.selectedProjectId],
+    queryFn: () => getProjectEventStormingOverview(c.userId, c.selectedProjectId),
+    enabled: Boolean(c.selectedProjectId) && (c.tab === 'projects' || c.tab === 'knowledge-graph'),
+  })
+
+  const projectEventStormingSubgraph = useQuery({
+    queryKey: ['project-event-storming-subgraph', c.userId, c.selectedProjectId],
+    queryFn: () => getProjectEventStormingSubgraph(c.userId, c.selectedProjectId, { limit_nodes: 120, limit_edges: 220 }),
+    enabled: Boolean(c.selectedProjectId) && (c.tab === 'projects' || c.tab === 'knowledge-graph'),
+  })
+
+  const projectTaskDependencyGraph = useQuery({
+    queryKey: ['project-task-dependency-graph', c.userId, c.selectedProjectId],
+    queryFn: () => getProjectTaskDependencyGraph(c.userId, c.selectedProjectId, { limit_nodes: 240, limit_edges: 1600 }),
+    enabled: Boolean(c.selectedProjectId) && (c.tab === 'projects' || c.tab === 'task-flow'),
   })
   const specificationArchivedFilter = c.specificationStatus === 'Archived'
 
@@ -339,6 +360,9 @@ export function useCoreQueries(c: any) {
     projectGraphOverview,
     projectGraphContextPack,
     projectGraphSubgraph,
+    projectEventStormingOverview,
+    projectEventStormingSubgraph,
+    projectTaskDependencyGraph,
     specifications,
     selectedSpecification,
     searchSpecifications,

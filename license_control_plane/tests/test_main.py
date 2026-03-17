@@ -83,6 +83,76 @@ def test_register_returns_signed_entitlement_when_signing_key_is_configured(tmp_
         assert verified["installation_id"] == "cp-signed-installation"
 
 
+def test_register_returns_matching_app_notifications(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        create_notification = client.post(
+            "/v1/admin/app-notifications",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "title": "New update available",
+                "message": "ConstructOS vNext is ready to deploy.",
+                "severity": "info",
+                "notification_type": "AppUpdateAvailable",
+                "audience_kind": "customer_email",
+                "audience_values": ["notify@example.com"],
+                "payload": {"action": "auto_update_app_images"},
+            },
+        )
+        assert create_notification.status_code == 200
+        notification_id = create_notification.json()["notification"]["id"]
+
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-notify-installation",
+                "workspace_id": "workspace-notify",
+                "metadata": {"issued_to_email": "notify@example.com", "source": "test"},
+            },
+        )
+        assert register.status_code == 200
+        payload = register.json()
+        notifications = payload.get("notifications") or []
+        assert len(notifications) == 1
+        assert notifications[0]["id"] == notification_id
+        assert notifications[0]["notification_type"] == "AppUpdateAvailable"
+        assert notifications[0]["payload"]["action"] == "auto_update_app_images"
+
+
+def test_admin_can_deactivate_app_notification(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        created = client.post(
+            "/v1/admin/app-notifications",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "title": "Deactivate me",
+                "message": "Temporary notice",
+                "audience_kind": "all",
+            },
+        )
+        assert created.status_code == 200
+        notification_id = created.json()["notification"]["id"]
+
+        deactivated = client.post(
+            f"/v1/admin/app-notifications/{notification_id}/deactivate",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert deactivated.status_code == 200
+        payload = deactivated.json()
+        assert payload["ok"] is True
+        assert payload["notification"]["id"] == notification_id
+        assert payload["notification"]["is_active"] is False
+
+        listed = client.get(
+            "/v1/admin/app-notifications",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert listed.status_code == 200
+        items = listed.json()["items"]
+        item = next(entry for entry in items if entry["id"] == notification_id)
+        assert item["is_active"] is False
+
+
 def test_installation_operating_system_is_recorded_and_updated(tmp_path: Path):
     with _build_client(tmp_path, beta_plan_valid_until="2099-12-31T23:59:59Z") as client:
         register = client.post(
@@ -1543,16 +1613,16 @@ def test_register_auto_assigns_beta_subscription(tmp_path: Path):
         entitlement = payload["entitlement"]
         assert entitlement["status"] == "active"
         assert entitlement["plan_code"] == "beta"
-        assert entitlement["valid_until"] == "2099-12-31T23:59:59+00:00"
+        assert entitlement["valid_until"] is None
         assert entitlement["metadata"]["entitlement_reason"] == "subscription_beta"
 
         health = client.get("/api/health")
         assert health.status_code == 200
         health_payload = health.json()
         assert health_payload["beta_plan_active"] is True
-        assert health_payload["beta_plan_valid_until"] == "2099-12-31T23:59:59+00:00"
+        assert health_payload["beta_plan_valid_until"] is None
         assert health_payload["public_beta_active"] is True
-        assert health_payload["public_beta_free_until"] == "2099-12-31T23:59:59+00:00"
+        assert health_payload["public_beta_free_until"] is None
 
 
 def test_beta_subscription_status_grants_active_entitlement(tmp_path: Path):
@@ -1584,7 +1654,7 @@ def test_beta_subscription_status_grants_active_entitlement(tmp_path: Path):
         assert update_payload["subscription_status"] == "beta"
         assert update_payload["entitlement"]["status"] == "active"
         assert update_payload["entitlement"]["plan_code"] == "beta"
-        assert update_payload["entitlement"]["valid_until"] == "2099-12-31T23:59:59+00:00"
+        assert update_payload["entitlement"]["valid_until"] is None
         assert update_payload["entitlement"]["metadata"]["entitlement_reason"] == "subscription_beta"
 
 

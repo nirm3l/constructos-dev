@@ -1,5 +1,7 @@
 import React from 'react'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as ToggleGroup from '@radix-ui/react-toggle-group'
+import * as Tooltip from '@radix-ui/react-tooltip'
 import { attachmentDownloadUrl } from '../../api'
 import type { AttachmentRef, ExternalRef } from '../../types'
 
@@ -139,13 +141,27 @@ export function MarkdownModeToggle({
   view,
   onChange,
   ariaLabel,
+  hideEditAndSplit = false,
+  previewOnly = false,
+  previewOnlyWhenFullscreen = false,
+  onFullscreenTriggerMode,
 }: {
   view: MarkdownEditorView
   onChange: (next: MarkdownEditorView) => void
   ariaLabel: string
+  hideEditAndSplit?: boolean
+  previewOnly?: boolean
+  previewOnlyWhenFullscreen?: boolean
+  onFullscreenTriggerMode?: (mode: 'readonly' | 'regular', nextFullscreen: boolean) => void
 }) {
   const rootRef = React.useRef<HTMLDivElement | null>(null)
   const [isFullscreen, setIsFullscreen] = React.useState(false)
+
+  const isNativeFullscreenSurface = React.useCallback((surface: HTMLElement | null): boolean => {
+    if (!surface) return false
+    const doc = document as Document & { webkitFullscreenElement?: Element | null }
+    return document.fullscreenElement === surface || doc.webkitFullscreenElement === surface
+  }, [])
 
   const getEditorSurface = React.useCallback((): HTMLElement | null => {
     if (!rootRef.current) return null
@@ -154,8 +170,22 @@ export function MarkdownModeToggle({
 
   const syncFullscreenState = React.useCallback(() => {
     const surface = getEditorSurface()
-    setIsFullscreen(Boolean(surface?.classList.contains('md-editor-fullscreen')))
-  }, [getEditorSurface])
+    const classFullscreen = Boolean(surface?.classList.contains('md-editor-fullscreen'))
+    const nativeFullscreen = isNativeFullscreenSurface(surface)
+    setIsFullscreen(classFullscreen || nativeFullscreen)
+  }, [getEditorSurface, isNativeFullscreenSurface])
+
+  const ensureBodyFullscreenClass = React.useCallback(() => {
+    const doc = document as Document & { webkitFullscreenElement?: Element | null }
+    const hasAnyFullscreenSurface = Boolean(document.querySelector('.md-editor-surface.md-editor-fullscreen'))
+      || Boolean(document.fullscreenElement)
+      || Boolean(doc.webkitFullscreenElement)
+    if (hasAnyFullscreenSurface) {
+      document.body.classList.add('md-fullscreen-open')
+    } else {
+      document.body.classList.remove('md-fullscreen-open')
+    }
+  }, [])
 
   const broadcastFullscreenChange = React.useCallback(() => {
     window.dispatchEvent(new Event('md-fullscreen-change'))
@@ -168,64 +198,187 @@ export function MarkdownModeToggle({
       if (event.key !== 'Escape') return
       const surface = getEditorSurface()
       if (!surface || !surface.classList.contains('md-editor-fullscreen')) return
-      surface.classList.remove('md-editor-fullscreen')
-      if (!document.querySelector('.md-editor-surface.md-editor-fullscreen')) {
-        document.body.classList.remove('md-fullscreen-open')
+      const doc = document as Document & { webkitExitFullscreen?: () => Promise<void> | void; webkitFullscreenElement?: Element | null }
+      const inNativeFullscreen = document.fullscreenElement === surface || doc.webkitFullscreenElement === surface
+      const exitNative = async () => {
+        if (!inNativeFullscreen) return
+        try {
+          if (document.exitFullscreen) {
+            await document.exitFullscreen()
+          } else if (doc.webkitExitFullscreen) {
+            await doc.webkitExitFullscreen()
+          }
+        } catch {
+          // Fallback to class-mode cleanup below.
+        }
       }
-      broadcastFullscreenChange()
+      void exitNative().finally(() => {
+        surface.classList.remove('md-editor-fullscreen')
+        ensureBodyFullscreenClass()
+        broadcastFullscreenChange()
+      })
     }
 
-    const onFullscreenChange = () => syncFullscreenState()
+    const onFullscreenChange = () => {
+      const surface = getEditorSurface()
+      if (!surface) return
+      if (isNativeFullscreenSurface(surface)) {
+        surface.classList.add('md-editor-fullscreen')
+      } else {
+        surface.classList.remove('md-editor-fullscreen')
+      }
+      ensureBodyFullscreenClass()
+      syncFullscreenState()
+    }
 
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('md-fullscreen-change', onFullscreenChange)
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    document.addEventListener('webkitfullscreenchange', onFullscreenChange as EventListener)
     return () => {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('md-fullscreen-change', onFullscreenChange)
+      document.removeEventListener('fullscreenchange', onFullscreenChange)
+      document.removeEventListener('webkitfullscreenchange', onFullscreenChange as EventListener)
       const surface = getEditorSurface()
       if (surface && surface.classList.contains('md-editor-fullscreen')) {
         surface.classList.remove('md-editor-fullscreen')
-        if (!document.querySelector('.md-editor-surface.md-editor-fullscreen')) {
-          document.body.classList.remove('md-fullscreen-open')
-        }
+        ensureBodyFullscreenClass()
         broadcastFullscreenChange()
       }
     }
-  }, [broadcastFullscreenChange, getEditorSurface, syncFullscreenState])
+  }, [broadcastFullscreenChange, ensureBodyFullscreenClass, getEditorSurface, isNativeFullscreenSurface, syncFullscreenState])
 
-  const toggleFullscreen = React.useCallback(() => {
+  const toggleFullscreen = React.useCallback(async () => {
     const surface = getEditorSurface()
     if (!surface) return
 
-    const activeSurface = document.querySelector('.md-editor-surface.md-editor-fullscreen') as HTMLElement | null
+    const doc = document as Document & {
+      webkitExitFullscreen?: () => Promise<void> | void
+      webkitFullscreenElement?: Element | null
+    }
+    const activeSurface = (
+      document.querySelector('.md-editor-surface.md-editor-fullscreen') as HTMLElement | null
+    ) || (
+      (document.fullscreenElement || doc.webkitFullscreenElement) as HTMLElement | null
+    )
+
     if (activeSurface && activeSurface !== surface) {
+      if (document.fullscreenElement || doc.webkitFullscreenElement) {
+        try {
+          if (document.exitFullscreen) {
+            await document.exitFullscreen()
+          } else if (doc.webkitExitFullscreen) {
+            await doc.webkitExitFullscreen()
+          }
+        } catch {
+          // Continue with class fallback cleanup below.
+        }
+      }
       activeSurface.classList.remove('md-editor-fullscreen')
     }
 
-    const nextFullscreen = !surface.classList.contains('md-editor-fullscreen')
-    surface.classList.toggle('md-editor-fullscreen', nextFullscreen)
+    const currentlyNativeFullscreen = isNativeFullscreenSurface(surface)
+    const currentlyClassFullscreen = surface.classList.contains('md-editor-fullscreen')
+    const nextFullscreen = !(currentlyNativeFullscreen || currentlyClassFullscreen)
 
-    if (nextFullscreen || document.querySelector('.md-editor-surface.md-editor-fullscreen')) {
-      document.body.classList.add('md-fullscreen-open')
+    if (nextFullscreen) {
+      const element = surface as HTMLElement & {
+        webkitRequestFullscreen?: () => Promise<void> | void
+      }
+      let nativeEntered = false
+      if (typeof element.requestFullscreen === 'function' || typeof element.webkitRequestFullscreen === 'function') {
+        try {
+          if (typeof element.requestFullscreen === 'function') {
+            await element.requestFullscreen()
+          } else if (typeof element.webkitRequestFullscreen === 'function') {
+            await element.webkitRequestFullscreen()
+          }
+          nativeEntered = true
+        } catch {
+          nativeEntered = false
+        }
+      }
+      surface.classList.toggle('md-editor-fullscreen', nativeEntered || nextFullscreen)
     } else {
-      document.body.classList.remove('md-fullscreen-open')
+      if (currentlyNativeFullscreen && document.fullscreenElement === surface) {
+        try {
+          if (document.exitFullscreen) {
+            await document.exitFullscreen()
+          } else if (doc.webkitExitFullscreen) {
+            await doc.webkitExitFullscreen()
+          }
+        } catch {
+          // Ignore and still apply class cleanup.
+        }
+      }
+      surface.classList.remove('md-editor-fullscreen')
     }
 
+    ensureBodyFullscreenClass()
     setIsFullscreen(nextFullscreen)
     broadcastFullscreenChange()
-  }, [broadcastFullscreenChange, getEditorSurface])
+  }, [broadcastFullscreenChange, ensureBodyFullscreenClass, getEditorSurface, isNativeFullscreenSurface])
 
   const onViewValueChange = React.useCallback((nextValue: string) => {
     if (nextValue === 'write' || nextValue === 'preview' || nextValue === 'split') {
       onChange(nextValue)
     }
   }, [onChange])
+  const stopEventPropagation = React.useCallback((event: React.SyntheticEvent) => {
+    event.stopPropagation()
+  }, [])
+
+  const hideModeToggle = previewOnly || (previewOnlyWhenFullscreen && isFullscreen)
 
   return (
-    <div ref={rootRef} className="seg md-mode-toggle" role="tablist" aria-label={ariaLabel}>
+    <div
+      ref={rootRef}
+      className="seg md-mode-toggle"
+      role="tablist"
+      aria-label={ariaLabel}
+      onClick={stopEventPropagation}
+      onPointerDown={stopEventPropagation}
+    >
+      {!hideModeToggle && (
+        <ToggleGroup.Root
+          type="single"
+          value={view}
+          onValueChange={onViewValueChange}
+          className="md-mode-toggle-group"
+          aria-label={ariaLabel}
+        >
+          {!hideEditAndSplit && (
+            <ToggleGroup.Item className="seg-btn" value="write" aria-label="Edit">
+              Edit
+            </ToggleGroup.Item>
+          )}
+          <ToggleGroup.Item className="seg-btn" value="preview" aria-label="Preview">
+            Preview
+          </ToggleGroup.Item>
+          {!hideEditAndSplit && (
+            <ToggleGroup.Item
+              className="seg-btn"
+              value="split"
+              aria-label="Split view"
+              title="Split editor and preview"
+            >
+              Split
+            </ToggleGroup.Item>
+          )}
+        </ToggleGroup.Root>
+      )}
       <button
         className={`seg-btn md-fullscreen-btn ${isFullscreen ? 'active' : ''}`}
-        onClick={toggleFullscreen}
+        onClick={(event) => {
+          event.stopPropagation()
+          const surface = getEditorSurface()
+          const mode = String(surface?.getAttribute('data-md-fullscreen-mode') || '').trim().toLowerCase() === 'readonly'
+            ? 'readonly'
+            : 'regular'
+          onFullscreenTriggerMode?.(mode, !isFullscreen)
+          void toggleFullscreen()
+        }}
         type="button"
         title={isFullscreen ? 'Exit fullscreen editor' : 'Open fullscreen editor'}
         aria-label={isFullscreen ? 'Exit fullscreen editor' : 'Open fullscreen editor'}
@@ -233,71 +386,105 @@ export function MarkdownModeToggle({
         <Icon path={isFullscreen ? 'M9 9H5V5M15 9h4V5M9 15H5v4M15 15h4v4' : 'M9 5H5v4M15 5h4v4M9 19H5v-4M15 19h4v-4'} />
         <span className="md-fullscreen-label">{isFullscreen ? 'Exit' : 'Full'}</span>
       </button>
-      <ToggleGroup.Root
-        type="single"
-        value={view}
-        onValueChange={onViewValueChange}
-        className="md-mode-toggle-group"
-        aria-label={ariaLabel}
-      >
-        <ToggleGroup.Item className="seg-btn" value="write" aria-label="Edit">
-          Edit
-        </ToggleGroup.Item>
-        <ToggleGroup.Item className="seg-btn" value="preview" aria-label="Preview">
-          Preview
-        </ToggleGroup.Item>
-        <ToggleGroup.Item
-          className="seg-btn"
-          value="split"
-          aria-label="Split view"
-          title="Split editor and preview"
-        >
-          Split
-        </ToggleGroup.Item>
-      </ToggleGroup.Root>
-      <span className="md-chip">MD</span>
     </div>
   )
 }
 
 export function ExternalRefList({
   refs,
-  onRemoveIndex
+  onRemoveIndex,
+  onOpenRef,
 }: {
   refs: ExternalRef[] | undefined | null
   onRemoveIndex?: (index: number) => void
+  onOpenRef?: (ref: ExternalRef) => boolean
 }) {
   if (!refs || refs.length === 0) return null
+
+  const openRef = React.useCallback((ref: ExternalRef) => {
+    if (onOpenRef && onOpenRef(ref)) return
+    if (typeof window === 'undefined') return
+    window.open(ref.url, '_blank', 'noopener,noreferrer')
+  }, [onOpenRef])
+
+  const copyRefUrl = React.useCallback(async (ref: ExternalRef) => {
+    if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) return
+    try {
+      await navigator.clipboard.writeText(ref.url)
+    } catch {
+      // Ignore clipboard failures to keep the menu interaction lightweight.
+    }
+  }, [])
+
   return (
-    <div className="resource-ref-list">
+    <Tooltip.Provider delayDuration={180}>
+      <div className="resource-ref-list external-ref-list">
       {refs.map((ref, idx) => {
         const label = ref.title || ref.url
+        const meta = ref.source ? `${label} · ${ref.source}` : label
         return (
-          <span key={`${ref.url}-${idx}`} className="resource-ref-item">
-            <a
-              className="status-chip resource-ref-chip"
-              href={ref.url}
-              target="_blank"
-              rel="noreferrer"
-              title={ref.source ? `${label} (${ref.source})` : label}
-            >
-              {ref.source ? `${label} · ${ref.source}` : label}
-            </a>
+          <span key={`${ref.url}-${idx}`} className="resource-ref-item external-ref-item">
+            <Tooltip.Root>
+              <Tooltip.Trigger asChild>
+                <button
+                  type="button"
+                  className="status-chip resource-ref-chip external-ref-chip"
+                  onClick={() => openRef(ref)}
+                  title={meta}
+                >
+                  <span className="external-ref-chip-icon" aria-hidden="true">
+                    <Icon path="M14 3h7v7m0-7L10 14M5 7v12h12v-5" />
+                  </span>
+                  <span className="external-ref-chip-text">{meta}</span>
+                </button>
+              </Tooltip.Trigger>
+              <Tooltip.Portal>
+                <Tooltip.Content className="quickadd-tooltip-content" sideOffset={6}>
+                  <div className="external-ref-tooltip-body">
+                    <strong>{label}</strong>
+                    {ref.source ? <span>{`Source: ${ref.source}`}</span> : null}
+                    <code>{ref.url}</code>
+                  </div>
+                  <Tooltip.Arrow className="quickadd-tooltip-arrow" />
+                </Tooltip.Content>
+              </Tooltip.Portal>
+            </Tooltip.Root>
             {onRemoveIndex && (
-              <button
-                type="button"
-                className="action-icon danger-ghost"
-                onClick={() => onRemoveIndex(idx)}
-                title="Remove link"
-                aria-label="Remove link"
-              >
-                <Icon path="M6 6l12 12M18 6 6 18" />
-              </button>
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger asChild>
+                  <button
+                    type="button"
+                    className="action-icon external-ref-menu-trigger"
+                    title="Link actions"
+                    aria-label="Link actions"
+                  >
+                    <Icon path="M12 5.5a1.5 1.5 0 1 0 0 .01V5.5Zm0 5a1.5 1.5 0 1 0 0 .01v-.01Zm0 5a1.5 1.5 0 1 0 0 .01v-.01Z" />
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content className="task-group-menu-content external-ref-menu" sideOffset={6} align="end">
+                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => openRef(ref)}>
+                      <Icon path="M14 3h7v7m0-7L10 14M5 7v12h12v-5" />
+                      <span>Open link</span>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => { void copyRefUrl(ref) }}>
+                      <Icon path="M9 9h10v12H9zM5 3h10v12H5z" />
+                      <span>Copy URL</span>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator className="external-ref-menu-separator" />
+                    <DropdownMenu.Item className="task-group-menu-item task-group-menu-item-danger" onSelect={() => onRemoveIndex(idx)}>
+                      <Icon path="M6 6l12 12M18 6 6 18" />
+                      <span>Remove link</span>
+                    </DropdownMenu.Item>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
             )}
           </span>
         )}
       )}
-    </div>
+      </div>
+    </Tooltip.Provider>
   )
 }
 
@@ -305,17 +492,19 @@ export function ExternalRefEditor({
   refs,
   onAdd,
   onRemoveIndex,
+  onOpenRef,
 }: {
   refs: ExternalRef[]
   onAdd: (ref: ExternalRef) => void
   onRemoveIndex: (index: number) => void
+  onOpenRef?: (ref: ExternalRef) => boolean
 }) {
   const [url, setUrl] = React.useState('')
   const [title, setTitle] = React.useState('')
   const [source, setSource] = React.useState('')
   return (
     <div style={{ marginTop: 8 }}>
-      <ExternalRefList refs={refs} onRemoveIndex={onRemoveIndex} />
+      <ExternalRefList refs={refs} onRemoveIndex={onRemoveIndex} onOpenRef={onOpenRef} />
       <div className="row wrap" style={{ gap: 8, marginTop: 6 }}>
         <input
           value={url}

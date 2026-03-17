@@ -1,7 +1,6 @@
 import React from 'react'
 import { parseCommaTags, parseProjectStatusesText, stableJson, toLocalDateTimeInput } from '../utils/ui'
 import {
-  buildExecutionTriggersFromEditor,
   deriveInstruction,
   extractEnabledScheduleTrigger,
   extractEnabledStatusTrigger,
@@ -19,6 +18,16 @@ function normalizeUtcIsoToMinute(raw: string): string {
   return parsed.toISOString()
 }
 
+function detectBrowserTimezoneForDirty(): string {
+  if (typeof Intl === 'undefined' || typeof Intl.DateTimeFormat !== 'function') return 'UTC'
+  try {
+    const value = String(Intl.DateTimeFormat().resolvedOptions().timeZone || '').trim()
+    return value || 'UTC'
+  } catch {
+    return 'UTC'
+  }
+}
+
 function normalizeExecutionTriggersForDirtyCheck(input: unknown) {
   return normalizeExecutionTriggers(input).map((trigger) => {
     if (trigger.kind !== 'schedule') return trigger
@@ -29,7 +38,71 @@ function normalizeExecutionTriggersForDirtyCheck(input: unknown) {
   })
 }
 
+function normalizeChatAttachmentIngestionModeForDirty(value: unknown): 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' {
+  const mode = String(value || '').trim().toUpperCase()
+  if (mode === 'OFF') return 'OFF'
+  if (mode === 'FULL_TEXT') return 'FULL_TEXT'
+  return 'METADATA_ONLY'
+}
+
+function normalizeExternalRefsForDirtyCheck(input: unknown): Array<{ url: string; title?: string; source?: string }> {
+  if (!Array.isArray(input)) return []
+  return input
+    .map((item) => {
+      const row = item as Record<string, unknown>
+      const url = String(row?.url || '').trim()
+      if (!url) return null
+      const title = String(row?.title || '').trim()
+      const source = String(row?.source || '').trim()
+      return {
+        url,
+        ...(title ? { title } : {}),
+        ...(source ? { source } : {}),
+      }
+    })
+    .filter(Boolean) as Array<{ url: string; title?: string; source?: string }>
+}
+
+function normalizeAttachmentRefsForDirtyCheck(
+  input: unknown
+): Array<{ path: string; name?: string; mime_type?: string; size_bytes?: number }> {
+  if (!Array.isArray(input)) return []
+  return input
+    .map((item) => {
+      const row = item as Record<string, unknown>
+      const path = String(row?.path || '').trim()
+      if (!path) return null
+      const name = String(row?.name || '').trim()
+      const mimeType = String(row?.mime_type || '').trim()
+      const rawSize = row?.size_bytes
+      const sizeBytes =
+        typeof rawSize === 'number'
+          ? Math.max(0, Math.floor(rawSize))
+          : Number.isFinite(Number(rawSize))
+            ? Math.max(0, Math.floor(Number(rawSize)))
+            : undefined
+      return {
+        path,
+        ...(name ? { name } : {}),
+        ...(mimeType ? { mime_type: mimeType } : {}),
+        ...(sizeBytes != null ? { size_bytes: sizeBytes } : {}),
+      }
+    })
+    .filter(Boolean) as Array<{ path: string; name?: string; mime_type?: string; size_bytes?: number }>
+}
+
 export function useEditorGuards(c: any) {
+  const requestDiscardChanges = React.useCallback((message: string, onConfirm: () => void): boolean => {
+    if (typeof c.requestDiscardChanges === 'function') {
+      c.requestDiscardChanges(message, onConfirm)
+      return false
+    }
+    if (typeof window === 'undefined') return true
+    if (!window.confirm(message)) return false
+    onConfirm()
+    return true
+  }, [c.requestDiscardChanges])
+
   const toggleCreateProjectMember = React.useCallback((userIdToToggle: string) => {
     const id = String(userIdToToggle || '').trim()
     if (!id) return
@@ -53,7 +126,6 @@ export function useEditorGuards(c: any) {
       ).sort(),
     [c.projectMembers, c.selectedProjectId]
   )
-
   const projectIsDirty = React.useMemo(() => {
     if (!c.showProjectEditForm || !c.selectedProject) return false
     return (
@@ -63,14 +135,20 @@ export function useEditorGuards(c: any) {
         stableJson(c.selectedProject.custom_statuses ?? []) ||
       Boolean(c.editProjectEmbeddingEnabled) !== Boolean(c.selectedProject.embedding_enabled) ||
       String(c.editProjectEmbeddingModel || '').trim() !== String(c.selectedProject.embedding_model || '').trim() ||
+      Boolean(c.editProjectVectorIndexDistillEnabled) !== Boolean(c.selectedProject.vector_index_distill_enabled) ||
       String(c.editProjectContextPackEvidenceTopKText || '').trim() !==
         String(c.selectedProject.context_pack_evidence_top_k ?? '').trim() ||
+      String(c.editProjectAutomationMaxParallelTasksText || '').trim() !==
+        String(c.selectedProject.automation_max_parallel_tasks ?? 4).trim() ||
       String(c.editProjectChatIndexMode || 'OFF').trim().toUpperCase() !==
         String(c.selectedProject.chat_index_mode || 'OFF').trim().toUpperCase() ||
-      String(c.editProjectChatAttachmentIngestionMode || 'METADATA_ONLY').trim().toUpperCase() !==
-        String(c.selectedProject.chat_attachment_ingestion_mode || 'METADATA_ONLY').trim().toUpperCase() ||
-      stableJson(c.parseExternalRefsText(c.editProjectExternalRefsText)) !== stableJson(c.selectedProject.external_refs ?? []) ||
-      stableJson(c.parseAttachmentRefsText(c.editProjectAttachmentRefsText)) !== stableJson(c.selectedProject.attachment_refs ?? []) ||
+      normalizeChatAttachmentIngestionModeForDirty(c.editProjectChatAttachmentIngestionMode || 'METADATA_ONLY') !==
+        normalizeChatAttachmentIngestionModeForDirty(c.selectedProject.chat_attachment_ingestion_mode || 'METADATA_ONLY') ||
+      Boolean(c.editProjectEventStormingEnabled) !== Boolean(c.selectedProject.event_storming_enabled ?? true) ||
+      stableJson(normalizeExternalRefsForDirtyCheck(c.parseExternalRefsText(c.editProjectExternalRefsText))) !==
+        stableJson(normalizeExternalRefsForDirtyCheck(c.selectedProject.external_refs ?? [])) ||
+      stableJson(normalizeAttachmentRefsForDirtyCheck(c.parseAttachmentRefsText(c.editProjectAttachmentRefsText))) !==
+        stableJson(normalizeAttachmentRefsForDirtyCheck(c.selectedProject.attachment_refs ?? [])) ||
       stableJson(Array.from(new Set(c.editProjectMemberIds.filter(Boolean))).sort()) !== stableJson(selectedProjectMemberIds)
     )
   }, [
@@ -79,9 +157,12 @@ export function useEditorGuards(c: any) {
     c.editProjectDescription,
     c.editProjectEmbeddingEnabled,
     c.editProjectEmbeddingModel,
+    c.editProjectVectorIndexDistillEnabled,
     c.editProjectContextPackEvidenceTopKText,
+    c.editProjectAutomationMaxParallelTasksText,
     c.editProjectChatIndexMode,
     c.editProjectChatAttachmentIngestionMode,
+    c.editProjectEventStormingEnabled,
     c.editProjectExternalRefsText,
     c.editProjectMemberIds,
     c.editProjectName,
@@ -99,8 +180,10 @@ export function useEditorGuards(c: any) {
       c.editNoteBody !== (c.selectedNote.body ?? '') ||
       (c.editNoteGroupId || null) !== (c.selectedNote.note_group_id ?? null) ||
       stableJson(parseCommaTags(c.editNoteTags)) !== stableJson(c.selectedNote.tags ?? []) ||
-      stableJson(c.parseExternalRefsText(c.editNoteExternalRefsText)) !== stableJson(c.selectedNote.external_refs ?? []) ||
-      stableJson(c.parseAttachmentRefsText(c.editNoteAttachmentRefsText)) !== stableJson(c.selectedNote.attachment_refs ?? [])
+      stableJson(normalizeExternalRefsForDirtyCheck(c.parseExternalRefsText(c.editNoteExternalRefsText))) !==
+        stableJson(normalizeExternalRefsForDirtyCheck(c.selectedNote.external_refs ?? [])) ||
+      stableJson(normalizeAttachmentRefsForDirtyCheck(c.parseAttachmentRefsText(c.editNoteAttachmentRefsText))) !==
+        stableJson(normalizeAttachmentRefsForDirtyCheck(c.selectedNote.attachment_refs ?? []))
     )
   }, [
     c.editNoteGroupId,
@@ -122,8 +205,10 @@ export function useEditorGuards(c: any) {
       (c.editSpecificationStatus || 'Draft') !== (c.selectedSpecification.status || 'Draft') ||
       stableJson(parseCommaTags(c.editSpecificationTags).map((tag) => tag.toLowerCase())) !==
         stableJson((c.selectedSpecification.tags ?? []).map((tag: string) => String(tag || '').toLowerCase())) ||
-      stableJson(c.parseExternalRefsText(c.editSpecificationExternalRefsText)) !== stableJson(c.selectedSpecification.external_refs ?? []) ||
-      stableJson(c.parseAttachmentRefsText(c.editSpecificationAttachmentRefsText)) !== stableJson(c.selectedSpecification.attachment_refs ?? [])
+      stableJson(normalizeExternalRefsForDirtyCheck(c.parseExternalRefsText(c.editSpecificationExternalRefsText))) !==
+        stableJson(normalizeExternalRefsForDirtyCheck(c.selectedSpecification.external_refs ?? [])) ||
+      stableJson(normalizeAttachmentRefsForDirtyCheck(c.parseAttachmentRefsText(c.editSpecificationAttachmentRefsText))) !==
+        stableJson(normalizeAttachmentRefsForDirtyCheck(c.selectedSpecification.attachment_refs ?? []))
     )
   }, [
     c.editSpecificationAttachmentRefsText,
@@ -138,14 +223,28 @@ export function useEditorGuards(c: any) {
   ])
 
   const taskIsDirty = React.useMemo(() => {
-    if (!c.selectedTask) return false
-    const selectedTaskScheduleTimezone = String(c.selectedTask.schedule_timezone || '').trim()
+    const baselineTask = c.taskEditorBaselineTask ?? c.selectedTask
+    if (!baselineTask) return false
+    const hydratedTaskId = String(c.taskEditorHydratedTaskId || '')
+    const baselineTaskId = String(baselineTask.id || '')
+    const selectedTaskId = String(c.selectedTask?.id || '')
+    if (hydratedTaskId !== baselineTaskId) {
+      return false
+    }
+    // Prevent stale dirty state from the previously opened task from leaking into
+    // the next task before the editor hydration effect finishes for the new task.
+    if (selectedTaskId && hydratedTaskId !== selectedTaskId) {
+      return false
+    }
+    const selectedTaskScheduleTimezone = String(baselineTask.schedule_timezone || '').trim()
     const fallbackScheduleTimezone = String(c.currentUserTimezone || 'UTC').trim() || 'UTC'
+    const browserScheduleTimezone = detectBrowserTimezoneForDirty()
     const editScheduleTimezoneRaw = String(c.editScheduleTimezone || '').trim()
     const scheduleTimezoneForDirty = (
       c.editTaskType === 'scheduled_instruction'
         ? (
-            !selectedTaskScheduleTimezone && editScheduleTimezoneRaw === fallbackScheduleTimezone
+            !selectedTaskScheduleTimezone &&
+            (editScheduleTimezoneRaw === fallbackScheduleTimezone || editScheduleTimezoneRaw === browserScheduleTimezone)
               ? ''
               : editScheduleTimezoneRaw
           )
@@ -155,25 +254,7 @@ export function useEditorGuards(c: any) {
       c.editTaskType === 'scheduled_instruction' && c.editScheduledAtUtc
         ? normalizeUtcIsoToMinute(new Date(c.editScheduledAtUtc).toISOString())
         : ''
-    const currentExecutionTriggers = buildExecutionTriggersFromEditor({
-      taskType: c.editTaskType,
-      scheduledAtUtc: scheduleTriggerIsoForDirty,
-      scheduleTimezone: scheduleTimezoneForDirty,
-      scheduleRunOnStatuses: c.editScheduleRunOnStatuses,
-      recurringEvery: c.editRecurringEvery,
-      recurringUnit: c.editRecurringUnit,
-      selfEnabled: Boolean(c.editStatusTriggerSelfEnabled),
-      selfFromStatusesText: c.editStatusTriggerSelfFromStatusesText,
-      selfToStatusesText: c.editStatusTriggerSelfToStatusesText,
-      externalEnabled: Boolean(c.editStatusTriggerExternalEnabled),
-      externalMatchMode: c.editStatusTriggerExternalMatchMode === 'all' ? 'all' : 'any',
-      externalTaskIdsText: c.editStatusTriggerExternalTaskIdsText,
-      externalFromStatusesText: c.editStatusTriggerExternalFromStatusesText,
-      externalToStatusesText: c.editStatusTriggerExternalToStatusesText,
-    })
-
-    const originalExecutionTriggers = normalizeExecutionTriggersForDirtyCheck(c.selectedTask.execution_triggers)
-    const normalizedCurrentExecutionTriggers = normalizeExecutionTriggersForDirtyCheck(currentExecutionTriggers)
+    const originalExecutionTriggers = normalizeExecutionTriggersForDirtyCheck(baselineTask.execution_triggers)
     const originalScheduleTrigger = extractEnabledScheduleTrigger(originalExecutionTriggers)
     const originalSelfTrigger = extractEnabledStatusTrigger(originalExecutionTriggers, 'self')
     const originalExternalTrigger = extractEnabledStatusTrigger(originalExecutionTriggers, 'external')
@@ -183,8 +264,10 @@ export function useEditorGuards(c: any) {
       description: c.editDescription,
       status: c.editStatus,
       priority: c.editPriority,
-      project_id: c.editProjectId || c.selectedTask.project_id,
+      project_id: String(c.editProjectId || baselineTask.project_id || ''),
       task_group_id: c.editTaskGroupId || null,
+      assignee_id: c.editAssigneeId || null,
+      assigned_agent_code: c.editAssigneeId ? (c.editAssignedAgentCode || null) : null,
       labels: c.editTaskTags,
       due_date: c.editDueDate || '',
       task_type: c.editTaskType,
@@ -205,32 +288,33 @@ export function useEditorGuards(c: any) {
       status_trigger_external_task_ids: c.editStatusTriggerExternalTaskIdsText,
       status_trigger_external_from: c.editStatusTriggerExternalFromStatusesText,
       status_trigger_external_to: c.editStatusTriggerExternalToStatusesText,
-      execution_triggers: normalizedCurrentExecutionTriggers,
-      external_refs: c.parseExternalRefsText(c.editTaskExternalRefsText),
-      attachment_refs: c.parseAttachmentRefsText(c.editTaskAttachmentRefsText),
+      external_refs: normalizeExternalRefsForDirtyCheck(c.parseExternalRefsText(c.editTaskExternalRefsText)),
+      attachment_refs: normalizeAttachmentRefsForDirtyCheck(c.parseAttachmentRefsText(c.editTaskAttachmentRefsText)),
     }
     const original = {
-      title: c.selectedTask.title?.trim() || 'Untitled',
-      description: c.selectedTask.description ?? '',
-      status: c.selectedTask.status ?? 'To do',
-      priority: c.selectedTask.priority ?? 'Med',
-      project_id: c.selectedTask.project_id ?? '',
-      task_group_id: c.selectedTask.task_group_id ?? null,
-      labels: c.selectedTask.labels ?? [],
-      due_date: toLocalDateTimeInput(c.selectedTask.due_date),
-      task_type: c.selectedTask.task_type ?? 'manual',
-      scheduled_at_utc: toLocalDateTimeInput(c.selectedTask.scheduled_at_utc),
+      title: baselineTask.title?.trim() || 'Untitled',
+      description: baselineTask.description ?? '',
+      status: baselineTask.status ?? 'To Do',
+      priority: baselineTask.priority ?? 'Med',
+      project_id: String(baselineTask.project_id || ''),
+      task_group_id: baselineTask.task_group_id ?? null,
+      assignee_id: baselineTask.assignee_id ?? null,
+      assigned_agent_code: baselineTask.assigned_agent_code ?? null,
+      labels: baselineTask.labels ?? [],
+      due_date: toLocalDateTimeInput(baselineTask.due_date),
+      task_type: baselineTask.task_type ?? 'manual',
+      scheduled_at_utc: toLocalDateTimeInput(baselineTask.scheduled_at_utc),
       schedule_timezone:
-        (c.selectedTask.task_type ?? 'manual') === 'scheduled_instruction'
+        (baselineTask.task_type ?? 'manual') === 'scheduled_instruction'
           ? (selectedTaskScheduleTimezone || '')
           : '',
       schedule_run_on_statuses:
-        (c.selectedTask.task_type ?? 'manual') === 'scheduled_instruction'
+        (baselineTask.task_type ?? 'manual') === 'scheduled_instruction'
           ? normalizeScheduleRunOnStatuses(originalScheduleTrigger?.run_on_statuses)
           : [],
-      instruction: deriveInstruction(c.selectedTask),
+      instruction: deriveInstruction(baselineTask).trim(),
       recurring_rule:
-        (c.selectedTask.task_type ?? 'manual') === 'scheduled_instruction' ? String(c.selectedTask.recurring_rule ?? '') : '',
+        (baselineTask.task_type ?? 'manual') === 'scheduled_instruction' ? String(baselineTask.recurring_rule ?? '') : '',
       status_trigger_self_enabled: Boolean(originalSelfTrigger),
       status_trigger_self_from: listToCsv(originalSelfTrigger?.from_statuses),
       status_trigger_self_to: listToCsv(originalSelfTrigger?.to_statuses),
@@ -239,9 +323,8 @@ export function useEditorGuards(c: any) {
       status_trigger_external_task_ids: listToCsv(originalExternalTrigger?.selector?.task_ids),
       status_trigger_external_from: listToCsv(originalExternalTrigger?.from_statuses),
       status_trigger_external_to: listToCsv(originalExternalTrigger?.to_statuses),
-      execution_triggers: originalExecutionTriggers,
-      external_refs: c.selectedTask.external_refs ?? [],
-      attachment_refs: c.selectedTask.attachment_refs ?? [],
+      external_refs: normalizeExternalRefsForDirtyCheck(baselineTask.external_refs ?? []),
+      attachment_refs: normalizeAttachmentRefsForDirtyCheck(baselineTask.attachment_refs ?? []),
     }
     return stableJson(current) !== stableJson(original)
   }, [
@@ -250,6 +333,8 @@ export function useEditorGuards(c: any) {
     c.editPriority,
     c.editProjectId,
     c.editTaskGroupId,
+    c.editAssigneeId,
+    c.editAssignedAgentCode,
     c.editRecurringEvery,
     c.editRecurringUnit,
     c.editScheduledAtUtc,
@@ -273,60 +358,94 @@ export function useEditorGuards(c: any) {
     c.currentUserTimezone,
     c.parseAttachmentRefsText,
     c.parseExternalRefsText,
+    c.taskEditorHydratedTaskId,
+    c.taskEditorBaselineTask,
     c.selectedTask,
   ])
 
   const confirmDiscardChanges = React.useCallback(() => {
-    if (typeof window === 'undefined') return true
-    return window.confirm('You have unsaved changes. Discard them?')
-  }, [])
+    return requestDiscardChanges('You have unsaved changes. Discard them?', () => undefined)
+  }, [requestDiscardChanges])
 
   const closeTaskEditor = React.useCallback(() => {
-    if (taskIsDirty && !confirmDiscardChanges()) return false
+    if (taskIsDirty) {
+      return requestDiscardChanges('You have unsaved task changes. Discard them?', () => {
+        c.setSelectedTaskId(null)
+        c.setTaskEditorError(null)
+      })
+    }
     c.setSelectedTaskId(null)
     c.setTaskEditorError(null)
     return true
-  }, [c.setSelectedTaskId, c.setTaskEditorError, confirmDiscardChanges, taskIsDirty])
+  }, [c.setSelectedTaskId, c.setTaskEditorError, requestDiscardChanges, taskIsDirty])
 
   const openTaskEditor = React.useCallback((taskId: string) => {
     if (c.selectedTaskId === taskId) return true
-    if (c.selectedTaskId && taskIsDirty && !confirmDiscardChanges()) return false
+    if (c.selectedTaskId && taskIsDirty) {
+      return requestDiscardChanges('You have unsaved task changes. Discard them?', () => {
+        c.setSelectedTaskId(taskId)
+        c.setTaskEditorError(null)
+      })
+    }
     c.setSelectedTaskId(taskId)
     c.setTaskEditorError(null)
     return true
-  }, [c.selectedTaskId, c.setSelectedTaskId, c.setTaskEditorError, confirmDiscardChanges, taskIsDirty])
+  }, [c.selectedTaskId, c.setSelectedTaskId, c.setTaskEditorError, requestDiscardChanges, taskIsDirty])
 
   const toggleNoteEditor = React.useCallback((noteId: string) => {
     if (c.selectedNoteId === noteId) {
-      if (noteIsDirty && !confirmDiscardChanges()) return false
+      if (noteIsDirty) {
+        return requestDiscardChanges('You have unsaved note changes. Discard them?', () => {
+          c.setSelectedNoteId(null)
+        })
+      }
       c.setSelectedNoteId(null)
       return true
     }
-    if (c.selectedNoteId && noteIsDirty && !confirmDiscardChanges()) return false
+    if (c.selectedNoteId && noteIsDirty) {
+      return requestDiscardChanges('You have unsaved note changes. Discard them?', () => {
+        c.setSelectedNoteId(noteId)
+      })
+    }
     c.setSelectedNoteId(noteId)
     return true
-  }, [c.selectedNoteId, c.setSelectedNoteId, confirmDiscardChanges, noteIsDirty])
+  }, [c.selectedNoteId, c.setSelectedNoteId, requestDiscardChanges, noteIsDirty])
 
   const toggleSpecificationEditor = React.useCallback((specificationId: string) => {
     if (c.selectedSpecificationId === specificationId) {
-      if (specificationIsDirty && !confirmDiscardChanges()) return false
+      if (specificationIsDirty) {
+        return requestDiscardChanges('You have unsaved specification changes. Discard them?', () => {
+          c.setSelectedSpecificationId(null)
+        })
+      }
       c.setSelectedSpecificationId(null)
       return true
     }
-    if (c.selectedSpecificationId && specificationIsDirty && !confirmDiscardChanges()) return false
+    if (c.selectedSpecificationId && specificationIsDirty) {
+      return requestDiscardChanges('You have unsaved specification changes. Discard them?', () => {
+        c.setSelectedSpecificationId(specificationId)
+      })
+    }
     c.setSelectedSpecificationId(specificationId)
     return true
   }, [
     c.selectedSpecificationId,
     c.setSelectedSpecificationId,
     specificationIsDirty,
-    confirmDiscardChanges,
+    requestDiscardChanges,
   ])
 
   const toggleProjectEditor = React.useCallback((projectId: string) => {
+    const hasProjectUnsavedChanges = projectIsDirty || Boolean(c.projectEditorHasUnsavedChanges)
     if (c.selectedProjectId === projectId) {
       if (c.showProjectEditForm) {
-        if (projectIsDirty && !confirmDiscardChanges()) return false
+        if (hasProjectUnsavedChanges) {
+          return requestDiscardChanges('You have unsaved project changes. Discard them?', () => {
+            if (typeof c.setProjectEditorHasUnsavedChanges === 'function') c.setProjectEditorHasUnsavedChanges(false)
+            c.setShowProjectEditForm(false)
+          })
+        }
+        if (typeof c.setProjectEditorHasUnsavedChanges === 'function') c.setProjectEditorHasUnsavedChanges(false)
         c.setShowProjectEditForm(false)
         return true
       }
@@ -334,17 +453,35 @@ export function useEditorGuards(c: any) {
       c.setShowProjectEditForm(true)
       return true
     }
-    if (c.showProjectEditForm && projectIsDirty && !confirmDiscardChanges()) return false
+    if (c.showProjectEditForm && hasProjectUnsavedChanges) {
+      return requestDiscardChanges('You have unsaved project changes. Discard them?', () => {
+        if (typeof c.setProjectEditorHasUnsavedChanges === 'function') c.setProjectEditorHasUnsavedChanges(false)
+        c.setSelectedProjectId(projectId)
+        c.setShowProjectEditForm(false)
+      })
+    }
+    if (typeof c.setProjectEditorHasUnsavedChanges === 'function') c.setProjectEditorHasUnsavedChanges(false)
     c.setSelectedProjectId(projectId)
     c.setShowProjectEditForm(false)
     return true
-  }, [c.selectedProjectId, c.showProjectEditForm, c.setShowProjectEditForm, c.setShowProjectCreateForm, c.setSelectedProjectId, confirmDiscardChanges, projectIsDirty])
+  }, [
+    c.selectedProjectId,
+    c.showProjectEditForm,
+    c.setShowProjectEditForm,
+    c.setShowProjectCreateForm,
+    c.setSelectedProjectId,
+    c.setProjectEditorHasUnsavedChanges,
+    c.projectEditorHasUnsavedChanges,
+    requestDiscardChanges,
+    projectIsDirty,
+  ])
 
   return {
     toggleCreateProjectMember,
     toggleEditProjectMember,
     projectIsDirty,
     noteIsDirty,
+    specificationIsDirty,
     taskIsDirty,
     confirmDiscardChanges,
     closeTaskEditor,
