@@ -4,6 +4,24 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+resolve_compose_cmd() {
+  if docker compose version >/dev/null 2>&1; then
+    printf '%s' "docker compose"
+    return 0
+  fi
+  if command -v docker-compose >/dev/null 2>&1; then
+    printf '%s' "docker-compose"
+    return 0
+  fi
+  return 1
+}
+
+if ! COMPOSE_CMD="$(resolve_compose_cmd)"; then
+  echo "Docker Compose is required but unavailable."
+  echo "Install Docker Compose plugin ('docker compose') or legacy 'docker-compose' before deploy."
+  exit 1
+fi
+
 DEPLOYED_AT_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo "nogit")"
 DEPLOY_TARGET="${DEPLOY_TARGET:-auto}"
@@ -309,8 +327,8 @@ echo "Deploy services: ${DEPLOY_SERVICES[*]}"
 
 if [[ "$DEPLOY_SOURCE" == "ghcr" ]]; then
   echo "Pulling images..."
-  docker compose -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" --env-file .deploy.env pull "${DEPLOY_SERVICES[@]}"
-  docker compose -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --no-build "${DEPLOY_SERVICES[@]}"
+  ${COMPOSE_CMD} -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" --env-file .deploy.env pull "${DEPLOY_SERVICES[@]}"
+  ${COMPOSE_CMD} -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --no-build "${DEPLOY_SERVICES[@]}"
 else
-  docker compose -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --build "${DEPLOY_SERVICES[@]}"
+  ${COMPOSE_CMD} -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" --env-file .deploy.env up -d --build "${DEPLOY_SERVICES[@]}"
 fi

@@ -4,6 +4,24 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+resolve_compose_cmd() {
+  if docker compose version >/dev/null 2>&1; then
+    printf '%s' "docker compose"
+    return 0
+  fi
+  if command -v docker-compose >/dev/null 2>&1; then
+    printf '%s' "docker-compose"
+    return 0
+  fi
+  return 1
+}
+
+if ! COMPOSE_CMD="$(resolve_compose_cmd)"; then
+  echo "Docker Compose is required but unavailable."
+  echo "Install Docker Compose plugin ('docker compose') or legacy 'docker-compose' before control-plane operations."
+  exit 1
+fi
+
 CP_COMPOSE_PROJECT_NAME="${CP_COMPOSE_PROJECT_NAME:-constructos-cp}"
 COMPOSE_ARGS=(-f docker-compose.license-control-plane.yml)
 LCP_BACKUP_HOST_DIR="${LCP_BACKUP_HOST_DIR:-data/license-control-plane-backups}"
@@ -70,22 +88,22 @@ case "$ACTION" in
   up)
     prepare_backup_host_dir
     migrate_legacy_backups_if_needed
-    docker compose -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" up -d --build "${SERVICES[@]}"
+    ${COMPOSE_CMD} -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" up -d --build "${SERVICES[@]}"
     ;;
   down)
     # Intentionally no `-v` so control-plane data is preserved.
-    docker compose -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" down
+    ${COMPOSE_CMD} -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" down
     ;;
   restart)
     prepare_backup_host_dir
     migrate_legacy_backups_if_needed
-    docker compose -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" up -d --build "${SERVICES[@]}"
+    ${COMPOSE_CMD} -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" up -d --build "${SERVICES[@]}"
     ;;
   status)
-    docker compose -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" ps
+    ${COMPOSE_CMD} -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" ps
     ;;
   logs)
-    docker compose -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" logs -f "${SERVICES[@]}"
+    ${COMPOSE_CMD} -p "${CP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" logs -f "${SERVICES[@]}"
     ;;
   *)
     echo "Usage: ./scripts/deploy-control-plane.sh [up|down|restart|status|logs]"

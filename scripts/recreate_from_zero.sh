@@ -4,6 +4,24 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+resolve_compose_cmd() {
+  if docker compose version >/dev/null 2>&1; then
+    printf '%s' "docker compose"
+    return 0
+  fi
+  if command -v docker-compose >/dev/null 2>&1; then
+    printf '%s' "docker-compose"
+    return 0
+  fi
+  return 1
+}
+
+if ! COMPOSE_CMD="$(resolve_compose_cmd)"; then
+  echo "Docker Compose is required but unavailable."
+  echo "Install Docker Compose plugin ('docker compose') or legacy 'docker-compose' before reset."
+  exit 1
+fi
+
 DEPLOY_TARGET="${DEPLOY_TARGET:-auto}"
 APP_COMPOSE_PROJECT_NAME="${APP_COMPOSE_PROJECT_NAME:-constructos-app}"
 PROXY_DOCKER_PROJECT_NAME="${AGENT_DOCKER_PROJECT_NAME:-}"
@@ -112,7 +130,7 @@ echo "Using compose project: ${APP_COMPOSE_PROJECT_NAME}"
 echo "Using proxy docker project scope: ${PROXY_DOCKER_PROJECT_NAME}"
 
 echo "[1/6] Stopping app stack..."
-docker compose -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" down || true
+${COMPOSE_CMD} -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" down || true
 
 echo "[1b/6] Removing app data volumes (preserving codex home auth/session volume)..."
 for volume_name in \
@@ -172,7 +190,7 @@ for i in {1..60}; do
 done
 
 echo "[6/6] Current stack status:"
-docker compose -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" ps
+${COMPOSE_CMD} -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" ps
 echo "---"
 echo "Health:"
 curl -sS "http://localhost:1102/api/health"
