@@ -155,12 +155,21 @@ function extractCodexThreadIdFromTurns(turns: any[]): string | null {
     const turn = turns[index]
     const content = String(turn?.content || '')
     if (!content) continue
-    const fromResumeCommand = content.match(/\bcos\s+resume\s+([0-9a-fA-F-]{20,})\b/)
+    const fromResumeCommand = content.match(
+      /\bcos(?:\s+--provider\s+(?:codex|claude))?\s+resume\s+([0-9a-fA-F-]{20,})\b/
+    )
     if (fromResumeCommand?.[1]) return fromResumeCommand[1]
     const fromThreadLabel = content.match(/\bcodex\s+thread\s+id\s*:\s*([0-9a-fA-F-]{20,})\b/i)
     if (fromThreadLabel?.[1]) return fromThreadLabel[1]
   }
   return null
+}
+
+function buildCosResumeCommand(provider: 'codex' | 'claude', threadId: string): string {
+  const normalizedThreadId = String(threadId || '').trim()
+  if (!normalizedThreadId) return ''
+  if (provider === 'claude') return `cos resume --provider claude ${normalizedThreadId}`
+  return `cos resume ${normalizedThreadId}`
 }
 
 function ChatTooltip({
@@ -216,10 +225,18 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const [resumeCommandCopyState, setResumeCommandCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
   const [turnCopyState, setTurnCopyState] = React.useState<TurnCopyState>({ status: 'idle', turnId: null })
   const [expandedDebugTurns, setExpandedDebugTurns] = React.useState<Record<string, boolean>>({})
+  const chatModelOverride = String(state.agentChatModel || '').trim()
+  const defaultChatModel = String(state.agentChatDefaultModel || '').trim()
+  const activeExecutionProvider = resolveActiveAgentExecutionProvider(
+    state.agentChatModel || chatModelOverride,
+    defaultChatModel
+  )
   const codexThreadId = String(state.codexChatCodexSessionId || '').trim()
     || extractCodexThreadIdFromTurns(state.codexChatTurns)
     || ''
-  const codexResumeCommand = codexThreadId ? `cos resume ${codexThreadId}` : null
+  const codexResumeCommand = codexThreadId
+    ? buildCosResumeCommand(activeExecutionProvider, codexThreadId)
+    : null
   const markVoiceLangHintSeen = React.useCallback(() => {
     setHasSeenVoiceLangHint(true)
     if (typeof window === 'undefined') return
@@ -525,16 +542,10 @@ export function CodexChatDrawer({ state }: { state: any }) {
       ? state.codexChatSessionAttachmentRefs
       : []
   )
-  const chatModelOverride = String(state.agentChatModel || '').trim()
-  const defaultChatModel = String(state.agentChatDefaultModel || '').trim()
   const effectiveChatModel = chatModelOverride || defaultChatModel || 'system default'
   const compactChatModelLabel = chatModelOverride || defaultChatModel || 'System'
   const effectiveReasoningEffort = normalizeReasoningEffort(
     state.agentChatReasoningEffort || state.agentChatDefaultReasoningEffort
-  )
-  const activeExecutionProvider = resolveActiveAgentExecutionProvider(
-    state.agentChatModel || chatModelOverride,
-    defaultChatModel
   )
   const effectiveReasoningLabel = reasoningEffortLabel(effectiveReasoningEffort, activeExecutionProvider)
   const activeExecutionProviderLabel = getAgentExecutionProviderLabel(activeExecutionProvider)

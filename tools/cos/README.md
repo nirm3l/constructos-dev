@@ -1,25 +1,26 @@
 # COS CLI
 
-`cos` is a thin wrapper around Codex with automatic application MCP injection.
-By default, `cos` runs on the host and executes Codex inside the app Docker container (`task-app`).
+`cos` is a thin wrapper around Codex or Claude Code with automatic application MCP injection.
+By default, `cos` runs on the host and executes the selected provider inside the app Docker container (`task-app`).
 
 Core behavior:
 - injects your application MCP server by default (`task-management-tools`)
 - prepends hidden wrapper instructions every run
-- keeps Codex in control of implementation work (file edits, commands, tests)
+- keeps the selected provider in control of implementation work (file edits, commands, tests)
 - supports layered config (`~/.cos/config.toml` and `./.cos/config.toml`)
 - uses Docker backend by default (`codex_backend = "docker"`)
 - auto-enables `--skip-git-repo-check` for `cos exec` when backend is Docker
+- defaults to `provider = "codex"` and also supports `provider = "claude"`
 
 ## Requirements
 
 - Python 3.10+
 - Docker CLI available in `PATH`
-- Running app container with Codex installed (default: `task-app`)
+- Running app container with Codex and Claude Code installed (default: `task-app`)
 - Optional for git push from Docker backend: set `GITHUB_PAT` in `task-app` container environment.
 
 For local backend (`codex_backend = "local"`):
-- Codex CLI available in `PATH` (`codex --help`)
+- Codex CLI or Claude Code CLI available in `PATH` (`codex --help` or `claude --help`)
 
 ## Install (Recommended, Ubuntu + macOS)
 
@@ -131,6 +132,9 @@ cos chat "Implement CI cache improvements and run tests"
 # non-interactive execution
 cos exec "Implement retry logic in notification worker"
 
+# run with Claude Code in the same app container
+cos --provider claude chat
+
 # diagnostics
 cos doctor
 cos doctor --app-mcp-url https://example.com --json
@@ -144,11 +148,14 @@ For Docker backend, `cos doctor` also reports git push readiness checks:
 Useful options:
 - `--repo /path/to/repo`
 - `--app-mcp-url http://localhost:8091/mcp`
+- `--provider codex` or `--provider claude`
 - `--codex-backend docker` or `--codex-backend local`
 - `--docker-container task-app`
 - `--docker-workdir /app`
-- `--docker-codex-home-root /home/app/codex-home/workspace` (used by `cos resume` to resolve app chat thread ids)
+- `--docker-codex-home-root /home/app/agent-home/workspace` (used by `cos resume` to resolve persisted Codex sessions)
+- `--docker-claude-home-root /home/app/agent-home/workspace` (used by `cos resume` to resolve persisted Claude Code sessions)
 - `cos resume --last` to continue the most recent interactive Codex session
+- Docker-backed runs seed a writable provider home under `/home/app/agent-home/cos/` so trust prompts and provider state can persist without mutating the host-mounted Codex config
 - `--system-prompt-file ~/.cos/system.md`
 - `--dangerous`
 - `--yolo` (global shortcut for dangerous bypass mode)
@@ -174,12 +181,15 @@ cos config validate
 Example config file:
 ```toml
 [cos]
+provider = "codex"
 codex_backend = "docker"
 docker_container = "task-app"
 docker_workdir = "/app"
 docker_codex_binary = "codex"
+docker_claude_binary = "claude"
 docker_app_mcp_url = "http://mcp-tools:8091/mcp"
-docker_codex_home_root = "/home/app/codex-home/workspace"
+docker_codex_home_root = "/home/app/agent-home/workspace"
+docker_claude_home_root = "/home/app/agent-home/workspace"
 app_mcp_name = "task-management-tools"
 app_mcp_url = "http://localhost:8091/mcp" # local backend default; auto replaced by docker_app_mcp_url when backend=docker and this value is not explicitly overridden
 app_mcp_bearer_env = ""
