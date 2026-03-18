@@ -1,5 +1,5 @@
 import React from 'react'
-import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   activateLicense,
   authChangePassword,
@@ -82,6 +82,35 @@ const SEMANTIC_RELATIVE_VECTOR_FACTOR = 0.66
 const SEMANTIC_STRONG_VECTOR_SIMILARITY = 0.72
 const SEMANTIC_MIN_FALLBACK_VECTOR_SIMILARITY = 0.38
 const SEMANTIC_FALLBACK_MAX_ITEMS_WITHOUT_TOKEN_MATCH = 2
+
+type TeamAgentDescriptor = {
+  id: string
+  name: string
+  authority_role: string
+  executor_user_id: string
+}
+
+function parseTeamAgentsFromConfig(config: unknown): TeamAgentDescriptor[] {
+  if (!config || typeof config !== 'object') return []
+  const team = (config as Record<string, unknown>).team
+  if (!team || typeof team !== 'object') return []
+  const agents = (team as Record<string, unknown>).agents
+  if (!Array.isArray(agents)) return []
+  return agents
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null
+      const asObj = item as Record<string, unknown>
+      const id = String(asObj.id || '').trim()
+      if (!id) return null
+      return {
+        id,
+        name: String(asObj.name || '').trim(),
+        authority_role: String(asObj.authority_role || '').trim(),
+        executor_user_id: String(asObj.executor_user_id || '').trim(),
+      }
+    })
+    .filter((item): item is TeamAgentDescriptor => Boolean(item))
+}
 
 function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | 'xhigh' {
   const normalized = String(value || '').trim().toLowerCase()
@@ -1044,26 +1073,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     staleTime: 10_000,
   })
   const taskEditorTeamAgents = React.useMemo(() => {
-    const config = taskEditorTeamModeConfigQuery.data?.config
-    if (!config || typeof config !== 'object') return []
-    const team = (config as Record<string, unknown>).team
-    if (!team || typeof team !== 'object') return []
-    const agents = (team as Record<string, unknown>).agents
-    if (!Array.isArray(agents)) return []
-    return agents
-      .map((item) => {
-        if (!item || typeof item !== 'object') return null
-        const asObj = item as Record<string, unknown>
-        const id = String(asObj.id || '').trim()
-        if (!id) return null
-        return {
-          id,
-          name: String(asObj.name || '').trim(),
-          authority_role: String(asObj.authority_role || '').trim(),
-          executor_user_id: String(asObj.executor_user_id || '').trim(),
-        }
-      })
-      .filter(Boolean)
+    return parseTeamAgentsFromConfig(taskEditorTeamModeConfigQuery.data?.config)
   }, [taskEditorTeamModeConfigQuery.data?.config])
   const selectedNote = React.useMemo(() => {
     const fromList = notes.data?.items.find((n) => n.id === selectedNoteId) ?? null
@@ -1079,6 +1089,39 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const taskListItems = tasks.data?.items ?? []
   const noteListItems = notes.data?.items ?? []
   const specificationListItems = specifications.data?.items ?? []
+  const taskListProjectIdsWithAssignedAgents = React.useMemo(() => {
+    const projectIds = new Set<string>()
+    for (const task of taskListItems) {
+      const assignedAgentCode = String(task.assigned_agent_code || '').trim()
+      const projectId = String(task.project_id || '').trim()
+      if (!assignedAgentCode || !projectId) continue
+      projectIds.add(projectId)
+    }
+    return Array.from(projectIds).sort()
+  }, [taskListItems])
+  const taskListTeamModeConfigQueries = useQueries({
+    queries: taskListProjectIdsWithAssignedAgents.map((projectId) => ({
+      queryKey: ['project-plugin-config', userId, projectId, 'team_mode', 'tasks-panel'],
+      queryFn: () => getProjectPluginConfig(userId, projectId, 'team_mode'),
+      enabled: Boolean(userId && projectId),
+      staleTime: 10_000,
+    })),
+  })
+  const taskTeamAgentLabelsByProjectId = React.useMemo(() => {
+    const labelsByProjectId: Record<string, Record<string, string>> = {}
+    taskListProjectIdsWithAssignedAgents.forEach((projectId, index) => {
+      const agents = parseTeamAgentsFromConfig(taskListTeamModeConfigQueries[index]?.data?.config)
+      if (!agents.length) return
+      const labels: Record<string, string> = {}
+      for (const agent of agents) {
+        const label = String(agent.name || '').trim()
+        if (!label) continue
+        labels[agent.id] = label
+      }
+      if (Object.keys(labels).length > 0) labelsByProjectId[projectId] = labels
+    })
+    return labelsByProjectId
+  }, [taskListProjectIdsWithAssignedAgents, taskListTeamModeConfigQueries])
   const canLoadMoreTasks = tasksPageLimit < 500 && taskListItems.length < Number(tasks.data?.total ?? 0)
   const canLoadMoreNotes = notesPageLimit < 500 && noteListItems.length < Number(notes.data?.total ?? 0)
   const canLoadMoreSpecifications =
@@ -1826,6 +1869,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     reopenTaskMutation,
     archiveTaskMutation,
     restoreTaskMutation,
+    reviewTaskMutation,
     previewProjectFromTemplateMutation,
     createProjectMutation,
     deleteProjectMutation,
@@ -2243,6 +2287,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       reorderTaskGroupsMutation,
       restoreTaskMutation,
       reopenTaskMutation,
+      reviewTaskMutation,
       completeTaskMutation,
       showProjectCreateForm,
       showProjectEditForm,
@@ -2542,6 +2587,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       submitFeedbackPending: submitFeedbackMutation.isPending,
       projectNames,
       taskListItems,
+      taskTeamAgentLabelsByProjectId,
       canLoadMoreTasks,
       loadMoreTasks: () => setTasksPageLimit((prev) => Math.min(prev + 250, 500)),
       taskLookupItems: taskLookup.data?.items ?? [],

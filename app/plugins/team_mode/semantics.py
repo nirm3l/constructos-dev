@@ -42,6 +42,7 @@ def default_team_mode_config() -> dict[str, Any]:
         },
         "review_policy": {
             "require_code_review": False,
+            "reviewer_user_id": None,
         },
         "labels": {label.replace("-", "_"): label for label in RESERVED_LIFECYCLE_LABELS},
     }
@@ -103,10 +104,11 @@ def normalize_oversight(raw: Any) -> dict[str, Any]:
     }
 
 
-def normalize_review_policy(raw: Any) -> dict[str, bool]:
+def normalize_review_policy(raw: Any) -> dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
     return {
         "require_code_review": bool(source.get("require_code_review", False)),
+        "reviewer_user_id": str(source.get("reviewer_user_id") or "").strip() or None,
     }
 
 

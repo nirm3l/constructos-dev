@@ -354,6 +354,13 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
             "scheduled_at_utc": legacy_schedule.get("scheduled_at_utc"),
             "schedule_timezone": legacy_schedule.get("schedule_timezone"),
             "schedule_state": state.get("schedule_state", "idle"),
+            "review_required": bool(state.get("review_required", False)),
+            "review_status": str(state.get("review_status") or "").strip() or None,
+            "review_requested_at": state.get("review_requested_at"),
+            "reviewed_at": state.get("reviewed_at"),
+            "reviewed_by_user_id": state.get("reviewed_by_user_id"),
+            "review_source_assignee_id": state.get("review_source_assignee_id"),
+            "review_source_assigned_agent_code": state.get("review_source_assigned_agent_code"),
             "last_schedule_run_at": state.get("last_schedule_run_at"),
             "last_schedule_error": state.get("last_schedule_error"),
             "archived": bool(state.get("archived", False)),
@@ -377,6 +384,13 @@ def load_task_view(db: Session, task_id: str) -> dict[str, Any] | None:
                 serialized["completed_at"] = state.get("completed_at")
             if state.get("status"):
                 serialized["status"] = state.get("status")
+            serialized["review_required"] = bool(state.get("review_required", False))
+            serialized["review_status"] = str(state.get("review_status") or "").strip() or None
+            serialized["review_requested_at"] = state.get("review_requested_at")
+            serialized["reviewed_at"] = state.get("reviewed_at")
+            serialized["reviewed_by_user_id"] = state.get("reviewed_by_user_id")
+            serialized["review_source_assignee_id"] = state.get("review_source_assignee_id")
+            serialized["review_source_assigned_agent_code"] = state.get("review_source_assigned_agent_code")
         return serialized
     return None
 

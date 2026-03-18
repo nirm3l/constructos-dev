@@ -524,6 +524,15 @@ def _validate_team_mode_config(config: dict[str, Any]) -> tuple[list[dict[str, s
                 "message": "review_policy.require_code_review must be a boolean",
             }
         )
+    reviewer_user_id = str(review_policy.get("reviewer_user_id") or "").strip()
+    if reviewer_user_id and not re.fullmatch(r"[0-9a-fA-F-]{36}", reviewer_user_id):
+        errors.append(
+            {
+                "path": "review_policy.reviewer_user_id",
+                "code": "invalid_format",
+                "message": "review_policy.reviewer_user_id must be a UUID",
+            }
+        )
 
     expected_label_keys = {label.replace("-", "_"): label for label in RESERVED_LIFECYCLE_LABELS}
     for key, expected_value in expected_label_keys.items():

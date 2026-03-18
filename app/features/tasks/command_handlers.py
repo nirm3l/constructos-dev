@@ -1102,6 +1102,32 @@ def _resolve_team_mode_human_owner_user_id(
     return user_id or None
 
 
+def _resolve_team_mode_reviewer_user_id(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str | None,
+    team_mode_config: dict[str, Any] | None = None,
+) -> str | None:
+    config = team_mode_config if isinstance(team_mode_config, dict) else _load_enabled_team_mode_config(
+        db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    if not isinstance(config, dict):
+        return None
+    review_policy = normalize_review_policy(config.get("review_policy"))
+    reviewer_user_id = str(review_policy.get("reviewer_user_id") or "").strip()
+    if reviewer_user_id:
+        return reviewer_user_id
+    return _resolve_team_mode_human_owner_user_id(
+        db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        team_mode_config=config,
+    )
+
+
 def _resolve_team_agent_assignment_by_role(
     db: Session,
     *,
@@ -2178,6 +2204,60 @@ class PatchTaskHandler:
                 to_status=requested_status,
                 task_id=self.task_id,
             )
+        team_mode_config = _load_enabled_team_mode_config(
+            self.ctx.db,
+            workspace_id=workspace_id,
+            project_id=str(event_payload.get("project_id") or project_id or "").strip() or None,
+        )
+        status_semantics = normalize_status_semantics(
+            team_mode_config.get("status_semantics") if isinstance(team_mode_config, dict) else None
+        )
+        current_semantic_status = semantic_status_key(status=current_status, status_semantics=status_semantics)
+        requested_semantic_status = semantic_status_key(status=requested_status, status_semantics=status_semantics)
+        review_policy = normalize_review_policy(
+            team_mode_config.get("review_policy") if isinstance(team_mode_config, dict) else None
+        )
+        if requested_semantic_status == "in_review" and bool(review_policy.get("require_code_review")):
+            reviewer_user_id = _resolve_team_mode_reviewer_user_id(
+                self.ctx.db,
+                workspace_id=workspace_id,
+                project_id=str(event_payload.get("project_id") or project_id or "").strip() or None,
+                team_mode_config=team_mode_config,
+            )
+            if not reviewer_user_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Code review requires a configured human reviewer before entering In Review.",
+                )
+            review_source_assignee_id = effective_assignee_id
+            review_source_assigned_agent_code = resolved_agent_code
+            if current_semantic_status == "in_review":
+                review_source_assignee_id = str(
+                    event_payload.get("review_source_assignee_id")
+                    or (current_state.get("review_source_assignee_id") if current_state else None)
+                    or ""
+                ).strip() or None
+                review_source_assigned_agent_code = str(
+                    event_payload.get("review_source_assigned_agent_code")
+                    or (current_state.get("review_source_assigned_agent_code") if current_state else None)
+                    or ""
+                ).strip() or None
+            lead_assignee_id, lead_agent_code = _resolve_team_agent_assignment_by_role(
+                self.ctx.db,
+                workspace_id=workspace_id,
+                project_id=str(event_payload.get("project_id") or project_id or "").strip() or None,
+                authority_role="Lead",
+            )
+            event_payload["assignee_id"] = reviewer_user_id
+            event_payload["assigned_agent_code"] = None
+            event_payload["review_required"] = True
+            event_payload["review_status"] = "pending"
+            event_payload["review_requested_at"] = to_iso_utc(datetime.now(timezone.utc))
+            event_payload["review_source_assignee_id"] = review_source_assignee_id
+            event_payload["review_source_assigned_agent_code"] = review_source_assigned_agent_code
+            event_payload["review_next_lead_assignee_id"] = lead_assignee_id
+            event_payload["review_next_lead_assigned_agent_code"] = lead_agent_code
+            event_payload["team_mode_phase"] = "in_review"
 
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, self.task_id)

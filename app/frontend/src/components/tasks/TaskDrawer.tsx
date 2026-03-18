@@ -81,6 +81,38 @@ function parseCsvIds(raw: string): string[] {
   return out
 }
 
+function extractTaskBranchTarget(externalRefs: Array<{ url?: string; title?: string; source?: string }> | undefined): ProjectGitRepositoryTarget | null {
+  for (const ref of externalRefs ?? []) {
+    const target = parseProjectGitRepositoryExternalRef({
+      url: String(ref.url || ''),
+      title: ref.title,
+      source: ref.source,
+    })
+    if (!target) continue
+    const candidateRef = String(target.headRef || target.ref || '').trim()
+    if (candidateRef.startsWith('task/')) {
+      return {
+        mode: 'diff',
+        baseRef: 'main',
+        headRef: candidateRef,
+        ref: candidateRef,
+      }
+    }
+  }
+  return null
+}
+
+function buildReviewDiffTarget(task: { id: string; external_refs?: Array<{ url?: string; title?: string; source?: string }> } | null | undefined): ProjectGitRepositoryTarget | null {
+  if (!task) return null
+  const branchTarget = extractTaskBranchTarget(task.external_refs)
+  if (!branchTarget) return null
+  return {
+    ...branchTarget,
+    mode: 'diff',
+    reviewTaskId: String(task.id || '').trim() || undefined,
+  }
+}
+
 function toCsvIds(values: string[]): string {
   return parseCsvIds(values.join(',')).join(', ')
 }
@@ -305,6 +337,7 @@ export function TaskDrawer({ state }: { state: any }) {
   const [externalTaskPickerQuery, setExternalTaskPickerQuery] = React.useState('')
   const [gitRepositoryDialogTarget, setGitRepositoryDialogTarget] = React.useState<ProjectGitRepositoryTarget | null>(null)
   const pendingPostDiscardActionRef = React.useRef<(() => void) | null>(null)
+  const reviewLinkAutoOpenRef = React.useRef<string>('')
 
   const forceCloseTaskEditor = React.useCallback(() => {
     state.setSelectedTaskId(null)
@@ -353,7 +386,51 @@ export function TaskDrawer({ state }: { state: any }) {
     return true
   }, [])
 
-  if (!state.selectedTask) return null
+  const selectedTask = state.selectedTask ?? null
+  const reviewDiffTarget = React.useMemo(() => buildReviewDiffTarget(selectedTask), [selectedTask])
+  const isSelectedTaskInReview = String(selectedTask?.status || '').trim().toLowerCase() === 'in review'
+  const isSelectedTaskReviewRequired = Boolean(selectedTask?.review_required)
+  const canOpenReviewDiff = isSelectedTaskInReview && isSelectedTaskReviewRequired && reviewDiffTarget !== null
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined' || !canOpenReviewDiff || !selectedTask?.id) return
+    const params = new URLSearchParams(window.location.search)
+    const repoInspector = String(params.get('repo_inspector') || '').trim().toLowerCase()
+    const repoMode = String(params.get('repo_mode') || '').trim().toLowerCase()
+    const taskId = String(params.get('task') || '').trim()
+    if (repoInspector !== 'open' || repoMode !== 'diff' || taskId !== String(selectedTask.id || '').trim()) return
+    const baseRef = String(params.get('repo_base') || '').trim() || String(reviewDiffTarget?.baseRef || 'main')
+    const headRef = String(params.get('repo_head') || '').trim() || String(reviewDiffTarget?.headRef || '')
+    if (!headRef) return
+    const autoOpenKey = `${taskId}:${baseRef}:${headRef}`
+    if (reviewLinkAutoOpenRef.current === autoOpenKey) return
+    reviewLinkAutoOpenRef.current = autoOpenKey
+    setGitRepositoryDialogTarget({
+      mode: 'diff',
+      baseRef,
+      headRef,
+      ref: headRef,
+      reviewTaskId: String(selectedTask.id || '').trim(),
+    })
+  }, [canOpenReviewDiff, reviewDiffTarget, selectedTask?.id])
+
+  React.useEffect(() => {
+    reviewLinkAutoOpenRef.current = ''
+  }, [selectedTask?.id])
+
+  const runReviewAction = React.useCallback(async (action: 'approve' | 'request_changes') => {
+    if (!state.selectedTask?.id) return
+    if (!state.reviewTaskMutation) {
+      const message = 'Review action is unavailable in the current task context.'
+      state.setUiError?.(message)
+      state.setTaskEditorError?.(message)
+      return
+    }
+    await state.reviewTaskMutation.mutateAsync({ taskId: state.selectedTask.id, action })
+    setGitRepositoryDialogTarget(null)
+  }, [state])
+
+  if (!selectedTask) return null
   const linkedNotes: Note[] = state.taskNotes?.data?.items ?? []
   const taskGroups: Array<{ id: string; name: string }> = state.taskGroups ?? []
   const selectedTaskGroupId = String(state.editTaskGroupId || '')
@@ -367,10 +444,13 @@ export function TaskDrawer({ state }: { state: any }) {
     statusOptions.find((status) => String(status || '').trim().toLowerCase() === 'completed')
     || statusOptions.find((status) => String(status || '').trim().toLowerCase() === 'done')
     || 'Completed'
-  const isSelectedTaskInReview = String(state.selectedTask.status || '').trim().toLowerCase() === 'in review'
+  const selectedTaskReviewStatus = String(state.selectedTask.review_status || '').trim().toLowerCase()
   const isSelectedTaskCompleted = String(state.selectedTask.status || '').trim().toLowerCase() === String(completedStatusOption).trim().toLowerCase()
     || String(state.selectedTask.status || '').trim().toLowerCase() === 'done'
   const localTimezone = detectLocalTimezone()
+  const reviewTaskHref = canOpenReviewDiff
+    ? `?tab=tasks&project=${encodeURIComponent(String(state.selectedTask.project_id || ''))}&task=${encodeURIComponent(String(state.selectedTask.id || ''))}&repo_inspector=open&repo_mode=diff&repo_base=${encodeURIComponent(String(reviewDiffTarget?.baseRef || 'main'))}&repo_head=${encodeURIComponent(String(reviewDiffTarget?.headRef || ''))}`
+    : null
 
   const statusSelectOptions = (() => {
     const ordered = [...statusOptions, String(state.editStatus || '').trim()].map((item) => String(item || '').trim())
@@ -677,14 +757,14 @@ export function TaskDrawer({ state }: { state: any }) {
                       <DropdownMenu.Item
                         className="taskdrawer-actions-menu-item"
                         disabled={Boolean(state.reviewTaskMutation?.isPending) || Boolean(state.taskIsDirty)}
-                        onSelect={() => state.reviewTaskMutation?.mutate({ taskId: state.selectedTask.id, action: 'approve' })}
+                        onSelect={() => runReviewAction('approve')}
                       >
                         Approve review
                       </DropdownMenu.Item>
                       <DropdownMenu.Item
                         className="taskdrawer-actions-menu-item"
                         disabled={Boolean(state.reviewTaskMutation?.isPending) || Boolean(state.taskIsDirty)}
-                        onSelect={() => state.reviewTaskMutation?.mutate({ taskId: state.selectedTask.id, action: 'request_changes' })}
+                        onSelect={() => runReviewAction('request_changes')}
                       >
                         Request changes
                       </DropdownMenu.Item>
@@ -744,6 +824,67 @@ export function TaskDrawer({ state }: { state: any }) {
             <span>{state.projectNames[state.selectedTask.project_id] || state.selectedTask.project_id}</span>
           </button>
         </div>
+        {isSelectedTaskInReview && isSelectedTaskReviewRequired ? (
+          <div className="task-review-panel">
+            <div>
+              <div className="field-label">Human review</div>
+              <div className="meta">
+                {selectedTaskReviewStatus === 'approved'
+                  ? 'Review approved. Developer automation can continue with merge handoff.'
+                  : 'This task must be reviewed by a human before merge can continue.'}
+              </div>
+            </div>
+            <div className="row wrap" style={{ gap: 8 }}>
+              <button
+                type="button"
+                className="status-chip"
+                disabled={!canOpenReviewDiff}
+                onClick={() => {
+                  if (!reviewDiffTarget) return
+                  setGitRepositoryDialogTarget(reviewDiffTarget)
+                }}
+              >
+                Review branch diff
+              </button>
+              {reviewTaskHref ? (
+                <button
+                  type="button"
+                  className="status-chip"
+                  onClick={() =>
+                    state.copyShareLink({
+                      tab: 'tasks',
+                      projectId: state.selectedTask.project_id,
+                      taskId: state.selectedTask.id,
+                      repoInspector: {
+                        mode: 'diff',
+                        baseRef: String(reviewDiffTarget?.baseRef || 'main'),
+                        headRef: String(reviewDiffTarget?.headRef || ''),
+                      },
+                    })
+                  }
+                >
+                  Copy review link
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="status-chip danger-ghost"
+                disabled={Boolean(state.reviewTaskMutation?.isPending) || Boolean(state.taskIsDirty)}
+                onClick={() => runReviewAction('request_changes')}
+              >
+                Request changes
+              </button>
+              <button
+                type="button"
+                className="status-chip active"
+                disabled={Boolean(state.reviewTaskMutation?.isPending) || Boolean(state.taskIsDirty)}
+                onClick={() => runReviewAction('approve')}
+              >
+                Approve review
+              </button>
+            </div>
+          </div>
+        ) : null}
         {state.selectedTask.specification_id && (
           <div className="field-control" style={{ marginBottom: 8 }}>
             <span className="field-label">Specification</span>
@@ -1463,6 +1604,22 @@ export function TaskDrawer({ state }: { state: any }) {
         userId={state.userId}
         projectId={state.selectedTask?.project_id || ''}
         target={gitRepositoryDialogTarget}
+        reviewContext={
+          canOpenReviewDiff
+            ? {
+                taskId: String(state.selectedTask.id || ''),
+                taskTitle: String(state.selectedTask.title || 'Task review').trim() || 'Task review',
+                taskHref: `?tab=tasks&project=${encodeURIComponent(String(state.selectedTask.project_id || ''))}&task=${encodeURIComponent(String(state.selectedTask.id || ''))}`,
+                isPending: Boolean(state.reviewTaskMutation?.isPending),
+                onApprove: () => {
+                  void runReviewAction('approve')
+                },
+                onRequestChanges: () => {
+                  void runReviewAction('request_changes')
+                },
+              }
+            : null
+        }
       />
     </Tooltip.Provider>
   )

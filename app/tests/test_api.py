@@ -4068,6 +4068,65 @@ def test_runner_contract_validation_prefers_clean_repo_state_over_stale_dirty_ou
     assert error is None
 
 
+def test_runner_contract_validation_synthesizes_missing_contract_from_clean_branch_handoff(tmp_path, monkeypatch):
+    import subprocess
+
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
+    from shared.project_repository import (
+        ensure_project_repository_initialized,
+        resolve_task_branch_name,
+        resolve_task_worktree_path,
+    )
+
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path))
+    project_name = "Battle City"
+    project_id = "proj-missing-contract"
+    task_id = "c698120f-13f5-5bf5-a4f3-346ea6146e83"
+    title = "Implement enemy AI and wave orchestration"
+
+    repo = ensure_project_repository_initialized(project_name=project_name, project_id=project_id)
+    branch = resolve_task_branch_name(task_id=task_id, title=title)
+    worktree = resolve_task_worktree_path(project_name=project_name, project_id=project_id, task_id=task_id)
+
+    subprocess.run(["git", "worktree", "add", "-b", branch, str(worktree), "main"], cwd=str(repo), check=True, capture_output=True, text=True)
+    (worktree / "src").mkdir(parents=True, exist_ok=True)
+    (worktree / "src" / "enemy-ai.js").write_text("export const enemyAI = true;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/enemy-ai.js"], cwd=str(worktree), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "feat: implement enemy ai"], cwd=str(worktree), check=True, capture_output=True, text=True)
+
+    outcome = AutomationOutcome(
+        action="comment",
+        summary="Enemy AI implementation is ready.",
+        comment="Ready for Lead handoff.",
+        execution_outcome_contract=None,
+        usage={},
+    )
+
+    git_evidence = runner_module._merge_git_evidence(
+        runner_module._collect_git_evidence_from_outcome(outcome),
+        runner_module._collect_git_evidence_from_repo_state(
+            project_name=project_name,
+            project_id=project_id,
+            task_id=task_id,
+            title=title,
+        ),
+    )
+    committed_handoff = runner_module._inspect_committed_task_branch_handoff(git_evidence)
+    assert committed_handoff.get("branch_ahead_of_main") is True
+    assert committed_handoff.get("after_is_dirty") is False
+
+    error = runner_module._validate_execution_outcome_contract(
+        outcome=outcome,
+        assignee_role="Developer",
+        task_status="In Progress",
+        git_delivery_enabled=True,
+        require_nontrivial_dev_changes=True,
+        git_evidence=git_evidence,
+    )
+    assert error is None
+
+
 def test_runner_contract_validation_derives_files_changed_from_dirty_task_worktree(tmp_path, monkeypatch):
     import subprocess
 
@@ -4186,7 +4245,7 @@ def test_runner_finalizes_dirty_developer_handoff_with_commit(tmp_path, monkeypa
     assert str(auto_commit.get("commit_sha") or "").strip()
     committed_handoff = runner_module._inspect_committed_task_branch_handoff(updated_git_evidence)
     assert committed_handoff.get("after_is_dirty") is False
-    assert committed_handoff.get("branch_differs_from_main") is True
+    assert committed_handoff.get("branch_ahead_of_main") is True
 
 
 def test_runner_finalizes_trivial_dirty_residue_when_branch_already_has_nontrivial_handoff(tmp_path, monkeypatch):
@@ -4230,7 +4289,7 @@ def test_runner_finalizes_trivial_dirty_residue_when_branch_already_has_nontrivi
     )
     assert bool(initial_git_evidence.get("after_is_dirty")) is True
     committed_handoff = runner_module._inspect_committed_task_branch_handoff(initial_git_evidence)
-    assert committed_handoff.get("branch_differs_from_main") is True
+    assert committed_handoff.get("branch_ahead_of_main") is True
 
     updated_git_evidence, auto_commit = runner_module._finalize_developer_handoff_commit_if_safe(
         project_name=project_name,
@@ -4248,7 +4307,86 @@ def test_runner_finalizes_trivial_dirty_residue_when_branch_already_has_nontrivi
     assert str(auto_commit.get("commit_sha") or "").strip()
     refreshed_handoff = runner_module._inspect_committed_task_branch_handoff(updated_git_evidence)
     assert refreshed_handoff.get("after_is_dirty") is False
-    assert refreshed_handoff.get("branch_differs_from_main") is True
+    assert refreshed_handoff.get("branch_ahead_of_main") is True
+
+
+def test_runner_contract_validation_rejects_branch_already_reachable_from_main_before_files_changed(tmp_path, monkeypatch):
+    import subprocess
+
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
+    from shared.project_repository import (
+        ensure_project_repository_initialized,
+        resolve_task_branch_name,
+        resolve_task_worktree_path,
+    )
+
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path))
+    project_name = "Battle City"
+    project_id = "proj-stale-branch"
+    task_id = "c698120f-13f5-5bf5-a4f3-346ea6146e83"
+    title = "Implement enemy AI and wave orchestration"
+
+    repo = ensure_project_repository_initialized(project_name=project_name, project_id=project_id)
+    branch = resolve_task_branch_name(task_id=task_id, title=title)
+    worktree = resolve_task_worktree_path(project_name=project_name, project_id=project_id, task_id=task_id)
+
+    subprocess.run(["git", "worktree", "add", "-b", branch, str(worktree), "main"], cwd=str(repo), check=True, capture_output=True, text=True)
+    (worktree / "src").mkdir(parents=True, exist_ok=True)
+    (worktree / "src" / "enemy-ai.js").write_text("export const enemyAI = true;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/enemy-ai.js"], cwd=str(worktree), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "feat: implement enemy ai"], cwd=str(worktree), check=True, capture_output=True, text=True)
+    branch_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(worktree), check=True, capture_output=True, text=True).stdout.strip().lower()
+
+    subprocess.run(["git", "checkout", "main"], cwd=str(repo), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "merge", "--ff-only", branch], cwd=str(repo), check=True, capture_output=True, text=True)
+    (repo / "README.md").write_text("# Battle City\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(repo), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "docs: advance main after enemy ai merge"], cwd=str(repo), check=True, capture_output=True, text=True)
+    main_head = subprocess.run(["git", "rev-parse", "main"], cwd=str(repo), check=True, capture_output=True, text=True).stdout.strip().lower()
+    assert branch_head != main_head
+
+    outcome = AutomationOutcome(
+        action="comment",
+        summary="Enemy AI implementation is ready.",
+        comment="Ready for Lead handoff.",
+        execution_outcome_contract={
+            "contract_version": 1,
+            "files_changed": [],
+            "commit_sha": branch_head,
+            "branch": branch,
+            "tests_run": False,
+            "tests_passed": False,
+            "artifacts": [{"kind": "note", "ref": "dev:implemented"}],
+        },
+        usage={},
+    )
+
+    git_evidence = runner_module._merge_git_evidence(
+        runner_module._collect_git_evidence_from_outcome(outcome),
+        runner_module._collect_git_evidence_from_repo_state(
+            project_name=project_name,
+            project_id=project_id,
+            task_id=task_id,
+            title=title,
+        ),
+    )
+    committed_handoff = runner_module._inspect_committed_task_branch_handoff(git_evidence)
+    assert committed_handoff.get("branch_reachable_from_main") is True
+    assert committed_handoff.get("branch_ahead_of_main") is False
+
+    error = runner_module._validate_execution_outcome_contract(
+        outcome=outcome,
+        assignee_role="Developer",
+        task_status="In Progress",
+        git_delivery_enabled=True,
+        require_nontrivial_dev_changes=True,
+        git_evidence=git_evidence,
+    )
+    assert error is not None
+    assert "Developer handoff is not committed on a task branch ahead of main yet." in error
+    assert "no unique commits ahead of `main`." in error
+    assert "files_changed in execution outcome contract" not in error
 
 
 def test_developer_handoff_reports_uncommitted_files(tmp_path, monkeypatch):
@@ -16082,6 +16220,7 @@ def test_team_mode_developer_completion_enters_human_review_when_project_require
                 "branch_exists": True,
                 "branch_head_sha": after_sha,
                 "main_head_sha": before_sha,
+                "branch_ahead_of_main": True,
                 "branch_differs_from_main": True,
                 "after_head_sha": after_sha,
                 "after_on_task_branch": True,
@@ -16155,6 +16294,131 @@ def test_team_mode_developer_completion_enters_human_review_when_project_require
     assert task_payload["assigned_agent_code"] is None
 
 
+def test_team_mode_developer_completion_assigns_configured_reviewer_when_present(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _configure_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+    reviewer_id = team["lead"]
+
+    plugin_payload = client.get(f"/api/projects/{project_id}/plugins/team_mode")
+    assert plugin_payload.status_code == 200
+    config = plugin_payload.json()["config"]
+    config["review_policy"] = {
+        "require_code_review": True,
+        "reviewer_user_id": reviewer_id,
+    }
+    applied = client.post(
+        f"/api/projects/{project_id}/plugins/team_mode/apply",
+        json={"config": config, "enabled": True},
+    )
+    assert applied.status_code == 200
+
+    dev_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Developer implementation with configured reviewer",
+            "status": "In Progress",
+            "priority": "High",
+            "assignee_id": team["dev1"],
+            "assigned_agent_code": "dev-a",
+            "instruction": "Implement the gameplay changes on the task branch.",
+        },
+    )
+    assert dev_task.status_code == 200
+    dev_task_id = dev_task.json()["id"]
+
+    from features.agents.executor import AutomationOutcome
+    import features.agents.runner as runner_module
+    from features.agents.runner import QueuedAutomationRun, _record_automation_success
+
+    before_sha = "1111111111111111111111111111111111111111"
+    after_sha = "2222222222222222222222222222222222222222"
+    original_inspect_handoff = runner_module._inspect_committed_task_branch_handoff
+    original_merge_to_main = runner_module._merge_current_task_branch_to_main
+
+    def _fake_inspect_handoff(git_evidence):
+        result = original_inspect_handoff(git_evidence)
+        result.update(
+            {
+                "branch_name": "task/dev-configured-reviewer",
+                "branch_exists": True,
+                "branch_head_sha": after_sha,
+                "main_head_sha": before_sha,
+                "branch_ahead_of_main": True,
+                "branch_differs_from_main": True,
+                "after_head_sha": after_sha,
+                "after_on_task_branch": True,
+                "after_is_dirty": False,
+            }
+        )
+        return result
+
+    def _fake_merge_to_main(**_kwargs):
+        return {
+            "ok": True,
+            "merge_sha": after_sha,
+            "merged_at": "2026-03-16T15:00:00Z",
+            "external_refs": [],
+        }
+
+    runner_module._inspect_committed_task_branch_handoff = _fake_inspect_handoff
+    runner_module._merge_current_task_branch_to_main = _fake_merge_to_main
+    try:
+        _record_automation_success(
+            QueuedAutomationRun(
+                task_id=dev_task_id,
+                workspace_id=ws_id,
+                project_id=project_id,
+                title="Developer implementation with configured reviewer",
+                description="",
+                status="In Progress",
+                instruction="Implement the gameplay changes on the task branch.",
+                request_source="manual",
+                is_scheduled_run=False,
+                trigger_task_id=None,
+                trigger_from_status=None,
+                trigger_to_status=None,
+                triggered_at=None,
+                actor_user_id=team["dev1"],
+            ),
+            outcome=AutomationOutcome(
+                action="comment",
+                summary="Implemented on task branch task/dev-configured-reviewer with commit 2222222.",
+                comment=None,
+                execution_outcome_contract={
+                    "contract_version": 1,
+                    "files_changed": ["src/game/tetris.ts"],
+                    "tests_run": False,
+                    "tests_passed": False,
+                    "commit_sha": after_sha,
+                    "branch": "task/dev-configured-reviewer",
+                    "artifacts": [],
+                },
+                usage={
+                    "git_evidence": {
+                        "repo_root": str(tmp_path / "repo-placeholder"),
+                        "task_branch": "task/dev-configured-reviewer",
+                        "before": {"head_sha": before_sha},
+                        "after": {"head_sha": after_sha, "on_task_branch": True, "is_dirty": False},
+                    }
+                },
+            ),
+        )
+    finally:
+        runner_module._inspect_committed_task_branch_handoff = original_inspect_handoff
+        runner_module._merge_current_task_branch_to_main = original_merge_to_main
+
+    task_payload = client.get(f"/api/tasks/{dev_task_id}").json()
+    assert task_payload["status"] == "In Review"
+    assert task_payload["assignee_id"] == reviewer_id
+    assert task_payload["assigned_agent_code"] is None
+
+
 def test_team_mode_review_approval_requeues_task_to_developer_for_merge(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -16211,6 +16475,255 @@ def test_team_mode_review_approval_requeues_task_to_developer_for_merge(tmp_path
     automation_payload = automation.json()
     assert automation_payload["automation_state"] in {"queued", "running", "completed"}
     assert automation_payload["last_requested_source"] == "review_approved"
+
+
+def test_patch_task_to_in_review_reassigns_human_reviewer_when_code_review_required(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _configure_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+    plugin_payload = client.get(f"/api/projects/{project_id}/plugins/team_mode")
+    assert plugin_payload.status_code == 200
+    config = plugin_payload.json()["config"]
+    config["review_policy"] = {
+        "require_code_review": True,
+        "reviewer_user_id": "00000000-0000-0000-0000-000000000001",
+    }
+    applied = client.post(
+        f"/api/projects/{project_id}/plugins/team_mode/apply",
+        json={"config": config, "enabled": True},
+    )
+    assert applied.status_code == 200
+
+    task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Manual review routing patch",
+            "status": "In Progress",
+            "priority": "High",
+            "assignee_id": team["dev1"],
+            "assigned_agent_code": "dev-a",
+            "instruction": "Ship implementation and route through required review.",
+        },
+    )
+    assert task.status_code == 200
+    task_id = task.json()["id"]
+
+    moved = client.patch(f"/api/tasks/{task_id}", json={"status": "In Review"})
+    assert moved.status_code == 200
+    payload = moved.json()
+    assert payload["status"] == "In Review"
+    assert payload["assignee_id"] == "00000000-0000-0000-0000-000000000001"
+    assert payload["assigned_agent_code"] is None
+    assert payload["review_required"] is True
+    assert payload["review_status"] == "pending"
+    assert payload["review_source_assignee_id"] is not None
+    assert payload["review_source_assigned_agent_code"] == "dev-a"
+
+
+def test_team_mode_review_approved_completion_merges_without_reentering_review(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _configure_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+    plugin_payload = client.get(f"/api/projects/{project_id}/plugins/team_mode")
+    assert plugin_payload.status_code == 200
+    config = plugin_payload.json()["config"]
+    config["review_policy"] = {"require_code_review": True}
+    applied = client.post(
+        f"/api/projects/{project_id}/plugins/team_mode/apply",
+        json={"config": config, "enabled": True},
+    )
+    assert applied.status_code == 200
+
+    review_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Approved review merge handoff",
+            "status": "In Review",
+            "priority": "High",
+            "assignee_id": "00000000-0000-0000-0000-000000000001",
+            "assigned_agent_code": None,
+            "instruction": "Finalize the already approved branch merge handoff.",
+        },
+    )
+    assert review_task.status_code == 200
+    dev_task_id = review_task.json()["id"]
+
+    patched = client.patch(
+        f"/api/tasks/{dev_task_id}",
+        json={
+            "review_source_assignee_id": team["dev1"],
+            "review_source_assigned_agent_code": "dev-a",
+            "review_required": True,
+            "review_status": "pending",
+        },
+    )
+    assert patched.status_code == 200
+    approved = client.post(f"/api/tasks/{dev_task_id}/review", json={"action": "approve"})
+    assert approved.status_code == 200
+    approved_payload = approved.json()
+    assert approved_payload["status"] == "In Progress"
+    assert approved_payload["review_status"] == "approved"
+
+    from features.agents.executor import AutomationOutcome
+    import features.agents.runner as runner_module
+    from features.agents.runner import QueuedAutomationRun, _record_automation_success
+
+    before_sha = "1111111111111111111111111111111111111111"
+    after_sha = "2222222222222222222222222222222222222222"
+    original_inspect_handoff = runner_module._inspect_committed_task_branch_handoff
+    original_merge_to_main = runner_module._merge_current_task_branch_to_main
+    merge_calls: list[dict[str, object]] = []
+
+    def _fake_inspect_handoff(git_evidence):
+        result = original_inspect_handoff(git_evidence)
+        result.update(
+            {
+                "branch_name": "task/review-approved-merge",
+                "branch_exists": True,
+                "branch_head_sha": after_sha,
+                "main_head_sha": before_sha,
+                "branch_ahead_of_main": True,
+                "branch_differs_from_main": True,
+                "after_head_sha": after_sha,
+                "after_on_task_branch": True,
+                "after_is_dirty": False,
+            }
+        )
+        return result
+
+    def _fake_merge_to_main(**kwargs):
+        merge_calls.append(dict(kwargs))
+        return {
+            "ok": True,
+            "merge_sha": after_sha,
+            "merged_at": "2026-03-16T15:00:00Z",
+            "external_refs": [
+                {"url": f"commit:{after_sha}", "title": "task commit"},
+                {"url": "task/review-approved-merge", "title": "task branch"},
+                {"url": f"merge:main:{after_sha}", "title": "merged to main"},
+            ],
+        }
+
+    runner_module._inspect_committed_task_branch_handoff = _fake_inspect_handoff
+    runner_module._merge_current_task_branch_to_main = _fake_merge_to_main
+    try:
+        _record_automation_success(
+            QueuedAutomationRun(
+                task_id=dev_task_id,
+                workspace_id=ws_id,
+                project_id=project_id,
+                title="Approved review merge handoff",
+                description="",
+                status="In Progress",
+                instruction="Finalize the already approved branch merge handoff.",
+                request_source="review_approved",
+                is_scheduled_run=False,
+                trigger_task_id=None,
+                trigger_from_status=None,
+                trigger_to_status=None,
+                triggered_at=None,
+                actor_user_id=team["dev1"],
+            ),
+            outcome=AutomationOutcome(
+                action="comment",
+                summary="Merged the approved task branch into main.",
+                comment=None,
+                execution_outcome_contract={
+                    "contract_version": 1,
+                    "files_changed": ["src/gameplay/score.ts"],
+                    "tests_run": False,
+                    "tests_passed": False,
+                    "commit_sha": after_sha,
+                    "branch": "task/review-approved-merge",
+                    "artifacts": [],
+                },
+                usage={
+                    "git_evidence": {
+                        "repo_root": str(tmp_path / "repo-placeholder"),
+                        "task_branch": "task/review-approved-merge",
+                        "before": {"head_sha": before_sha},
+                        "after": {"head_sha": after_sha, "on_task_branch": True, "is_dirty": False},
+                    }
+                },
+            ),
+        )
+    finally:
+        runner_module._inspect_committed_task_branch_handoff = original_inspect_handoff
+        runner_module._merge_current_task_branch_to_main = original_merge_to_main
+
+    assert len(merge_calls) == 1
+    task_payload = client.get(f"/api/tasks/{dev_task_id}").json()
+    assert task_payload["status"] != "In Review"
+    assert task_payload["review_status"] == "approved"
+
+
+def test_merge_to_main_rejects_review_required_task_without_approval(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    _configure_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+    plugin_payload = client.get(f"/api/projects/{project_id}/plugins/team_mode")
+    assert plugin_payload.status_code == 200
+    config = plugin_payload.json()["config"]
+    config["review_policy"] = {"require_code_review": True}
+    applied = client.post(
+        f"/api/projects/{project_id}/plugins/team_mode/apply",
+        json={"config": config, "enabled": True},
+    )
+    assert applied.status_code == 200
+
+    task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Pending review merge guard",
+            "status": "In Progress",
+            "priority": "High",
+            "instruction": "This branch should not merge without approval.",
+            "external_refs": [
+                {"url": "task/pending-review-guard", "title": "task branch"},
+            ],
+        },
+    )
+    assert task.status_code == 200
+    task_id = task.json()["id"]
+
+    patched = client.patch(
+        f"/api/tasks/{task_id}",
+        json={
+            "review_required": True,
+            "review_status": "pending",
+        },
+    )
+    assert patched.status_code == 200
+
+    from features.agents.runner import _merge_current_task_branch_to_main
+    from shared.models import SessionLocal
+
+    with SessionLocal() as db:
+        result = _merge_current_task_branch_to_main(
+            db=db,
+            workspace_id=ws_id,
+            project_id=project_id,
+            task_id=task_id,
+            actor_user_id="00000000-0000-0000-0000-000000000001",
+        )
+
+    assert result["ok"] is False
+    assert "approved human review" in str(result["error"])
 
 
 def test_team_mode_merged_increment_completes_after_developer_merge_without_lead_handoff(tmp_path):
@@ -22098,3 +22611,56 @@ def test_project_git_delivery_repository_endpoints_return_branch_tree_and_file_p
     assert file_payload['previewable'] is True
     assert file_payload['binary'] is False
     assert 'export const enabled = true' in file_payload['content']
+
+
+def test_project_git_delivery_repository_diff_endpoint_returns_branch_patch(tmp_path):
+    import subprocess
+
+    from shared.project_repository import ensure_project_repository_initialized
+
+    os.environ["AGENT_CODEX_WORKDIR"] = str(tmp_path)
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    created = client.post('/api/projects', json={'workspace_id': ws_id, 'name': 'Repository Diff Inspector'})
+    assert created.status_code == 200
+    project = created.json()
+    project_id = project['id']
+    project_name = project['name']
+
+    repo_root = ensure_project_repository_initialized(project_name=project_name, project_id=project_id)
+    (repo_root / 'src').mkdir(parents=True, exist_ok=True)
+    (repo_root / 'README.md').write_text('# Repository Diff Inspector\n', encoding='utf-8')
+    (repo_root / 'src' / 'app.ts').write_text('export const enabled = true\n', encoding='utf-8')
+    subprocess.run(['git', 'add', 'README.md', 'src/app.ts'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'commit', '-m', 'Add baseline files'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+
+    subprocess.run(['git', 'checkout', '-b', 'task/demo-diff'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    (repo_root / 'src' / 'app.ts').write_text('export const enabled = true\nexport const review = "required"\n', encoding='utf-8')
+    (repo_root / 'notes.txt').write_text('branch notes\n', encoding='utf-8')
+    subprocess.run(['git', 'add', 'src/app.ts', 'notes.txt'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'commit', '-m', 'Add review changes'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'checkout', 'main'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+
+    response = client.get(
+        f'/api/projects/{project_id}/git-delivery/repository/diff',
+        params={'base_ref': 'main', 'head_ref': 'task/demo-diff'},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['base_ref'] == 'main'
+    assert payload['head_ref'] == 'task/demo-diff'
+    assert payload['compare_mode'] == 'merge_base'
+    assert payload['files_changed'] == 2
+    assert payload['insertions'] == 2
+    assert payload['deletions'] == 0
+    assert payload['patch_truncated'] is False
+    assert 'diff --git a/notes.txt b/notes.txt' in payload['patch']
+    assert 'diff --git a/src/app.ts b/src/app.ts' in payload['patch']
+
+    files = payload['files']
+    assert any(item['path'] == 'notes.txt' and item['status'] == 'added' and item['additions'] == 1 for item in files)
+    assert any(
+        item['path'] == 'src/app.ts' and item['status'] == 'modified' and item['additions'] == 1 and item['deletions'] == 0
+        for item in files
+    )

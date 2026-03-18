@@ -28,6 +28,11 @@ type SharePayload = {
   taskId?: string
   noteId?: string
   specificationId?: string
+  repoInspector?: {
+    mode?: 'diff' | 'explorer'
+    baseRef?: string
+    headRef?: string
+  } | null
 }
 
 export function useAppActions(c: any) {
@@ -114,6 +119,21 @@ export function useAppActions(c: any) {
       if (tab !== 'tasks') u.searchParams.delete('task')
       if (tab !== 'notes') u.searchParams.delete('note')
       if (tab !== 'specifications') u.searchParams.delete('specification')
+      const repoInspector = payload.repoInspector
+      if (repoInspector) {
+        u.searchParams.set('repo_inspector', 'open')
+        if (repoInspector.mode) u.searchParams.set('repo_mode', repoInspector.mode)
+        else u.searchParams.delete('repo_mode')
+        if (repoInspector.baseRef) u.searchParams.set('repo_base', repoInspector.baseRef)
+        else u.searchParams.delete('repo_base')
+        if (repoInspector.headRef) u.searchParams.set('repo_head', repoInspector.headRef)
+        else u.searchParams.delete('repo_head')
+      } else {
+        u.searchParams.delete('repo_inspector')
+        u.searchParams.delete('repo_mode')
+        u.searchParams.delete('repo_base')
+        u.searchParams.delete('repo_head')
+      }
       return u.toString()
     },
     [c.tab]

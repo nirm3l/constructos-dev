@@ -1867,6 +1867,18 @@ def _merge_current_task_branch_to_main(
     task_id: str,
     actor_user_id: str,
 ) -> dict[str, object]:
+    task_state, _ = rebuild_state(db, "Task", task_id)
+    project_requires_review = _team_mode_review_required_for_project(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
+    if _team_mode_review_gate_pending(state=task_state, project_requires_review=project_requires_review):
+        return {
+            "ok": False,
+            "error": "Runner error: merge to main requires an approved human review for this task.",
+        }
+
     active_lock = _project_active_deploy_lock(
         db=db,
         workspace_id=workspace_id,
@@ -1888,7 +1900,6 @@ def _merge_current_task_branch_to_main(
     repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
     if not repo_root.exists():
         return {"ok": False, "error": "Runner error: project repository path is missing during Developer merge handoff."}
-    task_state, _ = rebuild_state(db, "Task", task_id)
     refs = task_state.get("external_refs")
     branch_name = _extract_task_branch_from_refs(refs)
     if not branch_name:
@@ -2334,6 +2345,9 @@ def _inspect_committed_task_branch_handoff(git_evidence: dict[str, object]) -> d
         "branch_head_sha": "",
         "main_head_sha": "",
         "branch_differs_from_main": False,
+        "branch_ahead_of_main": False,
+        "branch_reachable_from_main": False,
+        "main_reachable_from_branch": False,
         "after_on_task_branch": after_on_task_branch,
         "after_is_dirty": after_is_dirty,
     }
@@ -2356,6 +2370,25 @@ def _inspect_committed_task_branch_handoff(git_evidence: dict[str, object]) -> d
         main_head_sha = str(out_main or "").strip().lower()
         result["main_head_sha"] = main_head_sha
         result["branch_differs_from_main"] = bool(branch_head_sha and main_head_sha and branch_head_sha != main_head_sha)
+        code_branch_in_main, _out_branch_in_main = _run_git_command(
+            cwd=repo_cwd,
+            args=["merge-base", "--is-ancestor", branch_name, "main"],
+        )
+        code_main_in_branch, _out_main_in_branch = _run_git_command(
+            cwd=repo_cwd,
+            args=["merge-base", "--is-ancestor", "main", branch_name],
+        )
+        branch_reachable_from_main = code_branch_in_main == 0
+        main_reachable_from_branch = code_main_in_branch == 0
+        result["branch_reachable_from_main"] = branch_reachable_from_main
+        result["main_reachable_from_branch"] = main_reachable_from_branch
+        result["branch_ahead_of_main"] = bool(
+            branch_head_sha
+            and main_head_sha
+            and branch_head_sha != main_head_sha
+            and main_reachable_from_branch
+            and not branch_reachable_from_main
+        )
     if task_cwd is not None:
         code_current, out_current = _run_git_command(cwd=task_cwd, args=["branch", "--show-current"])
         if code_current == 0:
@@ -2403,7 +2436,7 @@ def _finalize_developer_handoff_commit_if_safe(
         # the task branch already contains a real Developer handoff ahead of main.
         # This keeps docs-only branches from being promoted as Dev completion,
         # while preventing noisy reruns caused by minor uncommitted residue such as README edits.
-        if not bool(committed_handoff.get("branch_differs_from_main")):
+        if not bool(committed_handoff.get("branch_ahead_of_main")):
             return git_evidence, None
 
     commit_sha = _commit_repo_changes_if_any(
@@ -2487,6 +2520,11 @@ def _validate_execution_outcome_contract(
         and is_developer_role(assignee_role)
         and semantic_status_key(status=task_status) in {"todo", "active", "blocked"}
     )
+    committed_handoff = _inspect_committed_task_branch_handoff(git_evidence)
+    branch_head_sha = str(committed_handoff.get("branch_head_sha") or "").strip().lower()
+    branch_ahead_of_main = bool(committed_handoff.get("branch_ahead_of_main"))
+    task_branch = str(git_evidence.get("task_branch") or "").strip()
+    after_head_sha = str(git_evidence.get("after_head_sha") or "").strip().lower()
     contract = (
         dict(outcome.execution_outcome_contract)
         if isinstance(outcome.execution_outcome_contract, dict)
@@ -2495,7 +2533,25 @@ def _validate_execution_outcome_contract(
     if contract is None:
         if not developer_git_delivery_run:
             return None
-        return "Runner error: execution outcome contract is missing."
+        if (
+            bool(committed_handoff.get("branch_exists"))
+            and not bool(committed_handoff.get("after_is_dirty"))
+            and bool(committed_handoff.get("after_on_task_branch"))
+            and branch_ahead_of_main
+        ):
+            derived_commit_sha = branch_head_sha or after_head_sha
+            derived_files_changed = _derive_files_changed_from_git_evidence(git_evidence)
+            contract = {
+                "contract_version": 1,
+                "files_changed": list(derived_files_changed),
+                "commit_sha": derived_commit_sha or None,
+                "branch": task_branch or None,
+                "tests_run": False,
+                "tests_passed": False,
+                "artifacts": [],
+            }
+        else:
+            return "Runner error: execution outcome contract is missing."
     if int(contract.get("contract_version") or 0) != 1:
         return "Runner error: execution outcome contract version is invalid."
 
@@ -2537,14 +2593,9 @@ def _validate_execution_outcome_contract(
 
     commit_sha = str(contract.get("commit_sha") or "").strip().lower()
     branch = str(contract.get("branch") or "").strip()
-    after_head_sha = str(git_evidence.get("after_head_sha") or "").strip().lower()
-    task_branch = str(git_evidence.get("task_branch") or "").strip()
-    committed_handoff = _inspect_committed_task_branch_handoff(git_evidence)
-    branch_head_sha = str(committed_handoff.get("branch_head_sha") or "").strip().lower()
-    branch_differs_from_main = bool(committed_handoff.get("branch_differs_from_main"))
-    if developer_git_delivery_run and not commit_sha and branch_head_sha and branch_differs_from_main:
+    if developer_git_delivery_run and not commit_sha and branch_head_sha and branch_ahead_of_main:
         commit_sha = branch_head_sha
-    elif developer_git_delivery_run and not commit_sha and after_head_sha and branch_differs_from_main:
+    elif developer_git_delivery_run and not commit_sha and after_head_sha and branch_ahead_of_main:
         commit_sha = after_head_sha
     if developer_git_delivery_run and not branch and task_branch:
         branch = task_branch
@@ -2609,9 +2660,15 @@ def _validate_execution_outcome_contract(
             )
         if not bool(committed_handoff.get("after_on_task_branch")):
             return "Runner error: Developer automation must finalize from the task branch before Lead review."
-        if not branch_differs_from_main:
+        if not branch_ahead_of_main:
             main_head_sha = str(committed_handoff.get("main_head_sha") or "").strip().lower()
             if branch_head_sha and main_head_sha:
+                if bool(committed_handoff.get("branch_reachable_from_main")):
+                    return (
+                        "Runner error: Developer handoff is not committed on a task branch ahead of main yet. "
+                        f"Branch `{branch or task_branch or 'task/<unknown>'}` at `{branch_head_sha[:7]}` "
+                        "has no unique commits ahead of `main`."
+                    )
                 return (
                     "Runner error: Developer handoff is not committed on a task branch ahead of main yet. "
                     f"Branch `{branch or task_branch or 'task/<unknown>'}` is still at `{branch_head_sha[:7]}`, "
@@ -4510,6 +4567,42 @@ def _resolve_team_mode_human_owner_user_id(*, db, workspace_id: str, project_id:
     return user_id or None
 
 
+def _resolve_team_mode_reviewer_user_id(*, db, workspace_id: str, project_id: str | None) -> str | None:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return None
+    row = db.execute(
+        select(ProjectPluginConfig.config_json).where(
+            ProjectPluginConfig.workspace_id == str(workspace_id),
+            ProjectPluginConfig.project_id == normalized_project_id,
+            ProjectPluginConfig.plugin_key == "team_mode",
+            ProjectPluginConfig.enabled == True,  # noqa: E712
+            ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        )
+    ).first()
+    if row is None:
+        return None
+    try:
+        config = json.loads(str(row[0] or "").strip() or "{}")
+    except Exception:
+        config = {}
+    review_policy = config.get("review_policy") if isinstance(config, dict) and isinstance(config.get("review_policy"), dict) else {}
+    reviewer_user_id = str(review_policy.get("reviewer_user_id") or "").strip()
+    if reviewer_user_id:
+        return reviewer_user_id
+    oversight = config.get("oversight") if isinstance(config, dict) and isinstance(config.get("oversight"), dict) else {}
+    human_owner_user_id = str(oversight.get("human_owner_user_id") or "").strip()
+    return human_owner_user_id or None
+
+
+def _team_mode_review_gate_pending(*, state: dict[str, Any] | None, project_requires_review: bool) -> bool:
+    if not project_requires_review:
+        return False
+    snapshot = state if isinstance(state, dict) else {}
+    review_status = str(snapshot.get("review_status") or "").strip().lower()
+    return review_status != "approved"
+
+
 def _resolve_notification_human_user_ids(*, db, workspace_id: str, project_id: str | None) -> list[str]:
     project_humans = _resolve_project_human_member_user_ids(
         db=db,
@@ -5894,7 +5987,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
             after_is_dirty = bool(git_evidence.get("after_is_dirty"))
             committed_handoff = _inspect_committed_task_branch_handoff(git_evidence)
             branch_head_sha = str(committed_handoff.get("branch_head_sha") or "").strip().lower()
-            branch_differs_from_main = bool(committed_handoff.get("branch_differs_from_main"))
+            branch_ahead_of_main = bool(committed_handoff.get("branch_ahead_of_main"))
             git_evidence, auto_commit = _finalize_developer_handoff_commit_if_safe(
                 project_name=project_name,
                 project_id=project_id,
@@ -5929,7 +6022,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
             after_is_dirty = bool(git_evidence.get("after_is_dirty"))
             committed_handoff = _inspect_committed_task_branch_handoff(git_evidence)
             branch_head_sha = str(committed_handoff.get("branch_head_sha") or "").strip().lower()
-            branch_differs_from_main = bool(committed_handoff.get("branch_differs_from_main"))
+            branch_ahead_of_main = bool(committed_handoff.get("branch_ahead_of_main"))
             evidence_missing = not _task_has_git_delivery_completion_evidence(
                 state=state,
                 summary="",
@@ -5988,7 +6081,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 and bool(committed_handoff.get("branch_exists"))
                 and bool(committed_handoff.get("after_on_task_branch"))
                 and not bool(committed_handoff.get("after_is_dirty"))
-                and branch_differs_from_main
+                and branch_ahead_of_main
                 and (not branch_head_sha or commit_candidate == branch_head_sha)
             )
             if can_promote_candidate:
@@ -6287,10 +6380,14 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 assignee_role=assignee_role,
             )
         ):
-            review_required = _team_mode_review_required_for_project(
+            project_requires_review = _team_mode_review_required_for_project(
                 db=db,
                 workspace_id=workspace_id,
                 project_id=project_id,
+            )
+            review_required = _team_mode_review_gate_pending(
+                state=state,
+                project_requires_review=project_requires_review,
             )
             review_requested_at = completed_at
             developer_assignee_id = str(state.get("assignee_id") or "").strip() or None
@@ -6330,7 +6427,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 state["last_merged_commit_sha"] = str((merge_result or {}).get("merge_sha") or "").strip() or None
                 state["last_merged_at"] = str((merge_result or {}).get("merged_at") or "").strip() or completed_at
             if review_required:
-                human_owner_user_id = _resolve_team_mode_human_owner_user_id(
+                reviewer_user_id = _resolve_team_mode_reviewer_user_id(
                     db=db,
                     workspace_id=workspace_id,
                     project_id=project_id,
@@ -6341,7 +6438,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                     aggregate_id=run.task_id,
                     event_type=TASK_EVENT_UPDATED,
                     payload={
-                        "assignee_id": human_owner_user_id,
+                        "assignee_id": reviewer_user_id,
                         "assigned_agent_code": None,
                         "status": REQUIRED_SEMANTIC_STATUSES["in_review"],
                         "review_required": True,
@@ -6361,7 +6458,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                     },
                 )
                 state = dict(state)
-                state["assignee_id"] = human_owner_user_id
+                state["assignee_id"] = reviewer_user_id
                 state["assigned_agent_code"] = None
                 state["status"] = REQUIRED_SEMANTIC_STATUSES["in_review"]
                 state["review_required"] = True

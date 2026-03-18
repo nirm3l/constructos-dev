@@ -333,6 +333,13 @@ export type Task = {
   schedule_timezone: string | null
   schedule_state: 'idle' | 'queued' | 'running' | 'done' | 'failed'
   automation_state?: 'idle' | 'queued' | 'running' | 'completed' | 'failed'
+  review_required?: boolean
+  review_status?: string | null
+  review_requested_at?: string | null
+  reviewed_at?: string | null
+  reviewed_by_user_id?: string | null
+  review_source_assignee_id?: string | null
+  review_source_assigned_agent_code?: string | null
   last_schedule_run_at: string | null
   last_schedule_error: string | null
   archived: boolean
@@ -877,6 +884,33 @@ export type ProjectGitRepositoryFileResponse = {
   truncated: boolean
   binary: boolean
   content?: string | null
+}
+
+export type ProjectGitRepositoryDiffFile = {
+  path: string
+  old_path?: string | null
+  status: 'added' | 'modified' | 'deleted' | 'renamed' | 'copied' | 'type_changed' | 'unmerged' | string
+  status_code?: string | null
+  additions?: number | null
+  deletions?: number | null
+  binary?: boolean
+}
+
+export type ProjectGitRepositoryDiffResponse = {
+  project_id: string
+  project_name: string
+  base_ref: string
+  head_ref: string
+  compare_mode: 'merge_base' | string
+  merge_base?: string | null
+  path: string
+  context_lines: number
+  files_changed: number
+  insertions: number
+  deletions: number
+  patch: string
+  patch_truncated: boolean
+  files: ProjectGitRepositoryDiffFile[]
 }
 
 export type GraphLayoutPosition = {

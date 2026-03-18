@@ -56,6 +56,7 @@ from shared.models import Task
 
 router = APIRouter()
 _GIT_FILE_PREVIEW_BYTES_LIMIT = 200_000
+_GIT_DIFF_PATCH_BYTES_LIMIT = 350_000
 
 
 def _parse_docker_compose_ps_payload(payload: str) -> list[dict[str, object]]:
@@ -606,6 +607,148 @@ def _git_file_preview(*, repo_root: Path, ref: str, relative_path: str) -> dict[
     }
 
 
+def _parse_git_numstat_line(line: str) -> dict[str, object] | None:
+    parts = str(line or "").split("\t")
+    if len(parts) < 3:
+        return None
+    additions_raw, deletions_raw = parts[0], parts[1]
+    path_part = "\t".join(parts[2:]).strip()
+    if not path_part:
+        return None
+    old_path: str | None = None
+    path = path_part
+    if "\t" in path:
+        old_path, path = path.split("\t", 1)
+    elif " => " in path and "{" not in path:
+        old_path, path = path.split(" => ", 1)
+    additions = None if additions_raw == "-" else int(additions_raw or "0")
+    deletions = None if deletions_raw == "-" else int(deletions_raw or "0")
+    return {
+        "path": path.strip(),
+        "old_path": old_path.strip() if old_path else None,
+        "additions": additions,
+        "deletions": deletions,
+        "binary": additions is None or deletions is None,
+    }
+
+
+def _parse_git_name_status_line(line: str) -> dict[str, object] | None:
+    parts = str(line or "").split("\t")
+    if len(parts) < 2:
+        return None
+    status_token = str(parts[0] or "").strip().upper()
+    if not status_token:
+        return None
+    status = status_token[:1]
+    path = str(parts[-1] or "").strip()
+    old_path = str(parts[1] or "").strip() if status in {"R", "C"} and len(parts) >= 3 else None
+    status_map = {
+        "A": "added",
+        "M": "modified",
+        "D": "deleted",
+        "R": "renamed",
+        "C": "copied",
+        "T": "type_changed",
+        "U": "unmerged",
+    }
+    return {
+        "path": path,
+        "old_path": old_path or None,
+        "status": status_map.get(status, "modified"),
+        "status_code": status_token,
+    }
+
+
+def _git_repository_diff(
+    *,
+    repo_root: Path,
+    base_ref: str,
+    head_ref: str,
+    relative_path: str = "",
+    context_lines: int = 3,
+) -> dict[str, object]:
+    diff_args = [
+        "diff",
+        "--find-renames",
+        "--find-copies",
+        f"--unified={max(0, int(context_lines))}",
+        f"{base_ref}...{head_ref}",
+    ]
+    if relative_path:
+        diff_args.extend(["--", relative_path])
+    code_patch, patch_out, patch_err = _run_git_text(repo_root=repo_root, args=diff_args)
+    if code_patch != 0:
+        raise HTTPException(status_code=404, detail=f"Unable to load repository diff: {patch_err or 'unknown error'}")
+
+    numstat_args = ["diff", "--find-renames", "--find-copies", "--numstat", f"{base_ref}...{head_ref}"]
+    if relative_path:
+        numstat_args.extend(["--", relative_path])
+    code_numstat, numstat_out, numstat_err = _run_git_text(repo_root=repo_root, args=numstat_args)
+    if code_numstat != 0:
+        raise HTTPException(status_code=404, detail=f"Unable to summarize repository diff: {numstat_err or 'unknown error'}")
+
+    name_status_args = ["diff", "--find-renames", "--find-copies", "--name-status", f"{base_ref}...{head_ref}"]
+    if relative_path:
+        name_status_args.extend(["--", relative_path])
+    code_name_status, name_status_out, name_status_err = _run_git_text(repo_root=repo_root, args=name_status_args)
+    if code_name_status != 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unable to read repository diff files: {name_status_err or 'unknown error'}",
+        )
+
+    merge_base_code, merge_base_out, _merge_base_err = _run_git_text(
+        repo_root=repo_root,
+        args=["merge-base", base_ref, head_ref],
+    )
+    file_rows: dict[str, dict[str, object]] = {}
+    for line in numstat_out.splitlines():
+        parsed = _parse_git_numstat_line(line)
+        if not parsed:
+            continue
+        file_rows[str(parsed["path"])] = parsed
+    for line in name_status_out.splitlines():
+        parsed = _parse_git_name_status_line(line)
+        if not parsed:
+            continue
+        current_path = str(parsed["path"])
+        existing = file_rows.get(current_path, {"path": current_path})
+        existing.update(parsed)
+        file_rows[current_path] = existing
+
+    files = sorted(file_rows.values(), key=lambda item: str(item.get("path") or "").lower())
+    insertions = 0
+    deletions = 0
+    for row in files:
+        additions = row.get("additions")
+        removals = row.get("deletions")
+        if isinstance(additions, int):
+            insertions += additions
+        if isinstance(removals, int):
+            deletions += removals
+
+    patch_text = str(patch_out or "")
+    patch_truncated = False
+    if len(patch_text.encode("utf-8")) > _GIT_DIFF_PATCH_BYTES_LIMIT:
+        patch_text = ""
+        patch_truncated = True
+
+    return {
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "compare_mode": "merge_base",
+        "merge_base": merge_base_out if merge_base_code == 0 and merge_base_out else None,
+        "path": relative_path,
+        "context_lines": max(0, int(context_lines)),
+        "files_changed": len(files),
+        "insertions": insertions,
+        "deletions": deletions,
+        "patch": patch_text,
+        "patch_truncated": patch_truncated,
+        "files": files,
+    }
+
+
 @router.post("/api/projects")
 def create_project(
     payload: ProjectCreate,
@@ -986,6 +1129,35 @@ def project_git_delivery_repository_file(
         "project_name": project.name,
         "ref": normalized_ref,
         **_git_file_preview(repo_root=repo_root, ref=normalized_ref, relative_path=normalized_path),
+    }
+
+
+@router.get("/api/projects/{project_id}/git-delivery/repository/diff")
+def project_git_delivery_repository_diff(
+    project_id: str,
+    base_ref: str | None = Query(default=None),
+    head_ref: str | None = Query(default=None),
+    path: str | None = Query(default=None),
+    context_lines: int = Query(default=3, ge=0, le=20),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    project = _load_project_with_access(db, user, project_id)
+    repo_root = _load_project_git_repo_root(project=project)
+    default_branch = _git_default_branch(repo_root=repo_root)
+    normalized_base_ref = _normalize_git_ref(base_ref or default_branch)
+    normalized_head_ref = _normalize_git_ref(head_ref or "HEAD")
+    normalized_path = _normalize_repo_relative_path(path)
+    return {
+        "project_id": project.id,
+        "project_name": project.name,
+        **_git_repository_diff(
+            repo_root=repo_root,
+            base_ref=normalized_base_ref,
+            head_ref=normalized_head_ref,
+            relative_path=normalized_path,
+            context_lines=context_lines,
+        ),
     }
 
 

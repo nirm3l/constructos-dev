@@ -342,6 +342,7 @@ type TasksPanelProps = {
   clearSearchTags: () => void
   boardData: ProjectBoard | undefined
   actorNames: Record<string, string>
+  taskTeamAgentLabelsByProjectId: Record<string, Record<string, string>>
   onOpenTaskEditor: (taskId: string) => void
   onOpenSpecification: (specificationId: string, projectId: string) => void
   specificationNames: Record<string, string>
@@ -373,6 +374,7 @@ export function TasksPanel({
   clearSearchTags,
   boardData,
   actorNames,
+  taskTeamAgentLabelsByProjectId,
   onOpenTaskEditor,
   onOpenSpecification,
   specificationNames,
@@ -386,40 +388,17 @@ export function TasksPanel({
   onNewTask,
 }: TasksPanelProps) {
   const getTeamAgentLabel = React.useCallback((task: Task): string => {
+    const projectId = String(task.project_id || '').trim()
     const slot = String(task.assigned_agent_code || '').trim()
-    if (!slot) return ''
-    const normalizedSlot = slot.toLowerCase()
-    if (normalizedSlot === 'dev-a') return 'Developer A'
-    if (normalizedSlot === 'dev-b') return 'Developer B'
-    if (normalizedSlot === 'qa-a') return 'QA A'
-    if (normalizedSlot === 'lead-a') return 'Lead A'
-    const parts = slot
-      .split('-')
-      .filter(Boolean)
-    if (parts.length === 2) {
-      const role = String(parts[0] || '')
-      const ordinal = String(parts[1] || '')
-      const normalizedRole = role.toLowerCase()
-      const roleLabel =
-        normalizedRole === 'dev'
-          ? 'Developer'
-          : normalizedRole === 'qa'
-            ? 'QA'
-            : normalizedRole === 'lead'
-              ? 'Lead'
-              : `${role.charAt(0).toUpperCase()}${role.slice(1)}`
-      return `${roleLabel} ${ordinal.toUpperCase()}`
-    }
-    return parts
-      .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
-      .join(' ')
-  }, [])
+    if (!projectId || !slot) return ''
+    return String(taskTeamAgentLabelsByProjectId?.[projectId]?.[slot] || '').trim()
+  }, [taskTeamAgentLabelsByProjectId])
   const getAssigneeLabel = React.useCallback((task: Task): string => {
-    const assigneeId = String(task.assignee_id || '').trim()
-    const assignee = assigneeId ? String(actorNames?.[assigneeId] || assigneeId).trim() : ''
     const agent = getTeamAgentLabel(task)
     if (agent) return agent
-    return assignee
+    if (String(task.assigned_agent_code || '').trim()) return ''
+    const assigneeId = String(task.assignee_id || '').trim()
+    return assigneeId ? String(actorNames?.[assigneeId] || assigneeId).trim() : ''
   }, [actorNames, getTeamAgentLabel])
 
   const selectedGroupFilter = ''

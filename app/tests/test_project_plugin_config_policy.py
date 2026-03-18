@@ -41,6 +41,7 @@ def test_validate_team_mode_config_accepts_valid_payload() -> None:
         },
         "review_policy": {
             "require_code_review": True,
+            "reviewer_user_id": "22222222-2222-2222-2222-222222222222",
         },
         "labels": {
             "merged": "merged",
@@ -114,6 +115,7 @@ def test_compile_plugin_policy_uses_team_mode_contract() -> None:
             },
             "review_policy": {
                 "require_code_review": True,
+                "reviewer_user_id": "22222222-2222-2222-2222-222222222222",
             },
             "labels": {
                 "merged": "merged",
@@ -127,6 +129,7 @@ def test_compile_plugin_policy_uses_team_mode_contract() -> None:
     assert policy["version"] == 2
     assert policy["oversight"]["reconciliation_interval_seconds"] == 11
     assert policy["review_policy"]["require_code_review"] is True
+    assert policy["review_policy"]["reviewer_user_id"] == "22222222-2222-2222-2222-222222222222"
     assert "required_checks" in policy
 
 

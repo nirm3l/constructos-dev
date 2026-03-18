@@ -31,6 +31,7 @@ import type {
   GraphProjectSubgraph,
   ProjectDockerComposeRuntimeSnapshot,
   ProjectGitRepositoryBranchesResponse,
+  ProjectGitRepositoryDiffResponse,
   ProjectGitRepositoryFileResponse,
   ProjectGitRepositorySummary,
   ProjectGitRepositoryTreeResponse,
@@ -1248,6 +1249,21 @@ export const getProjectGitRepositoryFile = (
     `/api/projects/${projectId}/git-delivery/repository/file${queryString({
       ref: params.ref,
       path: params.path,
+    })}`,
+    userId
+  )
+
+export const getProjectGitRepositoryDiff = (
+  userId: string,
+  projectId: string,
+  params?: { base_ref?: string; head_ref?: string; path?: string; context_lines?: number }
+) =>
+  api<ProjectGitRepositoryDiffResponse>(
+    `/api/projects/${projectId}/git-delivery/repository/diff${queryString({
+      base_ref: params?.base_ref,
+      head_ref: params?.head_ref,
+      path: params?.path,
+      context_lines: params?.context_lines,
     })}`,
     userId
   )

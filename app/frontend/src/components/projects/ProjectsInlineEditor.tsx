@@ -192,6 +192,7 @@ function buildTeamModeStarterConfig(args: {
     },
     review_policy: {
       require_code_review: false,
+      reviewer_user_id: String(args.humanOwnerUserId || '').trim() || null,
     },
   }
 }
@@ -1357,6 +1358,9 @@ export function ProjectsInlineEditor({
       requireCodeReview: Boolean(
         (teamModeDraft?.review_policy as Record<string, unknown> | undefined)?.require_code_review
       ),
+      reviewerUserId: String(
+        ((teamModeDraft?.review_policy as Record<string, unknown> | undefined)?.reviewer_user_id as string | undefined) || ''
+      ).trim(),
     }
   }, [teamModeDraft])
 
@@ -3358,6 +3362,31 @@ export function ProjectsInlineEditor({
               <div className="meta" style={{ marginTop: 4 }}>
                 When disabled, Developer handoff continues automatically. When enabled, tasks enter <code>In Review</code> and wait for an explicit approval or request-changes decision.
               </div>
+              {teamModeQuick.requireCodeReview ? (
+                <label className="plugin-wide-field" style={{ marginTop: 8 }}>
+                  <span className="meta">Reviewer user</span>
+                  <select
+                    className="plugin-wide-input"
+                    value={teamModeQuick.reviewerUserId || userId}
+                    onChange={(e) => {
+                      patchTeamModeDraft((draft) => ({
+                        ...draft,
+                        review_policy: {
+                          ...(((draft.review_policy as Record<string, unknown> | undefined) || {}) as Record<string, unknown>),
+                          reviewer_user_id: String(e.target.value || '').trim() || null,
+                        },
+                      }))
+                    }}
+                  >
+                    {workspaceUsers.map((workspaceUser) => (
+                      <option key={`reviewer-${workspaceUser.id}`} value={workspaceUser.id}>
+                        {workspaceUser.full_name} · {workspaceUser.user_type}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="meta">If left at the default, review falls back to the Team Mode human owner.</span>
+                </label>
+              ) : null}
               <div className="plugin-config-subsection">
                 <div className="row wrap" style={{ alignItems: 'center', gap: 8, marginBottom: 6 }}>
                   <span className="meta">Lifecycle summary</span>

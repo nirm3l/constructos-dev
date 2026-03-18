@@ -4126,6 +4126,7 @@ textarea:disabled {
 
 .project-item .task-main {
   padding-left: 12px;
+  padding-right: 88px;
 }
 
 .project-item .task-main > * {
@@ -5743,8 +5744,11 @@ textarea:disabled {
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
-  align-self: flex-start;
-  margin-top: 2px;
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  margin-top: 0;
+  z-index: 1;
 }
 
 .project-item.open .project-item-actions {
@@ -13484,14 +13488,21 @@ textarea {
 .git-repository-dialog {
   width: min(1280px, calc(100vw - 32px));
   max-height: min(92vh, 920px);
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .git-repository-dialog-body {
   display: grid;
   gap: 12px;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.git-repository-desktop-layout {
+  min-height: 0;
+  overflow: visible;
 }
 
 .git-repository-toolbar {
@@ -13523,6 +13534,12 @@ textarea {
   flex-wrap: wrap;
 }
 
+.git-repository-mode-switch {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .git-repository-layout {
   display: grid;
   grid-template-columns: minmax(220px, 280px) minmax(240px, 340px) minmax(0, 1fr);
@@ -13539,6 +13556,118 @@ textarea {
   min-height: 0;
   align-content: start;
   align-self: start;
+}
+
+.git-repository-diff-panel {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow: visible;
+}
+
+.git-repository-diff-toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.git-repository-review-banner,
+.task-review-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, #2563eb, var(--line) 72%);
+  background: color-mix(in srgb, #2563eb, var(--surface) 93%);
+}
+
+.git-repository-diff-view-switch {
+  display: grid;
+  gap: 6px;
+}
+
+.git-repository-diff-file-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.git-repository-diff-file-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 10%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 18%);
+}
+
+.git-repository-diff-file-card-head,
+.git-repository-diff-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.git-repository-diff-status.is-added {
+  background: color-mix(in srgb, #16a34a, var(--surface) 82%);
+  color: #14532d;
+}
+
+.git-repository-diff-status.is-deleted {
+  background: color-mix(in srgb, #dc2626, var(--surface) 82%);
+  color: #7f1d1d;
+}
+
+.git-repository-diff-status.is-renamed,
+.git-repository-diff-status.is-copied {
+  background: color-mix(in srgb, #0f766e, var(--surface) 82%);
+  color: #134e4a;
+}
+
+.git-repository-diff-status.is-modified {
+  background: color-mix(in srgb, #2563eb, var(--surface) 82%);
+  color: #1e3a8a;
+}
+
+.git-repository-diff-viewer {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow: visible;
+}
+
+.git-repository-diff-section {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--line), transparent 10%);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 14%);
+  overflow: auto;
+}
+
+.git-repository-diff-section .diff {
+  overflow: auto;
+}
+
+.git-repository-diff-section .diff table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.git-repository-diff-section .diff-gutter-col {
+  width: 56px;
+}
+
+.git-repository-diff-section .diff-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
 }
 
 .git-repository-branch-list,
@@ -13685,7 +13814,10 @@ textarea {
   .docker-runtime-container-card-head,
   .docker-runtime-logs-head,
   .git-repository-toolbar,
-  .git-repository-preview-head {
+  .git-repository-preview-head,
+  .git-repository-diff-toolbar,
+  .git-repository-diff-file-card-head,
+  .git-repository-diff-section-head {
     flex-direction: column;
     align-items: flex-start;
   }
@@ -13727,7 +13859,7 @@ textarea {
   }
 
   .docker-runtime-desktop-layout,
-  .git-repository-layout {
+  .git-repository-desktop-layout {
     display: none;
   }
 
@@ -13823,6 +13955,14 @@ textarea {
     max-height: 48vh;
     padding: 10px 12px;
     font-size: 11px;
+  }
+
+  .git-repository-diff-file-list {
+    grid-template-columns: 1fr;
+  }
+
+  .git-repository-diff-section {
+    padding: 10px;
   }
 
   .git-repository-preview-head code {
