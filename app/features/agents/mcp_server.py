@@ -173,6 +173,11 @@ GET_PROJECT_CAPABILITIES_TOOL_DESCRIPTION = (
     "Get derived project capabilities and plugin enablement snapshot for context/tool gating."
 )
 
+LIST_PROJECTS_TOOL_DESCRIPTION = (
+    "List projects in a workspace with optional search query. "
+    "If workspace_id is omitted, the MCP server falls back to the default configured workspace when available."
+)
+
 
 def create_mcp():
     try:
@@ -190,9 +195,9 @@ def create_mcp():
     def plugin_enabled(key: str) -> bool:
         return str(key or "").strip().lower() in enabled_plugins
 
-    @mcp.tool(description="List tasks in a workspace with optional filters.")
+    @mcp.tool(description="List tasks in a workspace with optional filters. If workspace_id is omitted, use the default configured workspace when available.")
     def list_tasks(
-        workspace_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         view: str | None = None,
         q: str | None = None,
@@ -230,9 +235,9 @@ def create_mcp():
         auth_token = auth_token or default_tool_token
         return service.get_task(task_id=task_id, auth_token=auth_token)
 
-    @mcp.tool(description="List notes in a workspace with optional filters.")
+    @mcp.tool(description="List notes in a workspace with optional filters. If workspace_id is omitted, use the default configured workspace when available.")
     def list_notes(
-        workspace_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         project_id: str | None = None,
         note_group_id: str | None = None,
@@ -281,10 +286,10 @@ def create_mcp():
         auth_token = auth_token or default_tool_token
         return service.set_my_theme(theme=theme, auth_token=auth_token, command_id=command_id)
 
-    @mcp.tool(description="List task groups in a workspace/project.")
+    @mcp.tool(description="List task groups in a workspace/project. If workspace_id is omitted, infer it from project_id.")
     def list_task_groups(
-        workspace_id: str,
         project_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         q: str | None = None,
         limit: int = 50,
@@ -358,10 +363,10 @@ def create_mcp():
             command_id=command_id,
         )
 
-    @mcp.tool(description="List note groups in a workspace/project.")
+    @mcp.tool(description="List note groups in a workspace/project. If workspace_id is omitted, infer it from project_id.")
     def list_note_groups(
-        workspace_id: str,
         project_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         q: str | None = None,
         limit: int = 50,
@@ -435,10 +440,10 @@ def create_mcp():
             command_id=command_id,
         )
 
-    @mcp.tool(description="List project rules in a workspace/project.")
+    @mcp.tool(description="List project rules in a workspace/project. If workspace_id is omitted, infer it from project_id.")
     def list_project_rules(
-        workspace_id: str,
         project_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         q: str | None = None,
         limit: int = 30,
@@ -454,10 +459,10 @@ def create_mcp():
             offset=offset,
         )
 
-    @mcp.tool(description="List project members in a workspace/project, including UUID user ids used for assignee_id.")
+    @mcp.tool(description="List project members in a workspace/project, including UUID user ids used for assignee_id. If workspace_id is omitted, infer it from project_id.")
     def list_project_members(
-        workspace_id: str,
         project_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         q: str | None = None,
         role: str | None = None,
@@ -477,10 +482,10 @@ def create_mcp():
             offset=offset,
         )
 
-    @mcp.tool(description="List project skills in a workspace/project.")
+    @mcp.tool(description="List project skills in a workspace/project. If workspace_id is omitted, infer it from project_id.")
     def list_project_skills(
-        workspace_id: str,
         project_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         q: str | None = None,
         limit: int = 30,
@@ -496,9 +501,9 @@ def create_mcp():
             offset=offset,
         )
 
-    @mcp.tool(description="List workspace skill catalog entries for a workspace.")
+    @mcp.tool(description="List workspace skill catalog entries for a workspace. If workspace_id is omitted, use the default configured workspace when available.")
     def list_workspace_skills(
-        workspace_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         q: str | None = None,
         limit: int = 30,
@@ -513,10 +518,10 @@ def create_mcp():
             offset=offset,
         )
 
-    @mcp.tool(description="List specifications in a workspace/project.")
+    @mcp.tool(description="List specifications in a workspace/project. If workspace_id is omitted, use the default configured workspace when available or infer it from project_id.")
     def list_specifications(
-        workspace_id: str,
         project_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         q: str | None = None,
         status: str | None = None,
@@ -532,6 +537,23 @@ def create_mcp():
             q=q,
             status=status,
             archived=archived,
+            limit=limit,
+            offset=offset,
+        )
+
+    @mcp.tool(description=LIST_PROJECTS_TOOL_DESCRIPTION)
+    def list_projects(
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        q: str | None = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        auth_token = auth_token or default_tool_token
+        return service.list_projects(
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+            q=q,
             limit=limit,
             offset=offset,
         )
@@ -827,7 +849,7 @@ def create_mcp():
 
     @mcp.tool(description=ARCHIVE_ALL_TASKS_TOOL_DESCRIPTION)
     def archive_all_tasks(
-        workspace_id: str,
+        workspace_id: str | None = None,
         project_id: str | None = None,
         q: str | None = None,
         limit: int = 200,
@@ -846,7 +868,7 @@ def create_mcp():
 
     @mcp.tool(description=ARCHIVE_ALL_NOTES_TOOL_DESCRIPTION)
     def archive_all_notes(
-        workspace_id: str,
+        workspace_id: str | None = None,
         project_id: str | None = None,
         q: str | None = None,
         limit: int = 200,
@@ -1171,9 +1193,9 @@ def create_mcp():
 
     @mcp.tool(description="Import an external skill URL into a project.")
     def import_project_skill(
-        workspace_id: str,
         project_id: str,
         source_url: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         name: str = "",
         skill_key: str = "",
@@ -1210,8 +1232,8 @@ def create_mcp():
     @mcp.tool(description="Attach a workspace catalog skill to a project.")
     def attach_workspace_skill_to_project(
         workspace_skill_id: str,
-        workspace_id: str,
         project_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         command_id: str | None = None,
     ) -> dict[str, Any]:

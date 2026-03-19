@@ -9029,6 +9029,51 @@ def test_agent_service_create_task_infers_workspace_from_project(tmp_path):
     assert created['recurring_rule'] == 'every:1m'
 
 
+def test_agent_service_list_projects_uses_default_workspace_and_search(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    alpha = client.post('/api/projects', json={'workspace_id': ws_id, 'name': 'Alpha Tetris'}).json()
+    client.post('/api/projects', json={'workspace_id': ws_id, 'name': 'Beta Sudoku'}).json()
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    service = AgentTaskService()
+    payload = service.list_projects(
+        q='alpha',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    assert payload['workspace_id'] == ws_id
+    assert payload['total'] >= 1
+    assert [item['id'] for item in payload['items']] == [alpha['id']]
+
+
+def test_agent_service_list_tasks_uses_default_workspace_with_project_id(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    created = client.post('/api/tasks', json={'workspace_id': ws_id, 'project_id': project_id, 'title': 'Workspace scoped list task'})
+    assert created.status_code == 200
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    service = AgentTaskService()
+    payload = service.list_tasks(
+        project_id=project_id,
+        limit=200,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    assert payload['total'] >= 1
+    assert any(item['id'] == created.json()['id'] for item in payload['items'])
+
+
 def test_agent_service_recurring_rule_infers_scheduled_task_type_on_create_and_update(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()

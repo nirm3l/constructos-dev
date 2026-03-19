@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from features.projects.application import ProjectApplicationService
 from features.project_starters.application import ProjectStarterApplicationService
@@ -68,6 +68,7 @@ from shared.core import (
     load_note_command_state,
     load_note_group_command_state,
     load_note_view,
+    load_project_view,
     load_task_command_state,
     load_task_group_command_state,
     load_task_view,
@@ -202,6 +203,7 @@ _READ_ONLY_MCP_METHODS = frozenset(
         "list_project_starters",
         "get_project_starter",
         "get_project_setup_profile",
+        "list_projects",
     }
 )
 _LICENSE_WRITE_BLOCKED_MESSAGE = "License expired. Write access is disabled until subscription is reactivated."
@@ -1478,6 +1480,24 @@ class AgentTaskService:
             detail="workspace_id is required for project creation when MCP default workspace is not configured",
         )
 
+    def _resolve_workspace_for_read(
+        self,
+        *,
+        db,
+        explicit_workspace_id: str | None,
+        project_id: str | None = None,
+    ) -> tuple[str, str | None]:
+        normalized_project_id = str(project_id or "").strip() or None
+        if normalized_project_id:
+            workspace_id, resolved_project_id = self._resolve_workspace_for_create(
+                db=db,
+                explicit_workspace_id=explicit_workspace_id,
+                project_id=normalized_project_id,
+            )
+            return workspace_id, resolved_project_id
+        workspace_id = self._resolve_workspace_for_project_create(explicit_workspace_id=explicit_workspace_id)
+        return workspace_id, None
+
     def _augment_project_member_user_ids_for_human_visibility(
         self,
         *,
@@ -1674,7 +1694,7 @@ class AgentTaskService:
     def list_tasks(
         self,
         *,
-        workspace_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         view: str | None = None,
         q: str | None = None,
@@ -1693,26 +1713,39 @@ class AgentTaskService:
         offset: int = 0,
     ) -> dict:
         self._require_token(auth_token)
-        self._assert_workspace_allowed(workspace_id)
-        if not project_id:
-            raise HTTPException(status_code=400, detail="project_id is required")
-        self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_read(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            if not resolved_project_id:
+                raise HTTPException(status_code=400, detail="project_id is required")
             if specification_id:
-                self._assert_specification_allowed(db=db, specification_id=specification_id)
+                spec_state = self._assert_specification_allowed(db=db, specification_id=specification_id)
+                assert spec_state is not None
+                if spec_state.workspace_id != resolved_workspace_id:
+                    raise HTTPException(status_code=400, detail="specification_id does not belong to workspace")
+                if resolved_project_id and spec_state.project_id != resolved_project_id:
+                    raise HTTPException(status_code=400, detail="specification_id does not belong to project")
             if task_group_id:
-                self._assert_task_group_allowed(db=db, task_group_id=task_group_id)
-            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+                group_state = self._assert_task_group_allowed(db=db, task_group_id=task_group_id)
+                assert group_state is not None
+                if group_state.workspace_id != resolved_workspace_id:
+                    raise HTTPException(status_code=400, detail="task_group_id does not belong to workspace")
+                if resolved_project_id and group_state.project_id != resolved_project_id:
+                    raise HTTPException(status_code=400, detail="task_group_id does not belong to project")
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
             return list_tasks_read_model(
                 db,
                 user,
                 TaskListQuery(
-                    workspace_id=workspace_id,
+                    workspace_id=resolved_workspace_id,
                     view=view,
                     q=q,
                     status=status,
-                    project_id=project_id,
+                    project_id=resolved_project_id,
                     task_group_id=task_group_id,
                     specification_id=specification_id,
                     tags=tags,
@@ -1730,7 +1763,7 @@ class AgentTaskService:
     def list_notes(
         self,
         *,
-        workspace_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         project_id: str | None = None,
         note_group_id: str | None = None,
@@ -1744,25 +1777,43 @@ class AgentTaskService:
         offset: int = 0,
     ) -> dict:
         self._require_token(auth_token)
-        self._assert_workspace_allowed(workspace_id)
-        if not project_id:
-            raise HTTPException(status_code=400, detail="project_id is required")
-        self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_read(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            if not resolved_project_id:
+                raise HTTPException(status_code=400, detail="project_id is required")
             if task_id:
-                self._assert_task_allowed(db=db, task_id=task_id)
+                task_state = self._assert_task_allowed(db=db, task_id=task_id)
+                assert task_state is not None
+                if task_state.workspace_id != resolved_workspace_id:
+                    raise HTTPException(status_code=400, detail="task_id does not belong to workspace")
+                if resolved_project_id and task_state.project_id != resolved_project_id:
+                    raise HTTPException(status_code=400, detail="task_id does not belong to project")
             if note_group_id:
-                self._assert_note_group_allowed(db=db, note_group_id=note_group_id)
+                group_state = self._assert_note_group_allowed(db=db, note_group_id=note_group_id)
+                assert group_state is not None
+                if group_state.workspace_id != resolved_workspace_id:
+                    raise HTTPException(status_code=400, detail="note_group_id does not belong to workspace")
+                if resolved_project_id and group_state.project_id != resolved_project_id:
+                    raise HTTPException(status_code=400, detail="note_group_id does not belong to project")
             if specification_id:
-                self._assert_specification_allowed(db=db, specification_id=specification_id)
-            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+                spec_state = self._assert_specification_allowed(db=db, specification_id=specification_id)
+                assert spec_state is not None
+                if spec_state.workspace_id != resolved_workspace_id:
+                    raise HTTPException(status_code=400, detail="specification_id does not belong to workspace")
+                if resolved_project_id and spec_state.project_id != resolved_project_id:
+                    raise HTTPException(status_code=400, detail="specification_id does not belong to project")
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
             return list_notes_read_model(
                 db,
                 user,
                 NoteListQuery(
-                    workspace_id=workspace_id,
-                    project_id=project_id,
+                    workspace_id=resolved_workspace_id,
+                    project_id=resolved_project_id,
                     note_group_id=note_group_id,
                     task_id=task_id,
                     specification_id=specification_id,
@@ -1778,27 +1829,28 @@ class AgentTaskService:
     def list_task_groups(
         self,
         *,
-        workspace_id: str,
         project_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         q: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> dict:
         self._require_token(auth_token)
-        self._assert_workspace_allowed(workspace_id)
-        if not project_id:
-            raise HTTPException(status_code=400, detail="project_id is required")
-        self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
-            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_read(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
             return list_task_groups_read_model(
                 db,
                 user,
                 TaskGroupListQuery(
-                    workspace_id=workspace_id,
-                    project_id=project_id,
+                    workspace_id=resolved_workspace_id,
+                    project_id=str(resolved_project_id or ""),
                     q=q,
                     limit=limit,
                     offset=offset,
@@ -1808,27 +1860,28 @@ class AgentTaskService:
     def list_note_groups(
         self,
         *,
-        workspace_id: str,
         project_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         q: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> dict:
         self._require_token(auth_token)
-        self._assert_workspace_allowed(workspace_id)
-        if not project_id:
-            raise HTTPException(status_code=400, detail="project_id is required")
-        self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
-            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_read(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
             return list_note_groups_read_model(
                 db,
                 user,
                 NoteGroupListQuery(
-                    workspace_id=workspace_id,
-                    project_id=project_id,
+                    workspace_id=resolved_workspace_id,
+                    project_id=str(resolved_project_id or ""),
                     q=q,
                     limit=limit,
                     offset=offset,
@@ -1838,7 +1891,7 @@ class AgentTaskService:
     def list_project_rules(
         self,
         *,
-        workspace_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         project_id: str | None = None,
         q: str | None = None,
@@ -1846,19 +1899,22 @@ class AgentTaskService:
         offset: int = 0,
     ) -> dict:
         self._require_token(auth_token)
-        self._assert_workspace_allowed(workspace_id)
-        if not project_id:
-            raise HTTPException(status_code=400, detail="project_id is required")
-        self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
-            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_read(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            if not resolved_project_id:
+                raise HTTPException(status_code=400, detail="project_id is required")
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
             return list_project_rules_read_model(
                 db,
                 user,
                 ProjectRuleListQuery(
-                    workspace_id=workspace_id,
-                    project_id=project_id,
+                    workspace_id=resolved_workspace_id,
+                    project_id=resolved_project_id,
                     q=q,
                     limit=limit,
                     offset=offset,
@@ -1868,8 +1924,8 @@ class AgentTaskService:
     def list_project_members(
         self,
         *,
-        workspace_id: str,
         project_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         q: str | None = None,
         role: str | None = None,
@@ -1878,22 +1934,23 @@ class AgentTaskService:
         offset: int = 0,
     ) -> dict:
         self._require_token(auth_token)
-        self._assert_workspace_allowed(workspace_id)
-        if not project_id:
-            raise HTTPException(status_code=400, detail="project_id is required")
-        self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         safe_limit = max(1, min(int(limit or 100), 500))
         safe_offset = max(0, int(offset or 0))
         with SessionLocal() as db:
-            project = self._load_project_scope(db=db, project_id=project_id)
-            if str(project.workspace_id) != str(workspace_id):
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_read(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            project = self._load_project_scope(db=db, project_id=str(resolved_project_id or ""))
+            if str(project.workspace_id) != str(resolved_workspace_id):
                 raise HTTPException(status_code=400, detail="Project does not belong to workspace")
-            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
             stmt = (
                 select(ProjectMember, UserModel)
                 .join(UserModel, UserModel.id == ProjectMember.user_id)
-                .where(ProjectMember.project_id == project_id)
+                .where(ProjectMember.project_id == resolved_project_id)
             )
             normalized_role = str(role or "").strip()
             if normalized_role:
@@ -1914,8 +1971,8 @@ class AgentTaskService:
                 stmt.order_by(UserModel.full_name.asc(), UserModel.username.asc()).limit(safe_limit).offset(safe_offset)
             ).all()
             return {
-                "project_id": str(project_id),
-                "workspace_id": str(workspace_id),
+                "project_id": str(resolved_project_id),
+                "workspace_id": str(resolved_workspace_id),
                 "items": [
                     {
                         "project_id": str(pm.project_id),
@@ -1938,27 +1995,28 @@ class AgentTaskService:
     def list_project_skills(
         self,
         *,
-        workspace_id: str,
         project_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         q: str | None = None,
         limit: int = 30,
         offset: int = 0,
     ) -> dict:
         self._require_token(auth_token)
-        self._assert_workspace_allowed(workspace_id)
-        if not project_id:
-            raise HTTPException(status_code=400, detail="project_id is required")
-        self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
-            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_read(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
             return list_project_skills_read_model(
                 db,
                 user,
                 ProjectSkillListQuery(
-                    workspace_id=workspace_id,
-                    project_id=project_id,
+                    workspace_id=resolved_workspace_id,
+                    project_id=str(resolved_project_id or ""),
                     q=q,
                     limit=limit,
                     offset=offset,
@@ -1968,32 +2026,92 @@ class AgentTaskService:
     def list_workspace_skills(
         self,
         *,
-        workspace_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         q: str | None = None,
         limit: int = 30,
         offset: int = 0,
     ) -> dict:
         self._require_token(auth_token)
-        self._assert_workspace_allowed(workspace_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
-            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            resolved_workspace_id = self._resolve_workspace_for_project_create(explicit_workspace_id=workspace_id)
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
             return list_workspace_skills_read_model(
                 db,
                 user,
                 WorkspaceSkillListQuery(
-                    workspace_id=workspace_id,
+                    workspace_id=resolved_workspace_id,
                     q=q,
                     limit=limit,
                     offset=offset,
                 ),
             )
 
+    def list_projects(
+        self,
+        *,
+        workspace_id: str | None = None,
+        auth_token: str | None = None,
+        q: str | None = None,
+        limit: int = 30,
+        offset: int = 0,
+    ) -> dict:
+        self._require_token(auth_token)
+        user = self._resolve_actor_user()
+        safe_limit = max(1, min(int(limit or 30), 200))
+        safe_offset = max(0, int(offset or 0))
+        with SessionLocal() as db:
+            resolved_workspace_id = self._resolve_workspace_for_project_create(explicit_workspace_id=workspace_id)
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            workspace_membership = db.execute(
+                select(WorkspaceMember.role).where(
+                    WorkspaceMember.workspace_id == resolved_workspace_id,
+                    WorkspaceMember.user_id == user.id,
+                )
+            ).scalar_one_or_none()
+            stmt = select(Project.id).where(
+                Project.workspace_id == resolved_workspace_id,
+                Project.is_deleted == False,  # noqa: E712
+            )
+            if str(workspace_membership or "") not in {"Owner", "Admin"}:
+                assigned_projects = (
+                    select(ProjectMember.project_id)
+                    .where(
+                        ProjectMember.workspace_id == resolved_workspace_id,
+                        ProjectMember.user_id == user.id,
+                    )
+                    .subquery()
+                )
+                stmt = stmt.where(Project.id.in_(select(assigned_projects.c.project_id)))
+            normalized_q = str(q or "").strip()
+            if normalized_q:
+                like = f"%{normalized_q}%"
+                stmt = stmt.where(
+                    or_(
+                        Project.name.ilike(like),
+                        Project.description.ilike(like),
+                    )
+                )
+            total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
+            project_ids = db.execute(
+                stmt.order_by(Project.updated_at.desc(), Project.created_at.desc(), Project.name.asc())
+                .limit(safe_limit)
+                .offset(safe_offset)
+            ).scalars().all()
+            items = [load_project_view(db, str(project_id)) for project_id in project_ids]
+            return {
+                "workspace_id": resolved_workspace_id,
+                "items": [item for item in items if item],
+                "total": int(total),
+                "limit": int(safe_limit),
+                "offset": int(safe_offset),
+            }
+
     def list_specifications(
         self,
         *,
-        workspace_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         project_id: str | None = None,
         q: str | None = None,
@@ -2004,19 +2122,22 @@ class AgentTaskService:
         offset: int = 0,
     ) -> dict:
         self._require_token(auth_token)
-        self._assert_workspace_allowed(workspace_id)
-        if not project_id:
-            raise HTTPException(status_code=400, detail="project_id is required")
-        self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
-            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_read(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            if not resolved_project_id:
+                raise HTTPException(status_code=400, detail="project_id is required")
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
             return list_specifications_read_model(
                 db,
                 user,
                 SpecificationListQuery(
-                    workspace_id=workspace_id,
-                    project_id=project_id,
+                    workspace_id=resolved_workspace_id,
+                    project_id=resolved_project_id,
                     q=q,
                     status=status,
                     tags=tags,
@@ -6213,8 +6334,8 @@ class AgentTaskService:
     def import_project_skill(
         self,
         *,
-        workspace_id: str,
         project_id: str,
+        workspace_id: str | None = None,
         source_url: str,
         auth_token: str | None = None,
         name: str = "",
@@ -6523,32 +6644,34 @@ class AgentTaskService:
         self,
         *,
         workspace_skill_id: str,
-        workspace_id: str,
         project_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         command_id: str | None = None,
     ) -> dict:
         self._require_token(auth_token)
-        self._assert_workspace_allowed(workspace_id)
-        self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
             self._assert_workspace_skill_allowed(db=db, skill_id=workspace_skill_id)
-            self._resolve_workspace_for_create(db=db, explicit_workspace_id=workspace_id, project_id=project_id)
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_create(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
             effective_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-workspace-skill-attach",
                 payload={
                     "workspace_skill_id": workspace_skill_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
+                    "workspace_id": resolved_workspace_id,
+                    "project_id": resolved_project_id,
                 },
             )
             return ProjectSkillApplicationService(
                 db, user, command_id=effective_command_id
             ).attach_workspace_skill_to_project(
                 workspace_skill_id=workspace_skill_id,
-                workspace_id=workspace_id,
-                project_id=project_id,
+                workspace_id=resolved_workspace_id,
+                project_id=resolved_project_id,
             )
 
     def create_specification(
@@ -7307,7 +7430,7 @@ class AgentTaskService:
     def archive_all_tasks(
         self,
         *,
-        workspace_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         project_id: str | None = None,
         q: str | None = None,
@@ -7315,19 +7438,22 @@ class AgentTaskService:
         command_id: str | None = None,
     ) -> dict:
         self._require_token(auth_token)
-        self._assert_workspace_allowed(workspace_id)
-        if not project_id:
-            raise HTTPException(status_code=400, detail="project_id is required")
-        self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
-            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member"})
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_read(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            if not resolved_project_id:
+                raise HTTPException(status_code=400, detail="project_id is required")
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member"})
             page = list_tasks_read_model(
                 db,
                 user,
                 TaskListQuery(
-                    workspace_id=workspace_id,
-                    project_id=project_id,
+                    workspace_id=resolved_workspace_id,
+                    project_id=resolved_project_id,
                     q=q,
                     archived=False,
                     limit=min(int(limit or 200), 200),
@@ -7341,8 +7467,8 @@ class AgentTaskService:
             effective_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-task-archive-all",
                 payload={
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
+                    "workspace_id": resolved_workspace_id,
+                    "project_id": resolved_project_id,
                     "q": q,
                     "ids": ids,
                 },
@@ -7352,7 +7478,7 @@ class AgentTaskService:
     def archive_all_notes(
         self,
         *,
-        workspace_id: str,
+        workspace_id: str | None = None,
         auth_token: str | None = None,
         project_id: str | None = None,
         q: str | None = None,
@@ -7360,20 +7486,23 @@ class AgentTaskService:
         command_id: str | None = None,
     ) -> dict:
         self._require_token(auth_token)
-        self._assert_workspace_allowed(workspace_id)
-        if not project_id:
-            raise HTTPException(status_code=400, detail="project_id is required")
-        self._assert_project_allowed(project_id)
         user = self._resolve_actor_user()
         updated = 0
         with SessionLocal() as db:
-            ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member"})
+            resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_read(
+                db=db,
+                explicit_workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            if not resolved_project_id:
+                raise HTTPException(status_code=400, detail="project_id is required")
+            ensure_role(db, resolved_workspace_id, user.id, {"Owner", "Admin", "Member"})
             page = list_notes_read_model(
                 db,
                 user,
                 NoteListQuery(
-                    workspace_id=workspace_id,
-                    project_id=project_id,
+                    workspace_id=resolved_workspace_id,
+                    project_id=resolved_project_id,
                     q=q,
                     archived=False,
                     limit=min(int(limit or 200), 200),
@@ -7384,8 +7513,8 @@ class AgentTaskService:
             batch_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-archive-notes",
                 payload={
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
+                    "workspace_id": resolved_workspace_id,
+                    "project_id": resolved_project_id,
                     "q": q,
                     "ids": ids,
                 },
