@@ -1107,6 +1107,12 @@ def test_install_exchange_issues_client_token_for_activation_code(tmp_path: Path
         )
         assert register.status_code == 200
         assert register.json()["installation"]["customer_ref"] == "customer-install-exchange"
+        details = client.get(
+            "/v1/admin/installations/cp-exchange-installation",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details.status_code == 200
+        assert details.json()["installation"]["activation_ip"] == "203.0.113.27"
 
         details = client.get(
             "/v1/admin/installations/cp-exchange-installation",

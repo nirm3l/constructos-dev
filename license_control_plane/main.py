@@ -462,6 +462,7 @@ class InstallationAuthContext:
     customer_ref: str | None = None
     activation_code_id: int | None = None
     issued_operating_system: str | None = None
+    issued_ip: str | None = None
 
 
 def _get_db():
@@ -1070,6 +1071,7 @@ def _require_installation_auth(
                 customer_ref=client_token.customer_ref,
                 activation_code_id=activation_code_id,
                 issued_operating_system=_normalize_operating_system(token_metadata.get("issued_operating_system")),
+                issued_ip=str(token_metadata.get("issued_ip") or "").strip()[:128] or None,
             )
 
     if not LCP_API_TOKEN:
@@ -1846,6 +1848,26 @@ def _apply_client_token_operating_system(
     return True
 
 
+def _apply_client_token_activation_ip(
+    installation: Installation,
+    auth_context: InstallationAuthContext,
+) -> bool:
+    if auth_context.auth_type != "client":
+        return False
+
+    issued_ip = str(auth_context.issued_ip or "").strip()
+    if not issued_ip:
+        return False
+
+    metadata = _load_metadata(installation.metadata_json)
+    if str(metadata.get("activation_ip") or "").strip():
+        return False
+
+    metadata["activation_ip"] = issued_ip
+    installation.metadata_json = _dump_metadata(metadata)
+    return True
+
+
 def _sign_entitlement_if_configured(entitlement_payload: dict[str, Any]) -> dict[str, Any] | None:
     if not LCP_SIGNING_PRIVATE_KEY_PEM:
         return None
@@ -2550,6 +2572,7 @@ def register_installation(
     installation = _upsert_installation(db, payload)
     _enforce_installation_customer_scope(installation, auth_context)
     _apply_client_token_operating_system(installation, auth_context)
+    _apply_client_token_activation_ip(installation, auth_context)
     _ensure_installation_has_customer_ref(installation, payload.customer_ref)
     _apply_activation_code_plan_for_client_auth(
         db,
@@ -2716,6 +2739,7 @@ def heartbeat_installation(
     installation = _upsert_installation(db, payload)
     _enforce_installation_customer_scope(installation, auth_context)
     _apply_client_token_operating_system(installation, auth_context)
+    _apply_client_token_activation_ip(installation, auth_context)
     _ensure_installation_has_customer_ref(installation, payload.customer_ref)
     _apply_activation_code_plan_for_client_auth(
         db,
