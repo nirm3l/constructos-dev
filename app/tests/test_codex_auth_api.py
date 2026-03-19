@@ -227,6 +227,29 @@ def test_claude_auth_status_reports_none_without_host_or_override(tmp_path, monk
     assert payload["supported_login_methods"] == ["claudeai", "console"]
 
 
+def test_claude_auth_status_uses_host_mount_when_available(tmp_path, monkeypatch):
+    client = build_client(tmp_path, monkeypatch)
+
+    import features.agents.provider_auth as provider_auth
+
+    host_auth_path = Path(os.environ["HOME"]) / ".claude.json"
+    _write_auth_file(host_auth_path)
+
+    monkeypatch.setattr(
+        provider_auth,
+        "_read_claude_auth_status",
+        lambda _home_path: {"loggedIn": True, "authMethod": "oauth"},
+    )
+
+    response = client.get('/api/agents/claude-auth')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["configured"] is True
+    assert payload["effective_source"] == "host_mount"
+    assert payload["host_auth_available"] is True
+
+
 def test_claude_auth_status_requires_logged_in_cli_state(tmp_path, monkeypatch):
     client = build_client(tmp_path, monkeypatch)
 

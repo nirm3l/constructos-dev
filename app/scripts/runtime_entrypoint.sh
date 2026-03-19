@@ -123,10 +123,30 @@ resolve_writable_workspace_dir() {
   printf '%s' "${fallback_dir}"
 }
 
+resolve_writable_codex_home_dir() {
+  local requested_dir="${1:-}"
+  local fallback_dir="${2:-/home/app/agent-home/codex-home}"
+  local candidate="${requested_dir:-/home/app/codex-home}"
+
+  if mkdir -p "${candidate}" >/dev/null 2>&1 && touch "${candidate}/.write-test" >/dev/null 2>&1; then
+    rm -f "${candidate}/.write-test" >/dev/null 2>&1 || true
+    printf '%s' "${candidate}"
+    return 0
+  fi
+
+  echo "Codex home directory is not writable (${candidate}); falling back to ${fallback_dir}." >&2
+  mkdir -p "${fallback_dir}"
+  touch "${fallback_dir}/.write-test"
+  rm -f "${fallback_dir}/.write-test" >/dev/null 2>&1 || true
+  printf '%s' "${fallback_dir}"
+}
+
 main() {
   local app_dir="${APP_RUNTIME_APP_DIR:-/app}"
   local requested_workspace_dir="${AGENT_WORKDIR:-${AGENT_CODEX_WORKDIR:-/home/app/workspace}}"
+  local requested_codex_home_dir="${AGENT_HOME_ROOT:-${AGENT_CODEX_HOME_ROOT:-/home/app/codex-home}}"
   local app_workspace_dir
+  local app_codex_home_dir
   local encrypted_enabled="${APP_ENCRYPTED_BUNDLE_ENABLED:-false}"
   local encrypted_bundle_path="${APP_ENCRYPTED_BUNDLE_PATH:-/opt/constructos/app.tar.gz.enc}"
   local decrypted_app_dir="${APP_DECRYPTED_APP_DIR:-/tmp/constructos-app}"
@@ -138,8 +158,11 @@ main() {
   fi
 
   app_workspace_dir="$(resolve_writable_workspace_dir "${requested_workspace_dir}")"
+  app_codex_home_dir="$(resolve_writable_codex_home_dir "${requested_codex_home_dir}")"
   export AGENT_WORKDIR="${app_workspace_dir}"
   export AGENT_CODEX_WORKDIR="${app_workspace_dir}"
+  export AGENT_HOME_ROOT="${app_codex_home_dir}"
+  export AGENT_CODEX_HOME_ROOT="${app_codex_home_dir}"
 
   if ! is_truthy "${encrypted_enabled}"; then
     setup_git_runtime "${app_dir}" "${app_workspace_dir}"
