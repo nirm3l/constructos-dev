@@ -6839,14 +6839,14 @@ def test_runner_returns_lead_deploy_topology_failure_to_developer_without_failed
     assert queued is True
 
     task_payload = client.get(f"/api/tasks/{lead_task_id}").json()
-    assert task_payload["status"] == "Blocked"
+    assert task_payload["status"] == "In Progress"
     assert str(task_payload["assigned_agent_code"]).startswith("dev-")
 
     automation_payload = client.get(f"/api/tasks/{lead_task_id}/automation").json()
     assert automation_payload["automation_state"] == "queued"
     assert automation_payload["last_requested_source"] in {"lead_triage_return", "runner_orchestrator"}
-    assert automation_payload["team_mode_phase"] == "blocked"
-    assert automation_payload["team_mode_blocking_gate"] == "lead_deploy_topology_reconciliation_required"
+    assert automation_payload["team_mode_phase"] == "implementation"
+    assert automation_payload["team_mode_blocking_gate"] in {None, ""}
 
 
 def test_runner_requeues_developer_merge_conflict_to_developer_reconciliation(tmp_path, monkeypatch):
@@ -7254,7 +7254,7 @@ def test_developer_merge_to_main_rejects_literal_patch_markers(tmp_path):
     assert 'literal patch markers' in str(result['error']).lower()
 
 
-def test_lead_deploy_failure_creates_deploy_scaffolding_followup_task(tmp_path, monkeypatch):
+def test_lead_deploy_failure_returns_same_task_to_developer_for_scaffolding_fix(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
@@ -7331,39 +7331,23 @@ def test_lead_deploy_failure_creates_deploy_scaffolding_followup_task(tmp_path, 
         ),
     )
 
-    tasks_payload = client.get('/api/tasks', params={'workspace_id': ws_id, 'project_id': project_id}).json()
-    tasks = list(tasks_payload.get('items') or [])
-    followups = [item for item in tasks if str(item.get('title') or '').startswith('Add deployment scaffolding for ')]
-    assert len(followups) == 1
-    followup = followups[0]
-    assert followup['delivery_mode'] == 'merged_increment'
-    assert followup['assigned_agent_code'] in {'dev-a', 'dev-b'}
-    assert followup['task_relationships'] == [
-        {
-            'kind': 'depends_on',
-            'task_ids': [lead_task_id],
-            'match_mode': 'all',
-            'statuses': ['merged'],
-        }
-    ]
+    refreshed_task = client.get(f"/api/tasks/{lead_task_id}").json()
+    assert refreshed_task["status"] == "In Progress"
+    assert refreshed_task["assigned_agent_code"] in {"dev-a", "dev-b"}
+    assert refreshed_task["execution_triggers"] == [] or refreshed_task["execution_triggers"] is None
 
-    automation_payload = client.get(f"/api/tasks/{followup['id']}/automation").json()
-    assert automation_payload['automation_state'] in {'queued', 'running', 'completed'}
-    refreshed_lead = client.get(f"/api/tasks/{lead_task_id}").json()
-    trigger = next(
-        (
-            item for item in (refreshed_lead.get('execution_triggers') or [])
-            if item.get('kind') == 'status_change'
-            and item.get('scope') == 'external'
-            and followup['id'] in list((item.get('selector') or {}).get('task_ids') or [])
-        ),
-        None,
-    )
-    assert trigger is not None
-    assert trigger.get('to_statuses') == ['Completed']
+    automation_payload = client.get(f"/api/tasks/{lead_task_id}/automation").json()
+    assert automation_payload['automation_state'] == 'queued'
+    assert automation_payload['last_requested_source'] == 'lead_triage_return'
+    assert automation_payload['team_mode_phase'] == 'implementation'
+    assert automation_payload['team_mode_blocking_gate'] in {None, ""}
+    remediation_instruction = str(automation_payload.get('last_requested_instruction') or '')
+    assert "Inspect the existing code already present" in remediation_instruction
+    assert "align your changes with that code" in remediation_instruction
+    assert "assigned task worktree" in remediation_instruction
 
 
-def test_lead_runtime_health_failure_creates_runtime_followup_task(tmp_path, monkeypatch):
+def test_lead_runtime_health_failure_returns_same_task_to_developer(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
     ws_id = bootstrap['workspaces'][0]['id']
@@ -7467,34 +7451,20 @@ def test_lead_runtime_health_failure_creates_runtime_followup_task(tmp_path, mon
         ),
     )
 
-    tasks_payload = client.get('/api/tasks', params={'workspace_id': ws_id, 'project_id': project_id}).json()
-    tasks = list(tasks_payload.get('items') or [])
-    followups = [item for item in tasks if str(item.get('title') or '').startswith('Fix deployment runtime health for ')]
-    assert len(followups) == 1
-    followup = followups[0]
-    assert followup['delivery_mode'] == 'merged_increment'
-    assert followup['assigned_agent_code'] in {'dev-a', 'dev-b'}
-    assert followup['task_relationships'] == [
-        {
-            'kind': 'depends_on',
-            'task_ids': [lead_task_id],
-            'match_mode': 'all',
-            'statuses': ['merged'],
-        }
-    ]
+    refreshed_task = client.get(f"/api/tasks/{lead_task_id}").json()
+    assert refreshed_task["status"] == "In Progress"
+    assert refreshed_task["assigned_agent_code"] in {"dev-a", "dev-b"}
+    assert refreshed_task["execution_triggers"] == [] or refreshed_task["execution_triggers"] is None
 
-    refreshed_lead = client.get(f"/api/tasks/{lead_task_id}").json()
-    trigger = next(
-        (
-            item for item in (refreshed_lead.get('execution_triggers') or [])
-            if item.get('kind') == 'status_change'
-            and item.get('scope') == 'external'
-            and followup['id'] in list((item.get('selector') or {}).get('task_ids') or [])
-        ),
-        None,
-    )
-    assert trigger is not None
-    assert trigger.get('to_statuses') == ['Completed']
+    automation_payload = client.get(f"/api/tasks/{lead_task_id}/automation").json()
+    assert automation_payload['automation_state'] == 'queued'
+    assert automation_payload['last_requested_source'] == 'lead_triage_return'
+    assert automation_payload['team_mode_phase'] == 'implementation'
+    assert automation_payload['team_mode_blocking_gate'] in {None, ""}
+    remediation_instruction = str(automation_payload.get('last_requested_instruction') or '')
+    assert "http://gateway:6768/health" in remediation_instruction
+    assert "Inspect the existing code already present" in remediation_instruction
+    assert "align your changes with that code" in remediation_instruction
 
 
 def test_probe_runtime_health_with_retry_waits_for_cold_start(monkeypatch):
@@ -13290,6 +13260,72 @@ def test_runtime_deploy_health_check_prefers_gateway_host_inside_container(monke
     assert result["ok"] is True
     assert result["http_url"] == "http://gateway:6768/health"
     assert attempted_urls[:2] == ["http://gateway:6768/health", "http://gateway:6768/"]
+
+
+def test_runtime_deploy_health_check_rejects_placeholder_runtime_root(monkeypatch):
+    from types import SimpleNamespace
+    import urllib.request
+
+    from features.agents.service import AgentTaskService
+
+    def fake_subprocess_run(*_args, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "State": "running",
+                        "Publishers": [{"PublishedPort": 6768}],
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+    class FakeResponse:
+        def __init__(self, status: int, body: str):
+            self.status = status
+            self._body = body.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, *_args, **_kwargs):
+            return self._body
+
+    def fake_urlopen(url, timeout=3):  # noqa: ARG001
+        if str(url) == "http://gateway:6768/health":
+            return FakeResponse(status=200, body='{"status":"ok"}')
+        if str(url) == "http://gateway:6768/":
+            return FakeResponse(
+                status=200,
+                body=(
+                    "<h1>Tetris Runtime Ready</h1>"
+                    "<p>Service is running on port 6768.</p>"
+                    "<p>Health endpoint: /health</p>"
+                ),
+            )
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("features.agents.gates.subprocess.run", fake_subprocess_run)
+    monkeypatch.setattr("features.agents.gates.os.path.exists", lambda path: path == "/.dockerenv")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = AgentTaskService._run_runtime_deploy_health_check(
+        stack="constructos-ws-default",
+        port=6768,
+        health_path="/health",
+        require_http_200=True,
+        host=None,
+    )
+    assert result["stack_running"] is True
+    assert result["port_mapped"] is True
+    assert result["http_200"] is True
+    assert result["serves_application_root"] is False
+    assert result["root_placeholder_detected"] is True
 
 
 def test_team_lead_completed_transition_is_blocked_when_project_gates_fail(tmp_path):

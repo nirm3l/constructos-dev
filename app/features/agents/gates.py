@@ -244,6 +244,22 @@ def run_runtime_deploy_health_check(
     require_http_200: bool,
     host: str | None = None,
 ) -> dict[str, Any]:
+    placeholder_root_markers = (
+        "runtime ready",
+        "service is running on port",
+        "health endpoint",
+    )
+
+    def _is_placeholder_runtime_root(body: str) -> bool:
+        normalized = str(body or "").casefold()
+        if not normalized:
+            return False
+        hits = 0
+        for marker in placeholder_root_markers:
+            if marker in normalized:
+                hits += 1
+        return hits >= 2
+
     result: dict[str, Any] = {
         "stack": stack,
         "port": port,
@@ -252,6 +268,7 @@ def run_runtime_deploy_health_check(
         "port_mapped": False,
         "http_200": False,
         "serves_application_root": False,
+        "root_placeholder_detected": False,
         "ok": False,
         "error": None,
     }
@@ -394,7 +411,10 @@ def run_runtime_deploy_health_check(
                 root_status = int(getattr(response, "status", 0) or 0)
                 root_body = str(response.read(4096).decode("utf-8", errors="ignore") or "")
             is_directory_listing = "directory listing for /" in root_body.casefold()
-            return root_status, bool(root_status == 200 and not is_directory_listing), None
+            is_placeholder_root = _is_placeholder_runtime_root(root_body)
+            result["root_placeholder_detected"] = bool(is_placeholder_root)
+            serves_root = bool(root_status == 200 and not is_directory_listing and not is_placeholder_root)
+            return root_status, serves_root, None
         except Exception as exc:  # pragma: no cover - platform/network dependent
             return None, False, str(exc)
 

@@ -3414,312 +3414,6 @@ def _ensure_team_mode_lead_assignment(
     )
 
 
-def _create_lead_deploy_scaffolding_followup(
-    *,
-    db,
-    workspace_id: str,
-    project_id: str | None,
-    state: dict[str, object],
-    actor_user_id: str,
-    port: int | None,
-    health_path: str | None,
-) -> str | None:
-    normalized_project_id = str(project_id or "").strip()
-    source_task_id = str(state.get("id") or "").strip()
-    if not workspace_id or not normalized_project_id or not source_task_id:
-        return None
-    marker_ref = f"evidence://lead/{source_task_id}/deploy-scaffolding-followup"
-    existing_tasks = db.execute(
-        select(Task).where(
-            Task.workspace_id == workspace_id,
-            Task.project_id == normalized_project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-        )
-    ).scalars().all()
-    for task in existing_tasks:
-        refs = getattr(task, "external_refs", None)
-        if isinstance(refs, list):
-            for item in refs:
-                if isinstance(item, dict) and str(item.get("url") or "").strip() == marker_ref:
-                    return str(task.id or "").strip() or None
-
-    project_name = str(state.get("project_name") or "").strip()
-    if not project_name:
-        project_row = db.get(Project, normalized_project_id)
-        project_name = str(getattr(project_row, "name", "") or "").strip()
-    repo_root = resolve_project_repository_path(
-        project_name=project_name or None,
-        project_id=normalized_project_id,
-    )
-    if not _repo_has_application_source_files(repo_root=repo_root):
-        return None
-
-    dev_assignee_id, dev_agent_code = _resolve_team_agent_assignment_by_role(
-        db=db,
-        workspace_id=workspace_id,
-        project_id=normalized_project_id,
-        authority_role="Developer",
-    )
-    if not str(dev_agent_code or "").strip():
-        return None
-
-    port_text = str(int(port)) if port is not None else "the configured runtime port"
-    normalized_health_path = str(health_path or "/health").strip() or "/health"
-    source_title = str(state.get("title") or source_task_id).strip()
-    instruction = (
-        "Analyze the merged repository state and add only the missing deployment scaffolding required for managed Docker Compose deploy. "
-        "Work only on the task branch, never on main directly. "
-        f"Target runtime health endpoint `http://gateway:{port_text}{normalized_health_path}`. "
-        "Add only deploy/runtime artifacts justified by the existing repository shape (for example Dockerfile, compose manifest, nginx config, or package/runtime wiring). "
-        "Do not invent placeholder application files or fake product shells."
-    )
-
-    from features.tasks.application import TaskApplicationService
-
-    actor = db.get(UserModel, actor_user_id) or db.get(UserModel, AGENT_SYSTEM_USER_ID)
-    if actor is None:
-        return None
-    command_id = f"lead-deploy-followup-{source_task_id[:8]}"
-    created = TaskApplicationService(db, actor, command_id=command_id).create_task(
-        TaskCreate(
-            workspace_id=workspace_id,
-            project_id=normalized_project_id,
-            specification_id=str(state.get("specification_id") or "").strip() or None,
-            title=f"Add deployment scaffolding for {source_title}",
-            description=(
-                f"Add the missing deployment/runtime scaffolding needed to unblock Lead deploy for `{source_title}`."
-            ),
-            status=REQUIRED_SEMANTIC_STATUSES["todo"],
-            priority="High",
-            assignee_id=dev_assignee_id,
-            assigned_agent_code=dev_agent_code,
-            instruction=instruction,
-            delivery_mode=DELIVERY_MODE_MERGED_INCREMENT,
-            external_refs=[
-                {"url": marker_ref, "title": "Lead-created deploy scaffolding follow-up"},
-            ],
-            task_relationships=[
-                {
-                    "kind": "depends_on",
-                    "task_ids": [source_task_id],
-                    "match_mode": "all",
-                    "statuses": ["merged"],
-                }
-            ],
-        )
-    )
-    followup_task_id = str((created or {}).get("id") or "").strip()
-    if not followup_task_id:
-        return None
-    TaskApplicationService(db, actor, command_id=f"{command_id}:run").request_automation_run(
-        followup_task_id,
-        TaskAutomationRun(
-            instruction=instruction,
-            source="runner_orchestrator",
-            source_task_id=source_task_id,
-        ),
-        wake_runner=False,
-    )
-    _ensure_source_task_resumes_after_followup(
-        db=db,
-        workspace_id=workspace_id,
-        project_id=normalized_project_id,
-        task_id=source_task_id,
-        state=state,
-        actor_user_id=actor_user_id,
-        followup_task_id=followup_task_id,
-        instruction=(
-            "Resume Lead deploy after the linked deployment scaffolding task completes. "
-            "Use the current merged repository state, run the managed Docker Compose deploy, verify "
-            f"`http://gateway:{port_text}{normalized_health_path}` returns HTTP 200, and confirm `/` serves application content before handing off to QA."
-        ),
-    )
-    return followup_task_id
-
-
-def _ensure_source_task_resumes_after_followup(
-    *,
-    db,
-    workspace_id: str,
-    project_id: str,
-    task_id: str,
-    state: dict[str, object],
-    actor_user_id: str,
-    followup_task_id: str,
-    instruction: str,
-) -> None:
-    from features.tasks.command_handlers import _effective_completed_status_for_project
-
-    completed_status = _effective_completed_status_for_project(
-        db=db,
-        workspace_id=workspace_id,
-        project_id=project_id,
-    )
-    current_triggers = normalize_execution_triggers(state.get("execution_triggers"))
-    for trigger in current_triggers:
-        if str(trigger.get("kind") or "").strip().lower() != TRIGGER_KIND_STATUS_CHANGE:
-            continue
-        if str(trigger.get("scope") or "").strip().lower() != STATUS_SCOPE_EXTERNAL:
-            continue
-        selector = trigger.get("selector")
-        task_ids = selector.get("task_ids") if isinstance(selector, dict) else None
-        if isinstance(task_ids, list) and str(followup_task_id) in {str(item or "").strip() for item in task_ids}:
-            return
-    updated_triggers = [
-        *current_triggers,
-        {
-            "kind": TRIGGER_KIND_STATUS_CHANGE,
-            "enabled": True,
-            "scope": STATUS_SCOPE_EXTERNAL,
-            "match_mode": STATUS_MATCH_ALL,
-            "selector": {"task_ids": [followup_task_id]},
-            "to_statuses": [completed_status],
-            "action": "run_automation",
-        },
-    ]
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={
-            "execution_triggers": updated_triggers,
-            "instruction": instruction,
-        },
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": project_id,
-            "task_id": task_id,
-        },
-    )
-
-
-def _create_lead_runtime_health_followup(
-    *,
-    db,
-    workspace_id: str,
-    project_id: str | None,
-    state: dict[str, object],
-    actor_user_id: str,
-    port: int | None,
-    health_path: str | None,
-) -> str | None:
-    normalized_project_id = str(project_id or "").strip()
-    source_task_id = str(state.get("id") or "").strip()
-    if not workspace_id or not normalized_project_id or not source_task_id:
-        return None
-    marker_ref = f"evidence://lead/{source_task_id}/runtime-health-followup"
-    existing_tasks = db.execute(
-        select(Task).where(
-            Task.workspace_id == workspace_id,
-            Task.project_id == normalized_project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-        )
-    ).scalars().all()
-    for task in existing_tasks:
-        refs = getattr(task, "external_refs", None)
-        if isinstance(refs, list):
-            for item in refs:
-                if isinstance(item, dict) and str(item.get("url") or "").strip() == marker_ref:
-                    return str(task.id or "").strip() or None
-
-    project_name = str(state.get("project_name") or "").strip()
-    if not project_name:
-        project_row = db.get(Project, normalized_project_id)
-        project_name = str(getattr(project_row, "name", "") or "").strip()
-    repo_root = resolve_project_repository_path(
-        project_name=project_name or None,
-        project_id=normalized_project_id,
-    )
-    if not _repo_has_application_source_files(repo_root=repo_root):
-        return None
-
-    dev_assignee_id, dev_agent_code = _resolve_team_agent_assignment_by_role(
-        db=db,
-        workspace_id=workspace_id,
-        project_id=normalized_project_id,
-        authority_role="Developer",
-    )
-    if not str(dev_agent_code or "").strip():
-        return None
-
-    port_text = str(int(port)) if port is not None else "the configured runtime port"
-    normalized_health_path = str(health_path or "/health").strip() or "/health"
-    source_title = str(state.get("title") or source_task_id).strip()
-    instruction = (
-        "Analyze the merged repository state and fix only the runtime/deployment issues needed for managed Docker Compose health verification. "
-        "Work only on the task branch, never on main directly. "
-        f"Target runtime health endpoint `http://gateway:{port_text}{normalized_health_path}` and ensure the app also serves useful content at `/`. "
-        "Use the existing repository shape to correct runtime wiring, startup command, health endpoint behavior, compose settings, or container configuration. "
-        "Do not invent placeholder application files or fake product shells."
-    )
-
-    from features.tasks.application import TaskApplicationService
-
-    actor = db.get(UserModel, actor_user_id) or db.get(UserModel, AGENT_SYSTEM_USER_ID)
-    if actor is None:
-        return None
-    command_id = f"lead-runtime-followup-{source_task_id[:8]}"
-    created = TaskApplicationService(db, actor, command_id=command_id).create_task(
-        TaskCreate(
-            workspace_id=workspace_id,
-            project_id=normalized_project_id,
-            specification_id=str(state.get("specification_id") or "").strip() or None,
-            title=f"Fix deployment runtime health for {source_title}",
-            description=(
-                f"Fix the runtime/deployment issues needed to unblock Lead deploy verification for `{source_title}`."
-            ),
-            status=REQUIRED_SEMANTIC_STATUSES["todo"],
-            priority="High",
-            assignee_id=dev_assignee_id,
-            assigned_agent_code=dev_agent_code,
-            instruction=instruction,
-            delivery_mode=DELIVERY_MODE_MERGED_INCREMENT,
-            external_refs=[
-                {"url": marker_ref, "title": "Lead-created runtime health follow-up"},
-            ],
-            task_relationships=[
-                {
-                    "kind": "depends_on",
-                    "task_ids": [source_task_id],
-                    "match_mode": "all",
-                    "statuses": ["merged"],
-                }
-            ],
-        )
-    )
-    followup_task_id = str((created or {}).get("id") or "").strip()
-    if not followup_task_id:
-        return None
-    TaskApplicationService(db, actor, command_id=f"{command_id}:run").request_automation_run(
-        followup_task_id,
-        TaskAutomationRun(
-            instruction=instruction,
-            source="runner_orchestrator",
-            source_task_id=source_task_id,
-        ),
-        wake_runner=False,
-    )
-    _ensure_source_task_resumes_after_followup(
-        db=db,
-        workspace_id=workspace_id,
-        project_id=normalized_project_id,
-        task_id=source_task_id,
-        state=state,
-        actor_user_id=actor_user_id,
-        followup_task_id=followup_task_id,
-        instruction=(
-            "Resume Lead deploy after the linked runtime remediation task completes. "
-            "Use the current merged repository state, run the managed Docker Compose deploy, verify "
-            f"`http://gateway:{port_text}{normalized_health_path}` returns HTTP 200, and confirm `/` serves application content before handing off to QA."
-        ),
-    )
-    return followup_task_id
-
-
 def _is_developer_main_reconciliation_error(error: str | None) -> bool:
     normalized_error = str(error or "").strip().lower()
     if not normalized_error:
@@ -3789,6 +3483,7 @@ def _requeue_developer_main_reconciliation(
             "assignee_id": developer_assignee_id,
             "assigned_agent_code": developer_agent_code or None,
             "status": REQUIRED_SEMANTIC_STATUSES["active"],
+            "instruction": instruction,
             **_team_mode_progress_payload(
                 phase="implementation",
                 blocking_gate="developer_main_reconciliation_required",
@@ -3871,6 +3566,7 @@ def _requeue_developer_committed_handoff(
             "assignee_id": developer_assignee_id,
             "assigned_agent_code": developer_agent_code or None,
             "status": REQUIRED_SEMANTIC_STATUSES["active"],
+            "instruction": instruction,
             **_team_mode_progress_payload(
                 phase="implementation",
                 blocking_gate="developer_handoff_not_committed",
@@ -4392,7 +4088,6 @@ def _merge_ready_developer_branches_to_main(
             continue
         code_ancestor, _out_ancestor, _err_ancestor = _run_git_command_with_error(cwd=repo_root, args=["merge-base", "--is-ancestor", branch, "main"])
         if code_ancestor == 0:
-            # Already merged: just mark merge evidence once.
             code_main_sha, out_main_sha, _err_main_sha = _run_git_command_with_error(cwd=repo_root, args=["rev-parse", "main"])
             if code_main_sha == 0 and out_main_sha:
                 merged_refs = _append_merge_to_main_ref(refs=refs, merge_sha=out_main_sha)
@@ -4886,14 +4581,55 @@ def _handoff_failed_team_mode_lead_task_to_developer(
         assignee_role="Lead",
         error=failure_reason,
     )
+    project_name = str(state.get("project_name") or "").strip()
+    if not project_name:
+        project_row = db.get(Project, normalized_project_id)
+        project_name = str(getattr(project_row, "name", "") or "").strip()
+    branch_name = _extract_task_branch_from_refs(state.get("external_refs"))
+    task_worktree = resolve_task_worktree_path(
+        project_name=project_name or None,
+        project_id=normalized_project_id,
+        task_id=task_id,
+    )
+    task_worktree_hint = (
+        f" Inspect the existing code already present in the assigned task worktree `{task_worktree}`"
+        if str(task_worktree or "").strip()
+        else " Inspect the existing code already present on the assigned task branch/worktree"
+    )
+    branch_hint = f" on `{branch_name}`" if str(branch_name or "").strip() else ""
+    _stack, _host, runtime_port, runtime_health_path, _runtime_required = _project_runtime_deploy_target(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    target_url = (
+        f"http://gateway:{int(runtime_port)}{str(runtime_health_path or '/health').strip()}"
+        if runtime_port is not None
+        else None
+    )
+    remediation_focus = "Fix the deploy/runtime artifact mismatch that blocked Lead."
+    if normalized_gate == "lead_runtime_health_failed":
+        remediation_focus = (
+            "Fix the runtime wiring so the managed deploy satisfies the configured health contract"
+            + (f" at `{target_url}`." if target_url else ".")
+        )
+    elif normalized_gate == "lead_deploy_scaffolding":
+        remediation_focus = (
+            "Add or correct only the deploy/runtime scaffolding justified by the current repository shape so Lead can rerun managed deploy."
+        )
+    elif normalized_gate == "lead_deploy_topology_reconciliation_required":
+        remediation_focus = (
+            "Fix the deploy topology mismatch while preserving the intended service identity and compose topology."
+        )
     instruction = (
         "Lead triage found a deploy/runtime blocker that requires Developer remediation.\n"
-        "Work only on the assigned task branch. Do not commit directly to `main`.\n"
-        "1) Analyze the current merged repository and runtime topology.\n"
-        "2) Fix the deploy/runtime artifact mismatch that blocked Lead.\n"
-        "3) Keep service identity, compose topology, and runtime wiring stable across deploy cycles.\n"
-        "4) Re-run the relevant checks for the task.\n"
-        "5) Commit the remediation on the task branch and leave the task merge-ready for another Lead deploy cycle.\n"
+        f"Work only{branch_hint} in the assigned task worktree. Do not commit directly to `main`.\n"
+        f"1){task_worktree_hint} and align your changes with that code instead of replacing valid existing implementation blindly.\n"
+        "2) Analyze the current merged repository state, task branch state, and runtime/deploy topology together before editing.\n"
+        f"3) {remediation_focus}\n"
+        "4) Keep service identity, compose topology, health endpoint behavior, and runtime wiring stable across deploy cycles unless the blocker explicitly requires a targeted correction.\n"
+        "5) Re-run the relevant checks for the task.\n"
+        "6) Commit the remediation on the task branch and leave the same task ready for another Lead deploy cycle.\n"
         f"Lead triage finding: {str(failure_reason or '').strip()[:500]}"
     )
     append_event(
@@ -4904,13 +4640,9 @@ def _handoff_failed_team_mode_lead_task_to_developer(
         payload={
             "assignee_id": developer_assignee_id,
             "assigned_agent_code": developer_agent_code or None,
-            "status": REQUIRED_SEMANTIC_STATUSES["blocked"],
-            **_team_mode_progress_payload(
-                phase="blocked",
-                blocking_gate=normalized_gate,
-                blocked_reason=str(failure_reason or "").strip() or None,
-                blocked_at=failed_at_iso,
-            ),
+            "status": REQUIRED_SEMANTIC_STATUSES["active"],
+            "instruction": instruction,
+            **_team_mode_progress_payload(phase="implementation"),
         },
         metadata={
             "actor_id": actor_user_id,
@@ -7377,7 +7109,6 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             assignee_role=effective_assignee_role,
             error=str(error),
         )
-        lead_scaffolding_followup_task_id: str | None = None
         developer_main_reconciliation_queued = False
         developer_handoff_recovery_queued = False
         developer_deploy_lock_waiting = False
@@ -7433,44 +7164,13 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             and canonicalize_role(effective_assignee_role) == "Lead"
             and "compose manifest is missing and deterministic synthesis failed" in str(error).lower()
         ):
-            _stack, _host, runtime_port, runtime_health_path, _required = _project_runtime_deploy_target(
-                db=db,
-                workspace_id=workspace_id,
-                project_id=project_id,
-            )
-            lead_scaffolding_followup_task_id = _create_lead_deploy_scaffolding_followup(
-                db=db,
-                workspace_id=workspace_id,
-                project_id=project_id,
-                state=state,
-                actor_user_id=actor_user_id,
-                port=runtime_port,
-                health_path=runtime_health_path,
-            )
-            if lead_scaffolding_followup_task_id:
-                failure_gate = "lead_deploy_scaffolding"
+            failure_gate = "lead_deploy_scaffolding"
         if (
             team_mode_enabled
             and canonicalize_role(effective_assignee_role) == "Lead"
             and "runtime health check did not pass" in str(error).lower()
-            and not lead_scaffolding_followup_task_id
         ):
-            _stack, _host, runtime_port, runtime_health_path, _required = _project_runtime_deploy_target(
-                db=db,
-                workspace_id=workspace_id,
-                project_id=project_id,
-            )
-            lead_scaffolding_followup_task_id = _create_lead_runtime_health_followup(
-                db=db,
-                workspace_id=workspace_id,
-                project_id=project_id,
-                state=state,
-                actor_user_id=actor_user_id,
-                port=runtime_port,
-                health_path=runtime_health_path,
-            )
-            if lead_scaffolding_followup_task_id:
-                failure_gate = "lead_runtime_health_failed"
+            failure_gate = "lead_runtime_health_failed"
         schedule_state = str(state.get("schedule_state") or "").strip().lower()
         if run.is_scheduled_run or schedule_state in {"queued", "running"}:
             append_event(
@@ -7542,7 +7242,10 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             and not developer_main_reconciliation_queued
             and not developer_handoff_recovery_queued
             and not developer_deploy_lock_waiting
-            and is_blocker_source_role(effective_assignee_role)
+            and (
+                is_blocker_source_role(effective_assignee_role)
+                or canonicalize_role(effective_assignee_role) == "Lead"
+            )
         ):
             if team_mode_enabled and canonicalize_role(effective_assignee_role) in {"Developer", "QA"}:
                 handoff_assignee_id = _handoff_failed_team_mode_task_to_lead(
@@ -7600,8 +7303,7 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             team_mode_enabled
             and canonicalize_role(effective_assignee_role) == "Lead"
             and (
-                str(lead_scaffolding_followup_task_id or "").strip()
-                or lead_developer_triage_queued
+                lead_developer_triage_queued
                 or lead_human_escalation
             )
         )
@@ -7616,8 +7318,6 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                     "summary": (
                         "Lead workflow triage queued."
                         if lead_developer_triage_queued
-                        else "Lead remediation follow-up queued."
-                        if lead_scaffolding_followup_task_id
                         else "Lead escalated to human decision."
                         if lead_human_escalation
                         else "Automation deferred to workflow resolution."
@@ -7642,26 +7342,24 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 "last_agent_stream_status": (
                     "Lead returned the task to Developer for remediation."
                     if lead_developer_triage_queued
-                    else "Lead queued remediation follow-up work."
-                    if lead_scaffolding_followup_task_id
                     else "Lead escalated the task for human decision."
                     if lead_human_escalation
                     else "Automation run failed."
                 ),
                 "last_agent_stream_updated_at": failed_at,
                 **_team_mode_progress_payload(
-                    phase=str(state.get("team_mode_phase") or "").strip()
-                    or _derive_team_mode_phase(
-                        assignee_role=effective_assignee_role,
-                        status=str(state.get("status") or run.status or ""),
+                    phase=(
+                        "implementation"
+                        if lead_developer_triage_queued
+                        else str(state.get("team_mode_phase") or "").strip()
+                        or _derive_team_mode_phase(
+                            assignee_role=effective_assignee_role,
+                            status=str(state.get("status") or run.status or ""),
+                        )
                     ),
-                    blocking_gate=failure_gate,
-                    blocked_reason=(
-                        f"{str(error)} Follow-up task queued: {lead_scaffolding_followup_task_id}."
-                        if lead_scaffolding_followup_task_id
-                        else str(error)
-                    ),
-                    blocked_at=failed_at,
+                    blocking_gate=None if lead_developer_triage_queued else failure_gate,
+                    blocked_reason=None if lead_developer_triage_queued else str(error),
+                    blocked_at=None if lead_developer_triage_queued else failed_at,
                 ),
             },
             metadata={
@@ -7671,6 +7369,30 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 "task_id": run.task_id,
             },
         )
+        rerun_source: str | None = None
+        if developer_main_reconciliation_queued:
+            rerun_source = "main_reconcile"
+        elif developer_handoff_recovery_queued:
+            rerun_source = "developer_handoff_recovery"
+        elif lead_developer_triage_queued:
+            rerun_source = "lead_triage_return"
+        if rerun_source:
+            state, _ = rebuild_state(db, "Task", run.task_id)
+            actor = db.get(UserModel, actor_user_id) or db.get(UserModel, AGENT_SYSTEM_USER_ID)
+            if actor is not None and bool(getattr(actor, "is_active", False)):
+                from features.tasks.application import TaskApplicationService
+
+                TaskApplicationService(db, actor, command_id=f"retry-{rerun_source}-{run.task_id[:8]}").request_automation_run(
+                    run.task_id,
+                    TaskAutomationRun(
+                        instruction=str(state.get("instruction") or run.instruction or "").strip() or None,
+                        source=rerun_source,
+                        source_task_id=run.task_id,
+                        workflow_scope="team_mode",
+                        execution_mode="resume_execution",
+                    ),
+                    wake_runner=False,
+                )
         _requeue_pending_status_change_request(
             db=db,
             run=run,
@@ -7684,7 +7406,6 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             if (
                 not should_retry
                 and not lead_triage_handoff
-                and not lead_scaffolding_followup_task_id
                 and not developer_main_reconciliation_queued
                 and not developer_handoff_recovery_queued
                 and not developer_deploy_lock_waiting
@@ -7706,7 +7427,7 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             should_retry=should_retry,
             non_blocking_gate_failure=non_blocking_gate_failure,
             lead_triage_handoff=lead_triage_handoff,
-            lead_scaffolding_followup_task_id=lead_scaffolding_followup_task_id,
+            lead_scaffolding_followup_task_id=None,
             developer_main_reconciliation_queued=developer_main_reconciliation_queued,
             developer_handoff_recovery_queued=developer_handoff_recovery_queued,
             developer_deploy_lock_waiting=developer_deploy_lock_waiting,
