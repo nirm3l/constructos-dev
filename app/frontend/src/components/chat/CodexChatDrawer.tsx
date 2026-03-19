@@ -60,7 +60,7 @@ function normalizeMcpLookupKey(value: string): string {
   return String(value || '').trim().toLowerCase().replace(/_/g, '-')
 }
 
-const CORE_MCP_LOOKUP_KEYS = new Set(['task-management-tools'])
+const CORE_MCP_LOOKUP_KEYS = new Set(['constructos-tools'])
 
 function dedupeAttachmentRefs(refs: AttachmentRef[]): AttachmentRef[] {
   const seen = new Set<string>()

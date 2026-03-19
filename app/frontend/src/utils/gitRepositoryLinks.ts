@@ -96,6 +96,10 @@ export function parseProjectGitRepositoryExternalRef(ref: ExternalRef | undefine
     const branch = url.slice('branch:'.length).trim()
     return branch ? { ref: branch } : null
   }
+  if (url.startsWith('merge:main:')) {
+    const sha = url.slice('merge:main:'.length).trim()
+    return looksLikeCommitSha(sha) ? { ref: sha } : null
+  }
   if (url.startsWith('file:')) {
     return buildPathTarget('HEAD', url.slice('file:'.length), 'file')
   }

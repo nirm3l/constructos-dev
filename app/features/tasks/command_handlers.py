@@ -552,15 +552,23 @@ def _normalize_external_refs(values: list[dict] | None) -> list[dict]:
     if not values:
         return []
     out: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
     for raw in values:
         if not isinstance(raw, dict):
             continue
         url = str(raw.get("url") or "").strip()
         if not url:
             continue
+        if re.search(r"\s", url):
+            # External refs should be URL-like tokens without embedded whitespace.
+            continue
         item = {"url": url}
         title = str(raw.get("title") or "").strip()
         source = str(raw.get("source") or "").strip()
+        dedupe_key = (url.casefold(), title.casefold(), source.casefold())
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
         if title:
             item["title"] = title
         if source:

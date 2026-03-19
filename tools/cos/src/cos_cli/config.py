@@ -11,7 +11,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback.
     import tomli as tomllib  # type: ignore[no-redef]
 
 
-DEFAULT_APP_MCP_NAME = "task-management-tools"
+DEFAULT_APP_MCP_NAME = "constructos-tools"
 DEFAULT_APP_MCP_URL = "http://localhost:8091/mcp"
 DEFAULT_SYSTEM_PROMPT_FILE = "~/.cos/system.md"
 DEFAULT_APP_MCP_BEARER_ENV = ""

@@ -1347,7 +1347,7 @@ def test_strip_mcp_server_tables_preserves_non_mcp_config():
 model_provider = "openai"
 model = "gpt-5.3-codex-spark"
 
-[mcp_servers.task-management-tools]
+[mcp_servers.constructos-tools]
 url = "http://mcp-tools:8091/mcp"
 
 [mcp_servers.github]
@@ -1361,7 +1361,7 @@ approval_policy = "never"
     assert 'model_provider = "openai"' in stripped
     assert 'model = "gpt-5.3-codex-spark"' in stripped
     assert "[profiles.default]" in stripped
-    assert "[mcp_servers.task-management-tools]" not in stripped
+    assert "[mcp_servers.constructos-tools]" not in stripped
     assert "[mcp_servers.github]" not in stripped
 
 
@@ -1386,7 +1386,7 @@ url = "http://old.example/mcp"
 
     target_home = tmp_path / "target-home"
     selected_mcp_text = """
-[mcp_servers.task-management-tools]
+[mcp_servers.constructos-tools]
 url = "http://mcp-tools:8091/mcp"
 """.strip()
     _prepare_codex_home(target_home, provider="codex", mcp_config_text=selected_mcp_text)
@@ -1395,7 +1395,7 @@ url = "http://mcp-tools:8091/mcp"
     assert 'model_provider = "openai"' in output
     assert 'model = "gpt-5.3-codex-spark"' in output
     assert "[mcp_servers.old]" not in output
-    assert "[mcp_servers.task-management-tools]" in output
+    assert "[mcp_servers.constructos-tools]" in output
 
 
 def test_prepare_codex_home_applies_runtime_provider_overrides(monkeypatch, tmp_path):

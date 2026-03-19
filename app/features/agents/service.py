@@ -4180,6 +4180,144 @@ class AgentTaskService:
             ),
         }
 
+    def _derive_setup_backlog_strategy(
+        self,
+        *,
+        starter_setup: dict[str, Any] | None,
+        seed_team_tasks: bool,
+    ) -> str:
+        if not isinstance(starter_setup, dict):
+            return "manual"
+        return "starter_seeded" if bool(seed_team_tasks) else "custom_planned"
+
+    def _validate_setup_kickoff_backlog_readiness(
+        self,
+        *,
+        workspace_id: str,
+        project_id: str,
+        auth_token: str | None,
+        backlog_strategy: str,
+    ) -> dict[str, Any]:
+        payload = self.list_tasks(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            archived=False,
+            limit=500,
+            offset=0,
+            auth_token=auth_token,
+        )
+        tasks = [item for item in (payload.get("items") or []) if isinstance(item, dict)]
+        active_tasks = [
+            item
+            for item in tasks
+            if str(item.get("task_type") or "manual").strip().lower() != "scheduled_instruction"
+        ]
+        if not active_tasks:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Kickoff requires at least one actionable implementation task. "
+                    "Create the canonical task set first, then run kickoff."
+                ),
+            )
+
+        title_counts: dict[str, int] = {}
+        for item in active_tasks:
+            normalized = " ".join(str(item.get("title") or "").strip().casefold().split())
+            if not normalized:
+                continue
+            title_counts[normalized] = int(title_counts.get(normalized, 0) or 0) + 1
+        duplicate_titles = [key for key, count in title_counts.items() if count > 1]
+        if duplicate_titles:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Kickoff backlog validation failed: duplicate task titles detected. "
+                    "Consolidate duplicate tasks before kickoff."
+                ),
+            )
+
+        missing_delivery_mode = [
+            str(item.get("id") or "").strip()
+            for item in active_tasks
+            if normalize_delivery_mode(item.get("delivery_mode")) is None
+        ]
+        if missing_delivery_mode:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Kickoff backlog validation failed: one or more tasks are missing delivery_mode. "
+                    "Set delivery_mode on all implementation tasks before kickoff."
+                ),
+            )
+
+        missing_scope = [
+            str(item.get("id") or "").strip()
+            for item in active_tasks
+            if not str(item.get("instruction") or "").strip()
+            and not str(item.get("description") or "").strip()
+        ]
+        if missing_scope:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Kickoff backlog validation failed: one or more tasks are missing instruction/description scope. "
+                    "Add task scope details before kickoff."
+                ),
+            )
+
+        seeded_count = 0
+        custom_count = 0
+        unlabeled_count = 0
+        explicit_developer_routed_count = 0
+        role_by_code: dict[str, str] = {}
+        with SessionLocal() as db:
+            role_by_code = _team_mode_agent_role_by_code_for_project(
+                db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+        for item in active_tasks:
+            labels = self._normalize_string_list_input(item.get("labels"), field_name="labels")
+            if not labels:
+                unlabeled_count += 1
+            if "starter-seeded" in labels:
+                seeded_count += 1
+            else:
+                custom_count += 1
+            assigned_agent_code = str(item.get("assigned_agent_code") or "").strip()
+            if assigned_agent_code and role_by_code.get(assigned_agent_code) == "Developer":
+                explicit_developer_routed_count += 1
+
+        mixed_origin = bool(seeded_count > 0 and custom_count > 0)
+        if mixed_origin and backlog_strategy in {"starter_seeded", "custom_planned"}:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Kickoff backlog validation failed: mixed starter-seeded and custom task sets detected. "
+                    "Choose one strategy (starter-seeded or custom-planned), archive redundant tasks, then rerun kickoff."
+                ),
+            )
+        if explicit_developer_routed_count <= 0:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Kickoff backlog validation failed: no task is explicitly routed to a Developer agent slot. "
+                    "Assign at least one actionable task to dev-a/dev-b (or another configured Developer slot) before kickoff."
+                ),
+            )
+
+        return {
+            "ok": True,
+            "active_task_count": len(active_tasks),
+            "seeded_task_count": seeded_count,
+            "custom_task_count": custom_count,
+            "unlabeled_task_count": unlabeled_count,
+            "explicit_developer_routed_count": explicit_developer_routed_count,
+            "mixed_origin_detected": mixed_origin,
+            "backlog_strategy": backlog_strategy,
+        }
+
     def _maybe_backfill_team_mode_topology(
         self,
         *,
@@ -4554,6 +4692,10 @@ class AgentTaskService:
             primary_starter_key=primary_starter_key,
             facet_keys=facet_keys,
         )
+        backlog_strategy = self._derive_setup_backlog_strategy(
+            starter_setup=starter_setup,
+            seed_team_tasks=bool(seed_team_tasks),
+        )
         normalized_docker_port: int | None
         if docker_port is None:
             normalized_docker_port = None
@@ -4848,7 +4990,12 @@ class AgentTaskService:
             )
 
         starter_artifacts: dict[str, Any] | None = None
-        if not blocking_errors and created_project and isinstance(starter_setup, dict):
+        if (
+            not blocking_errors
+            and created_project
+            and isinstance(starter_setup, dict)
+            and backlog_strategy == "starter_seeded"
+        ):
             def _bootstrap_starter_artifacts() -> dict[str, Any]:
                 with SessionLocal() as db:
                     return ProjectStarterApplicationService(db, self._resolve_actor_user()).bootstrap_starter_artifacts(
@@ -4871,7 +5018,10 @@ class AgentTaskService:
                 steps=steps,
                 step_id="bootstrap_starter_artifacts",
                 title="Bootstrap starter artifacts",
-                reason="Starter artifacts are only generated for newly created starter-driven projects",
+                reason=(
+                    "Starter artifacts are skipped unless backlog strategy is starter_seeded "
+                    "for a newly created starter-driven project."
+                ),
             )
 
         if not blocking_errors and created_project and isinstance(starter_setup, dict):
@@ -4957,6 +5107,7 @@ class AgentTaskService:
             "docker_compose_enabled": requested_docker,
             "docker_port": docker_port,
             "seed_team_tasks": bool(seed_team_tasks),
+            "backlog_strategy": backlog_strategy,
             "kickoff_after_setup": bool(kickoff_after_setup),
         }
 
@@ -5253,6 +5404,32 @@ class AgentTaskService:
                 reason="Docker Compose is disabled or kickoff_after_setup is disabled",
             )
 
+        backlog_validation_result: dict[str, Any] | None = None
+        if not blocking_errors and requested_team and bool(kickoff_after_setup):
+            validated_backlog = self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="validate_kickoff_backlog_readiness",
+                title="Validate kickoff backlog readiness",
+                blocking=True,
+                max_attempts=1,
+                action=lambda: self._validate_setup_kickoff_backlog_readiness(
+                    workspace_id=resolved_workspace_id,
+                    project_id=resolved_project_id,
+                    auth_token=auth_token,
+                    backlog_strategy=backlog_strategy,
+                ),
+            )
+            if isinstance(validated_backlog, dict):
+                backlog_validation_result = validated_backlog
+        else:
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="validate_kickoff_backlog_readiness",
+                title="Validate kickoff backlog readiness",
+                reason="kickoff_after_setup is disabled or Team Mode is not active",
+            )
+
         kickoff_result: dict[str, Any] | None = None
         if not blocking_errors and requested_team and bool(kickoff_after_setup):
             kicked = self._run_setup_step(
@@ -5390,6 +5567,18 @@ class AgentTaskService:
 
         team_verification = verification.get("team_mode") if isinstance(verification.get("team_mode"), dict) else {}
         delivery_verification = verification.get("delivery") if isinstance(verification.get("delivery"), dict) else {}
+        status_semantics_payload = (
+            team_verification.get("plugin_policy")
+            if isinstance(team_verification.get("plugin_policy"), dict)
+            else delivery_verification.get("plugin_policy")
+            if isinstance(delivery_verification.get("plugin_policy"), dict)
+            else {}
+        )
+        status_semantics = (
+            status_semantics_payload.get("status_semantics")
+            if isinstance(status_semantics_payload.get("status_semantics"), dict)
+            else {}
+        )
 
         kickoff_dispatched = bool((kickoff_result or {}).get("kickoff_dispatched"))
         developer_dispatch_confirmed = bool((kickoff_result or {}).get("developer_dispatch_confirmed"))
@@ -5424,6 +5613,91 @@ class AgentTaskService:
             if kickoff_dispatched
             else "Kickoff has not started yet."
         )
+        setup_verification_ok = bool((not blocking) and ((not requested_team) or bool(team_verification.get("ok"))))
+        setup_verification_status = "PASS" if setup_verification_ok else "Needs attention"
+        delivery_ok = bool(delivery_verification.get("ok")) if requested_git else None
+        delivery_verification_status = (
+            "PASS"
+            if delivery_ok is True
+            else "Needs attention"
+            if delivery_ok is False
+            else "Not requested"
+        )
+        blocking_state = {
+            "code": (
+                "setup_blocked"
+                if blocking
+                else "kickoff_in_progress"
+                if kickoff_in_progress
+                else "delivery_pending"
+                if requested_git and delivery_ok is False
+                else "execution_not_started"
+                if kickoff_required
+                else "none"
+            ),
+            "message": (
+                "Blocking setup errors are present."
+                if blocking
+                else "No setup blockers. Kickoff is still propagating to Developer execution."
+                if kickoff_in_progress
+                else "No setup blockers. Delivery requirements are not satisfied yet."
+                if requested_git and delivery_ok is False
+                else "No setup blockers. Execution has not started yet."
+                if kickoff_required
+                else "No blockers detected."
+            ),
+        }
+
+        task_snapshot_payload = self.list_tasks(
+            workspace_id=resolved_workspace_id,
+            project_id=resolved_project_id,
+            archived=False,
+            limit=500,
+            offset=0,
+            auth_token=auth_token,
+        )
+        task_snapshot_items = (
+            [item for item in (task_snapshot_payload.get("items") or []) if isinstance(item, dict)]
+            if isinstance(task_snapshot_payload, dict)
+            else []
+        )
+        by_status: dict[str, int] = {}
+        by_semantic_status = {
+            "todo": 0,
+            "active": 0,
+            "in_review": 0,
+            "awaiting_decision": 0,
+            "blocked": 0,
+            "completed": 0,
+            "unknown": 0,
+        }
+        semantic_to_status_name = {
+            str(key or "").strip(): str(value or "").strip().casefold()
+            for key, value in status_semantics.items()
+            if str(key or "").strip() and str(value or "").strip()
+        }
+        for item in task_snapshot_items:
+            raw_status = str(item.get("status") or "").strip() or "Unspecified"
+            by_status[raw_status] = int(by_status.get(raw_status, 0) or 0) + 1
+            normalized = raw_status.casefold()
+            matched_semantic = None
+            for semantic_key in ("todo", "active", "in_review", "awaiting_decision", "blocked", "completed"):
+                expected = semantic_to_status_name.get(semantic_key)
+                if expected and normalized == expected:
+                    matched_semantic = semantic_key
+                    break
+            if matched_semantic is None:
+                by_semantic_status["unknown"] = int(by_semantic_status.get("unknown", 0) or 0) + 1
+            else:
+                by_semantic_status[matched_semantic] = int(by_semantic_status.get(matched_semantic, 0) or 0) + 1
+
+        lifecycle_notice = None
+        if requested_team and len(task_snapshot_items) == 0:
+            lifecycle_notice = (
+                "No active tasks are currently persisted in this project. "
+                "If tasks were archived/removed or the workspace was recreated, previous execution progress is invalidated. "
+                "Create or restore tasks, then run kickoff again."
+            )
 
         user_facing_summary = {
             "project_link": f"?tab=projects&project={resolved_project_id}",
@@ -5441,6 +5715,7 @@ class AgentTaskService:
                 "runtime_deploy_target": docker_runtime_target,
                 "primary_starter_key": setup_profile.get("primary_starter_key") if isinstance(setup_profile, dict) else None,
                 "facet_keys": setup_profile.get("facet_keys") if isinstance(setup_profile, dict) else [],
+                "backlog_strategy": backlog_strategy,
             },
             "kickoff_required": kickoff_required,
             "kickoff_hint": kickoff_hint or "Start execution only when ready by running kickoff from chat.",
@@ -5459,15 +5734,24 @@ class AgentTaskService:
                 "message": kickoff_state_message,
             },
             "verification": {
+                "setup_status": setup_verification_status,
                 "team_mode_ok": bool(team_verification.get("ok")) if requested_team else None,
                 "team_mode_failed_requirements": _failed_checks_with_descriptions(team_verification),
-                "delivery_ok": bool(delivery_verification.get("ok")) if requested_git else None,
+                "delivery_status": delivery_verification_status,
+                "delivery_ok": delivery_ok,
                 "delivery_failed_requirements": (
                     []
                     if kickoff_in_progress
                     else _failed_checks_with_descriptions(delivery_verification)
                 ),
             },
+            "blocking_state": blocking_state,
+            "execution_snapshot": {
+                "total_tasks": len(task_snapshot_items),
+                "by_status": by_status,
+                "by_semantic_status": by_semantic_status,
+            },
+            "backlog_validation": backlog_validation_result,
             "next_action_hint": (
                 "Setup is complete and kickoff dispatched Developer execution."
                 if (bool(kickoff_after_setup) and kickoff_dispatched and developer_dispatch_confirmed and (not blocking and workflow_ok))
@@ -5480,6 +5764,8 @@ class AgentTaskService:
                 else "Some required checks failed. Review failed requirements and apply the suggested fixes before execution."
             ),
         }
+        if lifecycle_notice:
+            user_facing_summary["lifecycle_notice"] = lifecycle_notice
         if kickoff_result is not None:
             user_facing_summary["kickoff"] = {
                 "ok": bool(kickoff_result.get("ok")),
@@ -5513,6 +5799,7 @@ class AgentTaskService:
                 "primary_starter_key": setup_profile.get("primary_starter_key") if isinstance(setup_profile, dict) else None,
                 "facet_keys": setup_profile.get("facet_keys") if isinstance(setup_profile, dict) else [],
                 "retrieval_hints": setup_profile.get("retrieval_hints") if isinstance(setup_profile, dict) else [],
+                "backlog_strategy": backlog_strategy,
                 "team_mode_enabled": bool(final_configs.get("team_mode", {}).get("enabled")),
                 "git_delivery_enabled": bool(final_configs.get("git_delivery", {}).get("enabled")),
                 "docker_compose_enabled": bool(final_configs.get("docker_compose", {}).get("enabled")),

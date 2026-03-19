@@ -185,7 +185,7 @@ def create_mcp():
     except Exception as exc:  # pragma: no cover
         raise RuntimeError("fastmcp is required to run MCP server. Install dependency: fastmcp>=2.0.0") from exc
 
-    mcp = FastMCP(name="task-management-mcp")
+    mcp = FastMCP(name="constructos-mcp")
     service = build_mcp_gateway()
     default_tool_token = str(MCP_AUTH_TOKEN or "").strip() or None
     enabled_plugins = {str(item or "").strip().lower() for item in (AGENT_ENABLED_PLUGINS or []) if str(item or "").strip()}

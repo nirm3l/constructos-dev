@@ -9,6 +9,8 @@ import type { Tab } from '../../utils/ui'
 import { Icon } from '../shared/uiHelpers'
 import { MarkdownView } from '../../markdown/MarkdownView'
 
+const CONSTRUCTOS_USER_GUIDE_PROJECT_ID = '20000000-0000-0000-0000-000000000002'
+
 type AppHeaderProps = {
   bootstrapData: BootstrapPayload
   license?: LicenseStatus | null
@@ -172,6 +174,17 @@ export function AppHeader({
   const [notificationPreviewAction, setNotificationPreviewAction] = React.useState('')
   const [notificationPreviewActionLabel, setNotificationPreviewActionLabel] = React.useState('')
   const [notificationPreviewView] = React.useState<'preview'>('preview')
+  const openUserGuide = React.useCallback(() => {
+    const hasGuideProject = bootstrapData.projects.some((project) => project.id === CONSTRUCTOS_USER_GUIDE_PROJECT_ID)
+    if (hasGuideProject) {
+      setSelectedProjectId(CONSTRUCTOS_USER_GUIDE_PROJECT_ID)
+      setTab('notes')
+      return
+    }
+    if (typeof window !== 'undefined') {
+      window.location.assign(`?tab=notes&project=${encodeURIComponent(CONSTRUCTOS_USER_GUIDE_PROJECT_ID)}`)
+    }
+  }, [bootstrapData.projects, setSelectedProjectId, setTab])
 
   React.useEffect(() => {
     if (!notificationPreviewOpen) return
@@ -476,6 +489,9 @@ export function AppHeader({
                     </DropdownMenu.Item>
                     <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('task-flow')}>
                       Task Flow
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item className="header-settings-menu-item" onSelect={openUserGuide}>
+                      User guide
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator className="header-settings-menu-separator" />
                     <DropdownMenu.Item className="header-settings-menu-item" onSelect={onStartQuickTour}>

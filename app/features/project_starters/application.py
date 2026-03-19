@@ -13,7 +13,14 @@ from features.specifications.application import SpecificationApplicationService
 from features.tasks.application import TaskApplicationService
 from shared.core import ProjectRuleCreate, ProjectSetupProfile, SpecificationCreate, TaskCreate, User, ensure_project_access
 
-from .catalog import ProjectStarterDefinition, STARTER_VERSION, get_project_starter, list_project_facets, list_project_starters
+from .catalog import (
+    ProjectStarterDefinition,
+    STARTER_VERSION,
+    get_project_starter,
+    list_project_facets,
+    list_project_starters,
+    normalize_starter_key,
+)
 
 
 def _serialize_starter(defn: ProjectStarterDefinition) -> dict[str, Any]:
@@ -130,6 +137,10 @@ class ProjectStarterApplicationService:
         created_spec_ids: list[str] = []
         created_task_ids: list[str] = []
         created_rule_ids: list[str] = []
+        starter_origin_labels = [
+            "starter-seeded",
+            f"starter:{normalize_starter_key(starter.key)}",
+        ]
 
         for item in starter.specifications:
             created = SpecificationApplicationService(self.db, self.user).create_specification(
@@ -145,6 +156,11 @@ class ProjectStarterApplicationService:
             created_spec_ids.append(str(created["id"]))
 
         for item in starter.tasks:
+            normalized_labels: list[str] = []
+            for raw in [*list(item.labels), *starter_origin_labels]:
+                value = str(raw or "").strip()
+                if value and value not in normalized_labels:
+                    normalized_labels.append(value)
             created = TaskApplicationService(self.db, self.user).create_task(
                 TaskCreate(
                     workspace_id=workspace_id,
@@ -153,7 +169,7 @@ class ProjectStarterApplicationService:
                     title=item.title,
                     description=item.description,
                     priority=item.priority,
-                    labels=list(item.labels),
+                    labels=normalized_labels,
                 )
             )
             created_task_ids.append(str(created["id"]))

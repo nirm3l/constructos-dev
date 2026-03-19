@@ -126,7 +126,7 @@ const FULL_PROMPT_GUIDANCE_TEMPLATE = [
   '- GraphSummary.md can be used as a concise overview, but validate against GraphEvidence.json before acting.',
   '- Treat claims without an evidence_id as low confidence.',
   '- If project context conflicts with the latest explicit user instruction, follow the latest explicit user instruction.',
-  '- You may call task-management MCP tools relevant to the request.',
+  '- You may call ConstructOS MCP tools relevant to the request.',
   '- If the user asks to implement/work on a specific project by ID or name (for example \'Implement project <id|name>\'), call get_project_chat_context(project_ref=..., workspace_id=...) first.',
   '- If get_project_chat_context returns ambiguous name matches, ask for a concrete project ID or workspace_id and then call it again.',
   '- Read each MCP tool description and follow its payload contract and operational guidance.',

@@ -695,6 +695,37 @@ def test_project_and_task_refs_roundtrip(tmp_path):
     assert task_payload['attachment_refs'][0]['path'] == '/tmp/local.txt'
 
 
+def test_task_external_refs_normalization_deduplicates_and_drops_whitespace_urls(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Normalized refs',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'external_refs': [
+                {'url': ' https://example.com/deploy ', 'title': 'Deploy report'},
+                {'url': 'https://example.com/deploy', 'title': 'Deploy report'},
+                {'url': 'branch:task/abc123-implementation', 'title': 'Task branch'},
+                {'url': 'deploy:health:http://gateway:6768/health:http_200', 'title': 'Health'},
+                {'url': 'https://bad url.example.com/with-space', 'title': 'Bad'},
+            ],
+        },
+    )
+    assert task.status_code == 200
+    refs = task.json().get('external_refs') or []
+    urls = [str(item.get('url') or '') for item in refs if isinstance(item, dict)]
+
+    assert urls.count('https://example.com/deploy') == 1
+    assert 'branch:task/abc123-implementation' in urls
+    assert 'deploy:health:http://gateway:6768/health:http_200' in urls
+    assert 'https://bad url.example.com/with-space' not in urls
+
+
 def test_local_attachment_upload_and_download(tmp_path):
     os.environ["ATTACHMENTS_DIR"] = str(tmp_path / "uploads")
     client = build_client(tmp_path)
@@ -945,8 +976,8 @@ def test_bootstrap_exposes_embedding_runtime_config(tmp_path, monkeypatch):
 
     monkeypatch_rows = [
         {
-            'name': 'task-management-tools',
-            'display_name': 'Task Management Tools',
+            'name': 'constructos-tools',
+            'display_name': 'Constructos Tools',
             'enabled': True,
             'disabled_reason': None,
             'auth_status': None,
@@ -975,8 +1006,8 @@ def test_bootstrap_exposes_embedding_runtime_config(tmp_path, monkeypatch):
     assert isinstance(payload.get('context_pack_evidence_top_k_default'), int)
     assert payload.get('agent_chat_available_mcp_servers') == [
         {
-            'name': 'task-management-tools',
-            'display_name': 'Task Management Tools',
+            'name': 'constructos-tools',
+            'display_name': 'Constructos Tools',
             'enabled': True,
             'disabled_reason': None,
             'auth_status': None,
@@ -4197,6 +4228,59 @@ def test_runner_contract_validation_derives_files_changed_from_dirty_task_worktr
     assert "Developer handoff is not committed on the task branch yet." in error
     assert "index.html" in error
     assert "styles.css" in error
+
+
+def test_runner_derives_files_changed_from_main_three_dot_when_merge_commit_has_no_file_delta(tmp_path, monkeypatch):
+    import subprocess
+
+    import features.agents.runner as runner_module
+    from shared.project_repository import (
+        ensure_project_repository_initialized,
+        resolve_task_branch_name,
+        resolve_task_worktree_path,
+    )
+
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path))
+    project_name = "Battle City"
+    project_id = "proj-main-three-dot-fallback"
+    task_id = "9dca220c-2f62-57e9-8b6f-3d5164ec1e31"
+    title = "Reconcile latest main into task branch"
+
+    repo = ensure_project_repository_initialized(project_name=project_name, project_id=project_id)
+    branch = resolve_task_branch_name(task_id=task_id, title=title)
+    worktree = resolve_task_worktree_path(project_name=project_name, project_id=project_id, task_id=task_id)
+    subprocess.run(["git", "worktree", "add", "-b", branch, str(worktree), "main"], cwd=str(repo), check=True, capture_output=True, text=True)
+
+    (repo / "ui.js").write_text("export const mobileControls = true;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "ui.js"], cwd=str(repo), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "feat: add ui controls on main"], cwd=str(repo), check=True, capture_output=True, text=True)
+
+    (worktree / "ui.js").write_text("export const mobileControls = true;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "ui.js"], cwd=str(worktree), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "feat: add ui controls on task branch"], cwd=str(worktree), check=True, capture_output=True, text=True)
+
+    subprocess.run(["git", "merge", "--no-ff", "main", "-m", "merge main into task branch"], cwd=str(worktree), check=True, capture_output=True, text=True)
+    merge_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(worktree), check=True, capture_output=True, text=True).stdout.strip().lower()
+    merge_head_files = subprocess.run(
+        ["git", "show", "--pretty=format:", "--name-only", merge_head],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert merge_head_files == ""
+
+    git_evidence = {
+        "repo_root": str(repo),
+        "task_workdir": str(worktree),
+        "task_branch": branch,
+        "before_head_sha": merge_head,
+        "after_head_sha": merge_head,
+        "after_is_dirty": False,
+    }
+
+    files_changed = runner_module._derive_files_changed_from_git_evidence(git_evidence)
+    assert "ui.js" in files_changed
 
 
 def test_runner_finalizes_dirty_developer_handoff_with_commit(tmp_path, monkeypatch):
@@ -12105,6 +12189,7 @@ def test_append_lead_deploy_external_refs_encodes_explicit_health_status():
     refs = _append_lead_deploy_external_refs(
         refs=[],
         stack='constructos-ws-default',
+        build_required=False,
         port=6768,
         health_path='/health',
         runtime_ok=True,
@@ -12116,6 +12201,33 @@ def test_append_lead_deploy_external_refs_encodes_explicit_health_status():
 
     urls = {str(item.get('url') or '') for item in refs}
     assert 'deploy:health:http://gateway:6768/health:http_200' in urls
+
+
+def test_append_lead_deploy_external_refs_replaces_stale_deploy_markers():
+    from features.agents.runner import _append_lead_deploy_external_refs
+
+    refs = _append_lead_deploy_external_refs(
+        refs=[
+            {'url': 'deploy:stack:constructos-ws-default', 'title': 'deploy stack'},
+            {'url': 'deploy:health:http://gateway:6768/health:http_000', 'title': 'deploy health: fail (0)'},
+            {'url': 'https://example.com/deploy-report', 'title': 'Deploy report'},
+        ],
+        stack='constructos-ws-default',
+        build_required=False,
+        port=6768,
+        health_path='/health',
+        runtime_ok=True,
+        http_url='http://gateway:6768/health',
+        http_status=200,
+        project_name=None,
+        project_id=None,
+    )
+
+    urls = [str(item.get('url') or '') for item in refs]
+    assert 'https://example.com/deploy-report' in urls
+    assert 'deploy:health:http://gateway:6768/health:http_000' not in urls
+    assert urls.count('deploy:stack:constructos-ws-default') == 1
+    assert urls.count('deploy:health:http://gateway:6768/health:http_200') == 1
 
 
 def test_task_dependency_graph_merges_runtime_sources_from_event_history_and_current_state(tmp_path):
@@ -13484,6 +13596,249 @@ def test_agent_service_setup_project_orchestration_runs_staged_setup(tmp_path, m
         assert not seeded_ids
     assert steps["verify_team_mode_workflow"]["status"] in {"ok", "error"}
     assert steps["verify_delivery_workflow"]["status"] in {"ok", "error"}
+
+
+def test_setup_project_orchestration_custom_planned_strategy_skips_starter_artifacts(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", set())
+
+    service = AgentTaskService()
+    payload = service.setup_project_orchestration(
+        name="Custom Planned Starter Project",
+        short_description="Skip starter artifacts and keep custom planning mode.",
+        primary_starter_key="web_game",
+        workspace_id=ws_id,
+        enable_team_mode=True,
+        enable_git_delivery=True,
+        enable_docker_compose=False,
+        seed_team_tasks=False,
+        kickoff_after_setup=False,
+        command_id="setup-custom-planned",
+    )
+
+    assert payload["blocking"] is False
+    assert payload["requested"]["backlog_strategy"] == "custom_planned"
+    assert payload["effective"]["backlog_strategy"] == "custom_planned"
+    summary = payload.get("user_facing_summary") if isinstance(payload.get("user_facing_summary"), dict) else {}
+    configured = summary.get("configured") if isinstance(summary.get("configured"), dict) else {}
+    assert configured.get("backlog_strategy") == "custom_planned"
+
+    steps = {str(item.get("id") or "").strip(): item for item in (payload.get("steps") or [])}
+    assert steps["bootstrap_starter_artifacts"]["status"] == "skipped"
+    assert "starter_seeded" in str(steps["bootstrap_starter_artifacts"].get("reason") or "")
+
+    project_id = str((payload.get("project") or {}).get("id") or "").strip()
+    listed = client.get(
+        "/api/tasks",
+        params={"workspace_id": ws_id, "project_id": project_id, "limit": 100, "offset": 0},
+    )
+    assert listed.status_code == 200
+    items = listed.json().get("items") if isinstance(listed.json(), dict) else []
+    assert items == []
+
+
+def test_setup_project_orchestration_blocks_kickoff_without_actionable_tasks(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", set())
+
+    service = AgentTaskService()
+    payload = service.setup_project_orchestration(
+        name="Kickoff Backlog Guard Project",
+        short_description="Kickoff should stop until custom tasks are created.",
+        primary_starter_key="web_game",
+        workspace_id=ws_id,
+        enable_team_mode=True,
+        enable_git_delivery=True,
+        enable_docker_compose=False,
+        seed_team_tasks=False,
+        kickoff_after_setup=True,
+        command_id="setup-kickoff-backlog-guard",
+    )
+
+    assert payload["blocking"] is True
+    steps = {str(item.get("id") or "").strip(): item for item in (payload.get("steps") or [])}
+    assert steps["validate_kickoff_backlog_readiness"]["status"] == "error"
+    assert steps["dispatch_team_mode_kickoff"]["status"] == "skipped"
+    assert "actionable implementation task" in str(steps["validate_kickoff_backlog_readiness"]["error"]).lower()
+
+
+def test_setup_project_orchestration_starter_seeded_tasks_have_origin_labels(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", set())
+
+    service = AgentTaskService()
+    payload = service.setup_project_orchestration(
+        name="Starter Seeded Origin Labels Project",
+        short_description="Starter-generated tasks should carry origin labels.",
+        primary_starter_key="web_game",
+        workspace_id=ws_id,
+        enable_team_mode=False,
+        enable_git_delivery=False,
+        enable_docker_compose=False,
+        seed_team_tasks=True,
+        kickoff_after_setup=False,
+        command_id="setup-starter-origin-labels",
+    )
+
+    assert payload["blocking"] is False
+    assert payload["requested"]["backlog_strategy"] == "starter_seeded"
+    project_id = str((payload.get("project") or {}).get("id") or "").strip()
+    listed = client.get(
+        "/api/tasks",
+        params={"workspace_id": ws_id, "project_id": project_id, "limit": 100, "offset": 0},
+    )
+    assert listed.status_code == 200
+    items = listed.json().get("items") if isinstance(listed.json(), dict) else []
+    assert items
+    for item in items:
+        labels = [str(label or "").strip() for label in (item.get("labels") or [])]
+        assert "starter-seeded" in labels
+        assert "starter:web_game" in labels
+
+
+def test_setup_project_orchestration_blocks_kickoff_when_no_explicit_developer_routing(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", set())
+
+    service = AgentTaskService()
+    payload = service.setup_project_orchestration(
+        name="Kickoff Routing Guard Project",
+        short_description="Starter tasks exist but no explicit developer routing.",
+        primary_starter_key="web_game",
+        workspace_id=ws_id,
+        enable_team_mode=True,
+        enable_git_delivery=True,
+        enable_docker_compose=False,
+        seed_team_tasks=True,
+        kickoff_after_setup=True,
+        command_id="setup-kickoff-routing-guard",
+    )
+
+    assert payload["blocking"] is True
+    steps = {str(item.get("id") or "").strip(): item for item in (payload.get("steps") or [])}
+    assert steps["validate_kickoff_backlog_readiness"]["status"] == "error"
+    assert steps["dispatch_team_mode_kickoff"]["status"] == "skipped"
+    assert "developer agent slot" in str(steps["validate_kickoff_backlog_readiness"]["error"]).lower()
+
+
+def test_setup_project_orchestration_summary_includes_split_verification_blocking_and_snapshot(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", set())
+
+    service = AgentTaskService()
+    payload = service.setup_project_orchestration(
+        name="Summary Contract Project",
+        short_description="Validate setup/delivery split summary contract.",
+        primary_starter_key="web_game",
+        workspace_id=ws_id,
+        enable_team_mode=True,
+        enable_git_delivery=True,
+        enable_docker_compose=False,
+        seed_team_tasks=False,
+        kickoff_after_setup=False,
+        command_id="setup-summary-contract",
+    )
+
+    summary = payload.get("user_facing_summary") if isinstance(payload.get("user_facing_summary"), dict) else {}
+    verification = summary.get("verification") if isinstance(summary.get("verification"), dict) else {}
+    assert verification.get("setup_status") in {"PASS", "Needs attention"}
+    assert verification.get("delivery_status") in {"PASS", "Needs attention", "Not requested"}
+    delivery_ok = verification.get("delivery_ok")
+    if delivery_ok is True:
+        assert verification.get("delivery_status") == "PASS"
+    if delivery_ok is False:
+        assert verification.get("delivery_status") == "Needs attention"
+
+    blocking_state = summary.get("blocking_state") if isinstance(summary.get("blocking_state"), dict) else {}
+    assert str(blocking_state.get("code") or "").strip()
+    assert str(blocking_state.get("message") or "").strip()
+
+    execution_snapshot = summary.get("execution_snapshot") if isinstance(summary.get("execution_snapshot"), dict) else {}
+    assert isinstance(execution_snapshot.get("total_tasks"), int)
+    assert isinstance(execution_snapshot.get("by_status"), dict)
+    assert isinstance(execution_snapshot.get("by_semantic_status"), dict)
+    assert "unknown" in execution_snapshot.get("by_semantic_status")
+
+    lifecycle_notice = str(summary.get("lifecycle_notice") or "").strip()
+    assert "no active tasks are currently persisted" in lifecycle_notice.lower()
+
+
+def test_setup_project_orchestration_summary_delivery_status_not_requested_when_git_disabled(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    monkeypatch.setattr(svc_module, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(svc_module, "MCP_DEFAULT_WORKSPACE_ID", ws_id)
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_WORKSPACE_IDS", {ws_id})
+    monkeypatch.setattr(svc_module, "MCP_ALLOWED_PROJECT_IDS", set())
+
+    service = AgentTaskService()
+    payload = service.setup_project_orchestration(
+        name="Summary Contract No Git Project",
+        short_description="Delivery status should be not requested when git is disabled.",
+        primary_starter_key="web_game",
+        workspace_id=ws_id,
+        enable_team_mode=False,
+        enable_git_delivery=False,
+        enable_docker_compose=False,
+        seed_team_tasks=False,
+        kickoff_after_setup=False,
+        command_id="setup-summary-contract-no-git",
+    )
+
+    summary = payload.get("user_facing_summary") if isinstance(payload.get("user_facing_summary"), dict) else {}
+    verification = summary.get("verification") if isinstance(summary.get("verification"), dict) else {}
+    assert verification.get("delivery_status") == "Not requested"
+    assert verification.get("delivery_ok") is None
 
 
 def test_agent_service_setup_project_orchestration_auto_sets_local_repository_context(tmp_path, monkeypatch):
@@ -15209,8 +15564,8 @@ def test_agents_chat_endpoint_normalizes_selected_mcp_servers(tmp_path, monkeypa
         '_get_rows',
         lambda force_refresh=False: [
             {
-                'name': 'task-management-tools',
-                'display_name': 'Task Management Tools',
+                'name': 'constructos-tools',
+                'display_name': 'Constructos Tools',
                 'enabled': True,
                 'disabled_reason': None,
                 'auth_status': None,
@@ -15245,7 +15600,7 @@ def test_agents_chat_endpoint_normalizes_selected_mcp_servers(tmp_path, monkeypa
         },
     )
     assert res.status_code == 200
-    assert captured['mcp_servers'] == ['task-management-tools', 'jira', 'github']
+    assert captured['mcp_servers'] == ['constructos-tools', 'jira', 'github']
     assert captured['timeout_seconds'] == 0
 
 
@@ -15270,18 +15625,9 @@ def test_agents_chat_endpoint_skips_disabled_mcp_servers_from_defaults(tmp_path,
         agents_api,
         '_classify_chat_instruction_intents',
         lambda **_kwargs: {
-            'execution_intent': False,
+            'execution_intent': True,
             'execution_kickoff_intent': False,
-            'project_creation_intent': True,
-        },
-    )
-    monkeypatch.setattr(
-        agents_api,
-        '_classify_chat_instruction_intents',
-        lambda **_kwargs: {
-            'execution_intent': False,
-            'execution_kickoff_intent': False,
-            'project_creation_intent': True,
+            'project_creation_intent': False,
         },
     )
     monkeypatch.setattr(
@@ -15289,8 +15635,8 @@ def test_agents_chat_endpoint_skips_disabled_mcp_servers_from_defaults(tmp_path,
         '_get_rows',
         lambda force_refresh=False: [
             {
-                'name': 'task-management-tools',
-                'display_name': 'Task Management Tools',
+                'name': 'constructos-tools',
+                'display_name': 'Constructos Tools',
                 'enabled': True,
                 'disabled_reason': None,
                 'auth_status': None,
@@ -15324,7 +15670,7 @@ def test_agents_chat_endpoint_skips_disabled_mcp_servers_from_defaults(tmp_path,
         },
     )
     assert res.status_code == 200
-    assert captured['mcp_servers'] == ['task-management-tools', 'github']
+    assert captured['mcp_servers'] == ['constructos-tools', 'github']
 
 
 def test_mcp_registry_honors_disabled_flag_from_config_when_runtime_list_unavailable(monkeypatch):
@@ -15334,7 +15680,7 @@ def test_mcp_registry_honors_disabled_flag_from_config_when_runtime_list_unavail
         mcp_registry,
         "_load_mcp_servers_from_config",
         lambda: {
-            "task-management-tools": {"url": "http://localhost:8091/mcp"},
+            "constructos-tools": {"url": "http://localhost:8091/mcp"},
             "github": {"url": "https://api.githubcopilot.com/mcp/", "enabled": False},
             "jira": {"url": "http://jira-mcp:9000/mcp", "enabled": False},
         },
@@ -15344,7 +15690,7 @@ def test_mcp_registry_honors_disabled_flag_from_config_when_runtime_list_unavail
     rows = mcp_registry._discover_rows_uncached()
     by_name = {str(row.get("name") or ""): row for row in rows}
 
-    assert by_name["task-management-tools"]["enabled"] is True
+    assert by_name["constructos-tools"]["enabled"] is True
     assert by_name["github"]["enabled"] is False
     assert by_name["jira"]["enabled"] is False
 
@@ -15566,12 +15912,12 @@ def test_chat_session_context_patch_updates_mcp_servers_without_clearing_attachm
         f'/api/chat/sessions/{session_id}',
         json={
             'workspace_id': ws_id,
-            'mcp_servers': ['task-management-tools'],
+            'mcp_servers': ['constructos-tools'],
         },
     )
     assert patched_mcp.status_code == 200
     patched_payload = patched_mcp.json()
-    assert patched_payload['mcp_servers'] == ['task-management-tools']
+    assert patched_payload['mcp_servers'] == ['constructos-tools']
     assert patched_payload['session_attachment_refs'][0]['path'] == attachment_ref['path']
 
     listed = client.get(
@@ -15582,7 +15928,7 @@ def test_chat_session_context_patch_updates_mcp_servers_without_clearing_attachm
     sessions = listed.json()
     target = next((item for item in sessions if item.get('id') == session_id), None)
     assert target is not None
-    assert target['mcp_servers'] == ['task-management-tools']
+    assert target['mcp_servers'] == ['constructos-tools']
     assert target['session_attachment_refs'][0]['path'] == attachment_ref['path']
 
 
@@ -18583,7 +18929,10 @@ def test_translate_compose_manifest_for_host_runtime_rewrites_relative_bind_sour
         "      context: .\n"
         "    volumes:\n"
         "      - ./:/usr/share/nginx/html:ro\n"
-        "      - ./nginx.constructos.conf:/etc/nginx/conf.d/default.conf:ro\n",
+        "      - ./nginx.constructos.conf:/etc/nginx/conf.d/default.conf:ro\n"
+        "    healthcheck:\n"
+        "      test: [\"CMD\", \"wget\", \"-qO-\", \"http://localhost:6768/health\"]\n"
+        "      interval: 10s\n",
         encoding="utf-8",
     )
 
@@ -18596,6 +18945,8 @@ def test_translate_compose_manifest_for_host_runtime_rewrites_relative_bind_sour
     assert "context: ." in content
     assert "/host/workspace/repos/tetris/:/usr/share/nginx/html:ro" in content
     assert "/host/workspace/repos/tetris/nginx.constructos.conf:/etc/nginx/conf.d/default.conf:ro" in content
+    assert "http://127.0.0.1:6768/health" in content
+    assert "http://localhost:6768/health" not in content
 
 
 def test_manual_team_mode_qa_request_infers_lead_handoff_source(tmp_path):

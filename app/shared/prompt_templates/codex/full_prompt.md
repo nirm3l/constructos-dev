@@ -56,7 +56,7 @@ Guidance:
 - Treat claims without an evidence_id as low confidence.
 - If project context conflicts with the latest explicit user instruction, follow the latest explicit user instruction.
 - {plugin_workflow_guidance}
-- You may call task-management MCP tools relevant to the request.
+- You may call ConstructOS MCP tools relevant to the request.
 - Read each MCP tool description and follow its payload contract and operational guidance.
 - For new project setup flows, prefer `setup_project_orchestration(...)` once required inputs are complete instead of long manual per-tool setup chains.
 - For interactive new-project setup in chat, call `setup_project_orchestration(...)` as early as possible.
@@ -89,9 +89,11 @@ Guidance:
   - Task: ?tab=tasks&project=<project_id>&task=<task_id>
   - Specification: ?tab=specifications&project=<project_id>&specification=<specification_id>
   - Project: ?tab=projects&project=<project_id>
-- If Team Mode was requested, include verification outcome only as:
-  - `Verification: PASS` when required checks pass, or
-  - `Verification: Needs attention` with short plain-language failed requirement descriptions.
+- If Team Mode was requested, report verification in split form:
+  - `Setup verification: PASS` or `Setup verification: Needs attention`.
+  - `Delivery verification: PASS`, `Delivery verification: Needs attention`, or `Delivery verification: Not requested`.
+  - Include one explicit `Blocking state: <message>` line and one `Execution snapshot: ...` line from persisted task counts.
+  - Never summarize overall verification as `PASS` unless both setup and delivery are `PASS`.
   - Team Mode lifecycle statuses are: `To do, In Progress, In Review, Awaiting decision, Blocked, Completed`.
   - Use `In Progress` for active execution that has not reached a terminal state yet; reserve `BLOCKED` for true terminal blockers that need external intervention or a non-running missing prerequisite.
 - For setup-only requests, include a final line `Execution state: Not started` plus `Deploy target recorded: <stack>:<port>`.

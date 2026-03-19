@@ -175,6 +175,25 @@ _DEPLOY_COMMAND_REF_PREFIX = "deploy:command:"
 _DEPLOY_HEALTH_REF_PREFIX = "deploy:health:"
 _DEPLOY_COMPOSE_REF_PREFIX = "deploy:compose:"
 _DEPLOY_RUNTIME_REF_PREFIX = "deploy:runtime:"
+_DEPLOY_EVIDENCE_PREFIXES = (
+    _DEPLOY_STACK_REF_PREFIX,
+    _DEPLOY_COMMAND_REF_PREFIX,
+    _DEPLOY_COMPOSE_REF_PREFIX,
+    _DEPLOY_RUNTIME_REF_PREFIX,
+    _DEPLOY_HEALTH_REF_PREFIX,
+    "compose:",
+    "runtime-basis:",
+    "decision:runtime_signal_",
+    "runtime-decision://",
+    "runtime_decision:",
+    "compose_decision:",
+    "compose-decision://",
+    "command:",
+    "deploy-command://",
+    "deploy:docker-compose:",
+    "health:",
+    "runtime-root:",
+)
 _PATCH_MARKER_LINES = {
     "*** Begin Patch",
     "*** End Patch",
@@ -2290,6 +2309,7 @@ def _derive_files_changed_from_git_evidence(git_evidence: dict[str, object]) -> 
         return []
     before_head_sha = str(git_evidence.get("before_head_sha") or "").strip().lower()
     after_head_sha = str(git_evidence.get("after_head_sha") or "").strip().lower()
+    task_branch = str(git_evidence.get("task_branch") or "").strip()
     after_is_dirty = bool(git_evidence.get("after_is_dirty"))
     files: list[str] = []
     seen: set[str] = set()
@@ -2329,6 +2349,17 @@ def _derive_files_changed_from_git_evidence(git_evidence: dict[str, object]) -> 
                 files.append(normalized)
     if (not files) and repo_cwd is not None and after_head_sha and not after_is_dirty:
         code, out = _run_git_command(cwd=repo_cwd, args=["show", "--pretty=format:", "--name-only", after_head_sha])
+        if code == 0:
+            _append_from_output(out)
+    if (not files) and repo_cwd is not None and task_branch:
+        code, out = _run_git_command(cwd=repo_cwd, args=["diff", "--name-only", f"main...{task_branch}"])
+        if code == 0:
+            _append_from_output(out)
+    if (not files) and repo_cwd is not None and task_branch:
+        code, out = _run_git_command(
+            cwd=repo_cwd,
+            args=["log", "--name-only", "--pretty=format:", f"main..{task_branch}"],
+        )
         if code == 0:
             _append_from_output(out)
     return files
@@ -2996,6 +3027,9 @@ def _append_lead_deploy_external_refs(
                 continue
             url = str(item.get("url") or "").strip()
             if not url:
+                continue
+            if url.casefold().startswith(_DEPLOY_EVIDENCE_PREFIXES):
+                # Keep only the latest deploy evidence markers to avoid stale/noisy refs.
                 continue
             title = str(item.get("title") or "").strip()
             key = (url.casefold(), title.casefold())
@@ -3676,6 +3710,13 @@ def _translate_compose_manifest_for_host_runtime(
     translated = re.sub(
         r"(?m)^(?P<prefix>\s*source:\s*)(?P<source>\./[^\s#]+|\./)(?P<suffix>\s*(?:#.*)?)$",
         _replace_relative_bind_source,
+        translated,
+    )
+    # Container-local healthchecks should prefer IPv4 loopback to avoid localhost->::1
+    # resolution mismatches when services bind only on IPv4.
+    translated = re.sub(
+        r"http://localhost(?=[:/])",
+        "http://127.0.0.1",
         translated,
     )
 

@@ -140,8 +140,12 @@
 - For implementation work, create/use the project repository under `/home/app/workspace/.constructos/repos/<project-slug>` by default.
 - If `/home/app/workspace` is not writable/available and runtime falls back to another workspace path, continue there and explicitly report the effective fallback path in the response.
 - If Task Workdir / Task Branch are provided, execute implementation from that workdir and commit only on that branch.
-- If Team Mode was requested, report verification as either `Verification: PASS` or `Verification: Needs attention` and list only plain-language failed requirements.
-- Do not report `Verification: PASS` while any Team Mode task is still `idle` after kickoff, or while QA has no verifiable artifacts for a claimed completed cycle.
+- If Team Mode was requested, report verification in split form:
+  - `Setup verification: PASS` or `Setup verification: Needs attention`.
+  - `Delivery verification: PASS`, `Delivery verification: Needs attention`, or `Delivery verification: Not requested`.
+  - Include one explicit `Blocking state: <message>` line and one `Execution snapshot: ...` line from persisted task counts.
+- Do not report setup/delivery as `PASS` when their required checks are failing. Never present overall verification as `PASS` unless both setup and delivery are `PASS`.
+- Do not report delivery as `PASS` while any Team Mode task is still `idle` after kickoff, or while QA has no verifiable artifacts for a claimed completed cycle.
 - After kickoff, re-read persisted automation state for Developer, Lead, and QA before summarizing progress. Report persisted task state, not the Lead task's self-reported deferred text, because Lead may defer after Developer dispatch has already started.
 - For kickoff progress reporting, do not rely on one stale read. If any bounded re-read shows a Developer task as `queued`, `running`, or `completed`, report kickoff as propagated to Developer execution.
 - When reporting planned or persisted dependencies, verify them from the saved task payloads or task graph first. Do not infer or narrate dependency edges from intent alone.

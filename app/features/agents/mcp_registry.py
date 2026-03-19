@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 _CACHE_LOCK = threading.Lock()
 _CACHE_EXPIRES_AT = 0.0
 _CACHE_ROWS: list[dict[str, Any]] = []
-_FALLBACK_SERVER_NAME = "task-management-tools"
-_LEGACY_CORE_SERVER_NAME = "task_management_tools"
+_FALLBACK_SERVER_NAME = "constructos-tools"
+_LEGACY_CORE_SERVER_NAME = "constructos_tools"
 _PLUGIN_SERVER_ALIASES_BY_KEY: dict[str, set[str]] = {
     "team_mode": {"team-mode", "team_mode", "team-mode-tools", "team_mode_tools"},
     "git_delivery": {"git-delivery", "git_delivery", "git-delivery-tools", "git_delivery_tools"},

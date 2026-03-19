@@ -4,7 +4,7 @@
 By default, `cos` runs on the host and executes the selected provider inside the app Docker container (`task-app`).
 
 Core behavior:
-- injects your application MCP server by default (`task-management-tools`)
+- injects your application MCP server by default (`constructos-tools`)
 - prepends hidden wrapper instructions every run
 - keeps the selected provider in control of implementation work (file edits, commands, tests)
 - supports layered config (`~/.cos/config.toml` and `./.cos/config.toml`)
@@ -190,7 +190,7 @@ docker_claude_binary = "claude"
 docker_app_mcp_url = "http://mcp-tools:8091/mcp"
 docker_codex_home_root = "/home/app/agent-home/workspace"
 docker_claude_home_root = "/home/app/agent-home/workspace"
-app_mcp_name = "task-management-tools"
+app_mcp_name = "constructos-tools"
 app_mcp_url = "http://localhost:8091/mcp" # local backend default; auto replaced by docker_app_mcp_url when backend=docker and this value is not explicitly overridden
 app_mcp_bearer_env = ""
 system_prompt_file = "~/.cos/system.md"

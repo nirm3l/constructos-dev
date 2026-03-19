@@ -50,7 +50,7 @@ def _args_stub(**overrides):
         resume_last = False
         resume_all = False
         no_app_mcp = False
-        app_mcp_name = "task-management-tools"
+        app_mcp_name = "constructos-tools"
         app_mcp_url = "http://localhost:8091/mcp"
         app_mcp_bearer_env = ""
 
@@ -87,7 +87,7 @@ def test_compose_prompt_includes_user_request_section():
 
 def test_build_hidden_instruction_includes_detected_scope():
     instruction = build_hidden_instruction(
-        app_mcp_name="task-management-tools",
+        app_mcp_name="constructos-tools",
         app_mcp_url="http://localhost:8091/mcp",
         extra_system_prompt="",
         has_user_prompt=True,
@@ -106,8 +106,8 @@ def test_build_codex_command_injects_app_mcp_and_prompt():
     assert "-c" in cmd
     assert cmd[-1] == prompt
     assert any("mcp_servers." in token and ".url=" in token for token in cmd)
-    assert any('mcp_servers.task-management-tools.url=' in token for token in cmd)
-    assert not any('mcp_servers."task-management-tools".url=' in token for token in cmd)
+    assert any('mcp_servers.constructos-tools.url=' in token for token in cmd)
+    assert not any('mcp_servers."constructos-tools".url=' in token for token in cmd)
 
 
 def test_build_codex_command_exec_adds_exec_flags():
@@ -205,7 +205,7 @@ def test_build_codex_command_claude_injects_mcp_config():
     assert "--strict-mcp-config" in cmd
     payload = cmd[cmd.index("--mcp-config") + 1]
     parsed = json.loads(payload)
-    assert parsed["mcpServers"]["task-management-tools"]["url"] == "http://localhost:8091/mcp"
+    assert parsed["mcpServers"]["constructos-tools"]["url"] == "http://localhost:8091/mcp"
 
 
 def test_resolve_mcp_endpoint_parses_default_http_port():

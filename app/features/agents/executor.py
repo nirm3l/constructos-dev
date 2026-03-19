@@ -663,7 +663,62 @@ def _ensure_task_worktree(
             if code_retry != 0:
                 raise RuntimeError(f"Failed to checkout branch {branch_name}: {err_retry[:220]}")
 
+    _sync_task_branch_with_main_if_safe(
+        repo_root=repo_root,
+        task_worktree=task_worktree,
+        branch_name=branch_name,
+    )
+
     return task_worktree, branch_name, repo_root
+
+
+def _sync_task_branch_with_main_if_safe(
+    *,
+    repo_root: Path,
+    task_worktree: Path,
+    branch_name: str,
+) -> None:
+    if not branch_name:
+        return
+    code_main, _out_main, _err_main = _run_git(cwd=repo_root, args=["show-ref", "--verify", "refs/heads/main"])
+    if code_main != 0:
+        return
+    code_contains_main, _out_contains_main, _err_contains_main = _run_git(
+        cwd=repo_root,
+        args=["merge-base", "--is-ancestor", "main", branch_name],
+    )
+    if code_contains_main == 0:
+        return
+    code_status, status_out, _err_status = _run_git(cwd=task_worktree, args=["status", "--porcelain"])
+    if code_status == 0 and str(status_out or "").strip():
+        return
+    code_merge, out_merge, err_merge = _run_git(cwd=task_worktree, args=["merge", "--no-edit", "main"])
+    if code_merge == 0:
+        return
+    _run_git(cwd=task_worktree, args=["merge", "--abort"])
+    merge_stdout = str(out_merge or "").strip()
+    merge_stderr = str(err_merge or "").strip()
+    failure_preview = merge_stderr or merge_stdout
+    if not failure_preview:
+        # Non-diagnostic merge failures should not hard-block execution:
+        # let the task reconcile flow handle merge explicitly.
+        return
+    normalized_failure = failure_preview.casefold()
+    if (
+        "automatic merge failed" in normalized_failure
+        or "conflict (" in normalized_failure
+        or "merge conflict" in normalized_failure
+        or "local changes" in normalized_failure
+        or "would be overwritten by merge" in normalized_failure
+    ):
+        # Conflict-like failures are expected during parallel branch evolution.
+        # Abort the in-progress merge and continue so reconcile instructions
+        # can be executed by the task automation run itself.
+        return
+    raise RuntimeError(
+        "Failed to auto-reconcile latest main into "
+        f"{branch_name} before execution: {failure_preview[:220]}"
+    )
 
 
 def _resolve_project_repo_root_and_branch(

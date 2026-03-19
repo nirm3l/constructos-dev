@@ -1,6 +1,6 @@
 check_for_update_on_startup = false
 
-[mcp_servers.task-management-tools]
+[mcp_servers.constructos-tools]
 url = "http://mcp-tools:8091/mcp"
 
 [mcp_servers.github]

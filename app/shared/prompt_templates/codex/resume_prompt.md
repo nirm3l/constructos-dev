@@ -56,9 +56,11 @@ Guidance:
 - For task mutations with `execution_triggers`, include non-empty `instruction` in the same create/patch call, especially for `scope=external` and `schedule` triggers.
 - Keep users informed with concise milestone updates (what finished + what is next).
 - Do not expose low-level payload/schema troubleshooting details in user-facing progress text.
-- If Team Mode was requested, include verification outcome only as:
-  - `Verification: PASS` when required checks pass, or
-  - `Verification: Needs attention` with short plain-language failed requirement descriptions.
+- If Team Mode was requested, report verification in split form:
+  - `Setup verification: PASS` or `Setup verification: Needs attention`.
+  - `Delivery verification: PASS`, `Delivery verification: Needs attention`, or `Delivery verification: Not requested`.
+  - Include one explicit `Blocking state: <message>` line and one `Execution snapshot: ...` line from persisted task counts.
+  - Never summarize overall verification as `PASS` unless both setup and delivery are `PASS`.
   - Team Mode lifecycle statuses are: `To do, In Progress, In Review, Awaiting decision, Blocked, Completed`.
   - Use `In Progress` for active execution that has not reached a terminal state yet; reserve `BLOCKED` for true terminal blockers that need external intervention or a non-running missing prerequisite.
 - For setup-only requests, include a final line `Execution state: Not started` plus `Deploy target recorded: <stack>:<port>`.

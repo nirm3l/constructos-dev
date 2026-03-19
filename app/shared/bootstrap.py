@@ -122,6 +122,7 @@ CONSTRUCTOS_NOTE_START_GROUP_ID = _cos_entity_id("note-group", "getting-started"
 CONSTRUCTOS_NOTE_FLOW_GROUP_ID = _cos_entity_id("note-group", "workflows")
 CONSTRUCTOS_NOTE_WELCOME_ID = _cos_entity_id("note", "welcome")
 CONSTRUCTOS_NOTE_PROJECTS_ID = _cos_entity_id("note", "projects")
+CONSTRUCTOS_NOTE_INSTALL_ID = _cos_entity_id("note", "install-and-cos")
 CONSTRUCTOS_NOTE_TASKS_ID = _cos_entity_id("note", "tasks")
 CONSTRUCTOS_NOTE_SPECS_ID = _cos_entity_id("note", "specifications")
 CONSTRUCTOS_NOTE_NOTES_ID = _cos_entity_id("note", "notes")
@@ -1164,6 +1165,98 @@ def _seed_constructos_project(db: Session) -> None:  # noqa: C901
                 "workspace_id": BOOTSTRAP_WORKSPACE_ID,
                 "project_id": CONSTRUCTOS_PROJECT_ID,
                 "note_id": CONSTRUCTOS_NOTE_PROJECTS_ID,
+            },
+            expected_version=0,
+        )
+
+    if current_version(db, "Note", CONSTRUCTOS_NOTE_INSTALL_ID) == 0:
+        append_event(
+            db,
+            aggregate_type="Note",
+            aggregate_id=CONSTRUCTOS_NOTE_INSTALL_ID,
+            event_type=NOTE_EVENT_CREATED,
+            payload={
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_group_id": CONSTRUCTOS_NOTE_START_GROUP_ID,
+                "task_id": None,
+                "specification_id": None,
+                "title": "Install, uninstall, and COS CLI",
+                "body": (
+                    "# Install, uninstall, and COS CLI\n\n"
+                    "This note covers customer-facing setup and cleanup paths for ConstructOS, including the `cos` CLI.\n\n"
+                    "---\n\n"
+                    "## Install by operating system\n\n"
+                    "### Linux\n\n"
+                    "```bash\n"
+                    "curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh \\\n"
+                    "  | ACTIVATION_CODE=ACT-XXXX-XXXX-XXXX-XXXX-XXXX IMAGE_TAG=main INSTALL_COS=true AUTO_DEPLOY=1 bash\n"
+                    "```\n\n"
+                    "### macOS\n\n"
+                    "```bash\n"
+                    "curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh \\\n"
+                    "  | ACTIVATION_CODE=ACT-XXXX-XXXX-XXXX-XXXX-XXXX IMAGE_TAG=main INSTALL_COS=true AUTO_DEPLOY=1 bash\n"
+                    "```\n\n"
+                    "### Windows (PowerShell)\n\n"
+                    "```powershell\n"
+                    "$env:ACTIVATION_CODE='ACT-XXXX-XXXX-XXXX-XXXX-XXXX'\n"
+                    "$env:IMAGE_TAG='main'\n"
+                    "$env:INSTALL_COS='true'\n"
+                    "$env:AUTO_DEPLOY='1'\n"
+                    "iwr -UseBasicParsing https://raw.githubusercontent.com/nirm3l/constructos/main/install.ps1 | iex\n"
+                    "```\n\n"
+                    "Use `ACTIVATION_CODE` as the primary activation path.\n\n"
+                    "---\n\n"
+                    "## Uninstall by operating system\n\n"
+                    "### Linux / macOS\n\n"
+                    "```bash\n"
+                    "curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/uninstall.sh | bash\n"
+                    "```\n\n"
+                    "### Windows (PowerShell)\n\n"
+                    "```powershell\n"
+                    "iwr -UseBasicParsing https://raw.githubusercontent.com/nirm3l/constructos/main/uninstall.ps1 | iex\n"
+                    "```\n\n"
+                    "Optional: also remove named app volumes\n\n"
+                    "```bash\n"
+                    "curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/uninstall.sh | REMOVE_APP_DATA=true bash\n"
+                    "```\n\n"
+                    "```powershell\n"
+                    "$env:REMOVE_APP_DATA='true'\n"
+                    "iwr -UseBasicParsing https://raw.githubusercontent.com/nirm3l/constructos/main/uninstall.ps1 | iex\n"
+                    "```\n\n"
+                    "---\n\n"
+                    "## COS CLI quick guide\n\n"
+                    "COS is a wrapper around Codex/Claude execution with automatic app MCP injection.\n\n"
+                    "COS is installed by default during install (`INSTALL_COS=true`).\n\n"
+                    "Disable COS during install:\n\n"
+                    "```bash\n"
+                    "curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh \\\n"
+                    "  | ACTIVATION_CODE=ACT-XXXX-XXXX-XXXX-XXXX-XXXX INSTALL_COS=false bash\n"
+                    "```\n\n"
+                    "Basic usage:\n\n"
+                    "```bash\n"
+                    "cos chat\n"
+                    "cos exec \"Implement retry logic in notification worker\"\n"
+                    "cos resume --last\n"
+                    "```\n\n"
+                    "Uninstall COS CLI:\n\n"
+                    "```bash\n"
+                    "pipx uninstall constructos-cli\n"
+                    "```\n\n"
+                    "---\n"
+                ),
+                "tags": ["install", "deployment", "cos-cli", "operations"],
+                "external_refs": [],
+                "attachment_refs": [],
+                "pinned": False,
+                "archived": False,
+                "created_at": to_iso_utc(datetime.now(timezone.utc)),
+            },
+            metadata={
+                "actor_id": DEFAULT_USER_ID,
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_id": CONSTRUCTOS_NOTE_INSTALL_ID,
             },
             expected_version=0,
         )

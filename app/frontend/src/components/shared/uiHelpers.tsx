@@ -401,11 +401,26 @@ export function ExternalRefList({
 }) {
   if (!refs || refs.length === 0) return null
 
-  const openRef = React.useCallback((ref: ExternalRef) => {
-    if (onOpenRef && onOpenRef(ref)) return
-    if (typeof window === 'undefined') return
-    window.open(ref.url, '_blank', 'noopener,noreferrer')
-  }, [onOpenRef])
+  const canOpenRawInBrowser = React.useCallback((url: string): boolean => {
+    const normalized = String(url || '').trim()
+    if (!normalized) return false
+    const lowered = normalized.toLowerCase()
+    if (
+      lowered.startsWith('http://')
+      || lowered.startsWith('https://')
+      || lowered.startsWith('mailto:')
+      || lowered.startsWith('tel:')
+      || lowered.startsWith('/')
+      || lowered.startsWith('?')
+      || lowered.startsWith('#')
+      || lowered.startsWith('./')
+      || lowered.startsWith('../')
+    ) {
+      return true
+    }
+    if (/^[a-z][a-z0-9+.-]*:/i.test(normalized)) return false
+    return false
+  }, [])
 
   const copyRefUrl = React.useCallback(async (ref: ExternalRef) => {
     if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) return
@@ -415,6 +430,16 @@ export function ExternalRefList({
       // Ignore clipboard failures to keep the menu interaction lightweight.
     }
   }, [])
+
+  const openRef = React.useCallback(async (ref: ExternalRef) => {
+    if (onOpenRef && onOpenRef(ref)) return
+    if (typeof window === 'undefined') return
+    if (canOpenRawInBrowser(ref.url)) {
+      window.open(ref.url, '_blank', 'noopener,noreferrer')
+      return
+    }
+    await copyRefUrl(ref)
+  }, [canOpenRawInBrowser, copyRefUrl, onOpenRef])
 
   return (
     <Tooltip.Provider delayDuration={180}>
@@ -429,7 +454,7 @@ export function ExternalRefList({
                 <button
                   type="button"
                   className="status-chip resource-ref-chip external-ref-chip"
-                  onClick={() => openRef(ref)}
+                  onClick={() => { void openRef(ref) }}
                   title={meta}
                 >
                   <span className="external-ref-chip-icon" aria-hidden="true">
@@ -463,9 +488,9 @@ export function ExternalRefList({
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Portal>
                   <DropdownMenu.Content className="task-group-menu-content external-ref-menu" sideOffset={6} align="end">
-                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => openRef(ref)}>
+                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => { void openRef(ref) }}>
                       <Icon path="M14 3h7v7m0-7L10 14M5 7v12h12v-5" />
-                      <span>Open link</span>
+                      <span>{canOpenRawInBrowser(ref.url) ? 'Open link' : 'Open reference'}</span>
                     </DropdownMenu.Item>
                     <DropdownMenu.Item className="task-group-menu-item" onSelect={() => { void copyRefUrl(ref) }}>
                       <Icon path="M9 9h10v12H9zM5 3h10v12H5z" />

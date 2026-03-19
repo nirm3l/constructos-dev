@@ -23,8 +23,8 @@ def bump_patch(version: str) -> str:
 
 def read_version() -> str:
     if not VERSION_FILE.exists():
-        return "0.1.0"
-    return VERSION_FILE.read_text(encoding="utf-8").strip() or "0.1.0"
+        return "1.0.0"
+    return VERSION_FILE.read_text(encoding="utf-8").strip() or "1.0.0"
 
 
 def write_version(version: str) -> None:
