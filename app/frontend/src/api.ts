@@ -19,6 +19,7 @@ import type {
   ChatReasoningEffort,
   ChatSessionRecord,
   ClaudeAuthLoginMethod,
+  CodexAuthLoginMethod,
   CodexAuthStatus,
   EventStormingOverview,
   EventStormingEntityLinks,
@@ -976,14 +977,21 @@ export const stopAgentChatStream = async (
 export const getCodexAuthStatus = (userId: string) =>
   api<CodexAuthStatus>('/api/agents/codex-auth', userId)
 
-export const startCodexDeviceAuth = (userId: string) =>
+export const startCodexDeviceAuth = (userId: string, payload?: { login_method?: CodexAuthLoginMethod | null }) =>
   api<CodexAuthStatus>('/api/agents/codex-auth/device/start', userId, {
     method: 'POST',
+    body: JSON.stringify(payload ?? {}),
   })
 
 export const cancelCodexDeviceAuth = (userId: string) =>
   api<CodexAuthStatus>('/api/agents/codex-auth/device/cancel', userId, {
     method: 'POST',
+  })
+
+export const submitCodexBrowserCallback = (userId: string, payload: { session_id: string; callback_url: string }) =>
+  api<CodexAuthStatus>('/api/agents/codex-auth/browser/submit', userId, {
+    method: 'POST',
+    body: JSON.stringify(payload),
   })
 
 export const deleteCodexAuthOverride = (userId: string) =>

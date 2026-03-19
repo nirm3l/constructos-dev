@@ -11,12 +11,14 @@ from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import threading
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
 
-from fastapi import APIRouter, Body, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+import httpx
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -72,6 +74,7 @@ from .claude_auth import (
 from .codex_auth import (
     cancel_device_auth_session,
     delete_system_override_auth,
+    get_device_auth_session,
     get_codex_auth_status,
     start_device_auth_session,
 )
@@ -170,6 +173,38 @@ def _provider_display_name(provider: str) -> str:
     if normalized == "claude":
         return "Claude"
     return "Codex"
+
+
+def _proxy_codex_browser_callback(
+    *,
+    callback_url: str,
+    forwarded_params: list[tuple[str, str]],
+    user_agent: str | None = None,
+) -> Response:
+    try:
+        parsed_callback_url = urlparse(str(callback_url or "").strip())
+        if not parsed_callback_url.scheme or not parsed_callback_url.netloc:
+            raise HTTPException(status_code=400, detail="Codex local browser callback URL is invalid.")
+        callback_target = urlunparse(parsed_callback_url._replace(query="", fragment=""))
+        response = httpx.get(
+            callback_target,
+            params=forwarded_params,
+            headers={
+                "Accept": "*/*",
+                "User-Agent": str(user_agent or "constructos-codex-browser-proxy")[:512],
+            },
+            follow_redirects=True,
+            timeout=15.0,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Codex local browser callback is not reachable.") from exc
+    content_type = str(response.headers.get("content-type") or "text/html; charset=utf-8").strip()
+    return Response(
+        content=response.content,
+        status_code=response.status_code,
+        media_type=None,
+        headers={"Content-Type": content_type},
+    )
 
 
 def _user_can_manage_agent_auth(db: Session, user_id: str) -> bool:
@@ -2554,12 +2589,14 @@ def codex_auth_status(
 
 @router.post("/api/agents/codex-auth/device/start")
 def codex_auth_device_start(
+    payload: dict[str, object] | None = Body(default=None),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     _ensure_agent_auth_manage_allowed(db, user.id, provider="codex")
     try:
-        return start_device_auth_session(user.id)
+        login_method = str((payload or {}).get("login_method") or "").strip() or None
+        return start_device_auth_session(user.id, login_method=login_method)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc) or "Failed to start Codex authentication.") from exc
 
@@ -2571,6 +2608,91 @@ def codex_auth_device_cancel(
 ):
     _ensure_agent_auth_manage_allowed(db, user.id, provider="codex")
     return cancel_device_auth_session(user.id)
+
+
+@router.get("/api/agents/codex-auth/browser/launch", name="codex_auth_browser_launch")
+def codex_auth_browser_launch(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="codex")
+    session = get_device_auth_session(session_id)
+    if not isinstance(session, dict):
+        raise HTTPException(status_code=404, detail="Codex authentication session was not found.")
+    if str(session.get("status") or "").strip().lower() != "pending":
+        raise HTTPException(status_code=400, detail="Codex authentication session is no longer pending.")
+    if str(session.get("login_method") or "").strip().lower() != "browser":
+        raise HTTPException(status_code=400, detail="Codex authentication session is not using browser sign-in.")
+    verification_uri = str(session.get("verification_uri") or "").strip()
+    if not verification_uri:
+        raise HTTPException(status_code=400, detail="Codex authentication session did not provide a browser URL.")
+    return RedirectResponse(url=verification_uri, status_code=307)
+
+
+@router.get("/api/agents/codex-auth/browser/callback", name="codex_auth_browser_callback")
+def codex_auth_browser_callback(session_id: str, request: Request):
+    session = get_device_auth_session(session_id)
+    if not isinstance(session, dict):
+        raise HTTPException(status_code=404, detail="Codex authentication session was not found.")
+    if str(session.get("status") or "").strip().lower() != "pending":
+        raise HTTPException(status_code=400, detail="Codex authentication session is no longer pending.")
+    if str(session.get("login_method") or "").strip().lower() != "browser":
+        raise HTTPException(status_code=400, detail="Codex authentication session is not using browser sign-in.")
+    local_callback_url = str(session.get("local_callback_url") or "").strip()
+    if not local_callback_url:
+        raise HTTPException(status_code=400, detail="Codex authentication session did not provide a local callback URL.")
+    forwarded_params = [(key, value) for key, value in request.query_params.multi_items() if key != "session_id"]
+    return _proxy_codex_browser_callback(
+        callback_url=local_callback_url,
+        forwarded_params=forwarded_params,
+        user_agent=str(request.headers.get("user-agent") or "constructos-codex-browser-proxy"),
+    )
+
+
+@router.post("/api/agents/codex-auth/browser/submit")
+def codex_auth_browser_submit(
+    payload: dict[str, object] | None = Body(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    _ensure_agent_auth_manage_allowed(db, user.id, provider="codex")
+    callback_url = str((payload or {}).get("callback_url") or "").strip()
+    if not callback_url:
+        raise HTTPException(status_code=400, detail="Codex browser callback URL is required.")
+    parsed = urlparse(callback_url)
+    hostname = str(parsed.hostname or "").strip().lower()
+    session = get_device_auth_session(str((payload or {}).get("session_id") or "").strip())
+    if not isinstance(session, dict):
+        raise HTTPException(status_code=404, detail="Codex authentication session was not found.")
+    if str(session.get("status") or "").strip().lower() != "pending":
+        raise HTTPException(status_code=400, detail="Codex authentication session is no longer pending.")
+    if str(session.get("login_method") or "").strip().lower() != "browser":
+        raise HTTPException(status_code=400, detail="Codex authentication session is not using browser sign-in.")
+    local_callback_url = str(session.get("local_callback_url") or "").strip()
+    if not local_callback_url:
+        raise HTTPException(status_code=400, detail="Codex authentication session did not provide a local callback URL.")
+    expected = urlparse(local_callback_url)
+    expected_host = str(expected.hostname or "").strip().lower()
+    if (
+        parsed.scheme != str(expected.scheme or "")
+        or hostname not in {expected_host}
+        or parsed.port != expected.port
+        or parsed.path != expected.path
+    ):
+        raise HTTPException(status_code=400, detail=f"Codex browser callback URL must target {local_callback_url.split('?', 1)[0]}.")
+    query_items = list(parse_qsl(parsed.query, keep_blank_values=True))
+    forwarded_params = [(key, value) for key, value in query_items]
+    if not any(key == "code" and str(value).strip() for key, value in forwarded_params):
+        raise HTTPException(status_code=400, detail="Codex browser callback URL is missing the authorization code.")
+    if not any(key == "state" and str(value).strip() for key, value in forwarded_params):
+        raise HTTPException(status_code=400, detail="Codex browser callback URL is missing the state parameter.")
+    _proxy_codex_browser_callback(
+        callback_url=local_callback_url,
+        forwarded_params=forwarded_params,
+        user_agent="constructos-codex-browser-submit",
+    )
+    return get_codex_auth_status(user.id)
 
 
 @router.delete("/api/agents/codex-auth/override")

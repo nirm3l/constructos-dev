@@ -14,6 +14,7 @@ import type {
   AgentAuthProvider,
   ChatReasoningEffort,
   ClaudeAuthLoginMethod,
+  CodexAuthLoginMethod,
   LicenseStatus,
   Note,
   Specification,
@@ -72,12 +73,29 @@ function getChatReasoningLabel(value: unknown, provider: AgentAuthProvider): str
   return getChatReasoningOptions(provider).find((item) => item.value === normalized)?.label || 'Medium'
 }
 
+function normalizeCodexAuthLoginMethod(value: unknown): CodexAuthLoginMethod {
+  return String(value || '').trim().toLowerCase() === 'browser' ? 'browser' : 'device_code'
+}
+
+function formatCodexAuthLoginMethodLabel(value: unknown): string {
+  return normalizeCodexAuthLoginMethod(value) === 'browser' ? 'Browser sign-in' : 'Device code'
+}
+
 function normalizeClaudeAuthLoginMethod(value: unknown): ClaudeAuthLoginMethod {
   return String(value || '').trim().toLowerCase() === 'console' ? 'console' : 'claudeai'
 }
 
 function formatClaudeAuthLoginMethodLabel(value: unknown): string {
   return normalizeClaudeAuthLoginMethod(value) === 'console' ? 'Anthropic Console' : 'Claude subscription'
+}
+
+function isFinalClaudeAuthStatus(payload: AgentAuthStatus | null | undefined): boolean {
+  if (!payload || typeof payload !== 'object') return false
+  if (payload.configured) return true
+  if (String(payload.effective_source || '').trim().toLowerCase() === 'system_override') return true
+  const loginSession = payload.login_session
+  const status = String(loginSession?.status || '').trim().toLowerCase()
+  return status === 'succeeded'
 }
 
 const PROFILE_FEEDBACK_TYPE_OPTIONS: Array<{
@@ -833,6 +851,8 @@ export function ProfilePanel({
   startCodexDeviceAuthPending,
   onCancelCodexDeviceAuth,
   cancelCodexDeviceAuthPending,
+  onSubmitCodexBrowserCallback,
+  submitCodexBrowserCallbackPending,
   onDeleteCodexAuthOverride,
   deleteCodexAuthOverridePending,
   onStartClaudeDeviceAuth,
@@ -877,17 +897,19 @@ export function ProfilePanel({
   saveChatExecutionPreferencesPending: boolean
   changePassword: (payload: { current_password: string; new_password: string }) => Promise<unknown>
   passwordChangePending: boolean
-  onStartCodexDeviceAuth: () => Promise<unknown>
+  onStartCodexDeviceAuth: (loginMethod: CodexAuthLoginMethod) => Promise<unknown>
   startCodexDeviceAuthPending: boolean
   onCancelCodexDeviceAuth: () => Promise<unknown>
   cancelCodexDeviceAuthPending: boolean
+  onSubmitCodexBrowserCallback: (payload: { sessionId: string; callbackUrl: string }) => Promise<unknown>
+  submitCodexBrowserCallbackPending: boolean
   onDeleteCodexAuthOverride: () => Promise<unknown>
   deleteCodexAuthOverridePending: boolean
   onStartClaudeDeviceAuth: (loginMethod: ClaudeAuthLoginMethod) => Promise<unknown>
   startClaudeDeviceAuthPending: boolean
   onCancelClaudeDeviceAuth: () => Promise<unknown>
   cancelClaudeDeviceAuthPending: boolean
-  onSubmitClaudeDeviceAuthCode: (code: string) => Promise<unknown>
+  onSubmitClaudeDeviceAuthCode: (code: string) => Promise<AgentAuthStatus>
   submitClaudeDeviceAuthCodePending: boolean
   onDeleteClaudeAuthOverride: () => Promise<unknown>
   deleteClaudeAuthOverridePending: boolean
@@ -951,6 +973,7 @@ export function ProfilePanel({
   const claudeAuthPrimaryButtonRef = React.useRef<HTMLButtonElement | null>(null)
   const [codexAuthDialogOpen, setCodexAuthDialogOpen] = React.useState(false)
   const [codexAuthFeedback, setCodexAuthFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
+  const [codexAuthManualCallbackInput, setCodexAuthManualCallbackInput] = React.useState('')
   const [claudeAuthDialogOpen, setClaudeAuthDialogOpen] = React.useState(false)
   const [claudeAuthFeedback, setClaudeAuthFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const [claudeAuthManualCodeInput, setClaudeAuthManualCodeInput] = React.useState('')
@@ -1039,9 +1062,18 @@ export function ProfilePanel({
     if (status === 'cancelled') return 'Sign-in cancelled'
     return null
   })()
+  const codexAuthLoginMethod = normalizeCodexAuthLoginMethod(
+    codexAuthLoginSession?.login_method ?? codexAuthStatus?.selected_login_method
+  )
+  const codexAuthLoginMethodLabel = formatCodexAuthLoginMethodLabel(codexAuthLoginMethod)
   const codexAuthHasSystemOverride = codexAuthSource === 'system_override'
   const codexAuthHasPendingSignIn = String(codexAuthLoginSession?.status || '').trim().toLowerCase() === 'pending'
   const codexAuthCanConnect = canManageCodexAuth && !startCodexDeviceAuthPending && !cancelCodexDeviceAuthPending
+  const codexAuthCanSubmitBrowserCallback = canManageCodexAuth
+    && codexAuthHasPendingSignIn
+    && codexAuthLoginMethod === 'browser'
+    && !submitCodexBrowserCallbackPending
+    && codexAuthManualCallbackInput.trim().length > 0
   const codexAuthCanRemoveOverride = canManageCodexAuth
     && Boolean(codexAuthStatus?.override_available)
     && !deleteCodexAuthOverridePending
@@ -1600,9 +1632,9 @@ export function ProfilePanel({
     }
   }, [runtimeSnapshotText])
 
-  const handleStartCodexDeviceAuth = React.useCallback(async () => {
+  const handleStartCodexDeviceAuth = React.useCallback(async (loginMethod: CodexAuthLoginMethod) => {
     try {
-      await onStartCodexDeviceAuth()
+      await onStartCodexDeviceAuth(loginMethod)
       setCodexAuthFeedback(null)
       setCodexAuthDialogOpen(true)
     } catch (error) {
@@ -1620,6 +1652,27 @@ export function ProfilePanel({
       setCodexAuthFeedback({ tone: 'error', message })
     }
   }, [onCancelCodexDeviceAuth])
+
+  const handleSubmitCodexBrowserCallback = React.useCallback(async () => {
+    const callbackUrl = codexAuthManualCallbackInput.trim()
+    if (!callbackUrl) {
+      setCodexAuthFeedback({ tone: 'error', message: 'Callback URL is required.' })
+      return
+    }
+    const sessionId = String(codexAuthLoginSession?.id || '').trim()
+    if (!sessionId) {
+      setCodexAuthFeedback({ tone: 'error', message: 'Codex sign-in session is missing.' })
+      return
+    }
+    try {
+      await onSubmitCodexBrowserCallback({ sessionId, callbackUrl })
+      setCodexAuthManualCallbackInput('')
+      setCodexAuthFeedback({ tone: 'success', message: 'Callback URL submitted. Waiting for Codex to finish sign-in.' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to submit Codex callback URL.'
+      setCodexAuthFeedback({ tone: 'error', message })
+    }
+  }, [codexAuthLoginSession?.id, codexAuthManualCallbackInput, onSubmitCodexBrowserCallback])
 
   const handleDeleteCodexAuthOverride = React.useCallback(async () => {
     try {
@@ -1659,8 +1712,13 @@ export function ProfilePanel({
       return
     }
     try {
-      await onSubmitClaudeDeviceAuthCode(code)
+      const payload = await onSubmitClaudeDeviceAuthCode(code)
       setClaudeAuthManualCodeInput('')
+      if (isFinalClaudeAuthStatus(payload)) {
+        setClaudeAuthFeedback(null)
+        setClaudeAuthDialogOpen(false)
+        return
+      }
       setClaudeAuthFeedback({ tone: 'success', message: 'Authentication code submitted. Waiting for Claude to finish sign-in.' })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to submit Claude authentication code.'
@@ -2240,6 +2298,8 @@ export function WorkspacePanel({
   startCodexDeviceAuthPending,
   onCancelCodexDeviceAuth,
   cancelCodexDeviceAuthPending,
+  onSubmitCodexBrowserCallback,
+  submitCodexBrowserCallbackPending,
   onDeleteCodexAuthOverride,
   deleteCodexAuthOverridePending,
   onStartClaudeDeviceAuth,
@@ -2280,17 +2340,19 @@ export function WorkspacePanel({
   license: LicenseStatus | null | undefined
   licenseLoading: boolean
   licenseError: string | null
-  onStartCodexDeviceAuth: () => Promise<unknown>
+  onStartCodexDeviceAuth: (loginMethod: CodexAuthLoginMethod) => Promise<unknown>
   startCodexDeviceAuthPending: boolean
   onCancelCodexDeviceAuth: () => Promise<unknown>
   cancelCodexDeviceAuthPending: boolean
+  onSubmitCodexBrowserCallback: (payload: { sessionId: string; callbackUrl: string }) => Promise<unknown>
+  submitCodexBrowserCallbackPending: boolean
   onDeleteCodexAuthOverride: () => Promise<unknown>
   deleteCodexAuthOverridePending: boolean
   onStartClaudeDeviceAuth: (loginMethod: ClaudeAuthLoginMethod) => Promise<unknown>
   startClaudeDeviceAuthPending: boolean
   onCancelClaudeDeviceAuth: () => Promise<unknown>
   cancelClaudeDeviceAuthPending: boolean
-  onSubmitClaudeDeviceAuthCode: (code: string) => Promise<unknown>
+  onSubmitClaudeDeviceAuthCode: (code: string) => Promise<AgentAuthStatus>
   submitClaudeDeviceAuthCodePending: boolean
   onDeleteClaudeAuthOverride: () => Promise<unknown>
   deleteClaudeAuthOverridePending: boolean
@@ -2333,6 +2395,7 @@ export function WorkspacePanel({
   const claudeAuthPrimaryButtonRef = React.useRef<HTMLButtonElement | null>(null)
   const [codexAuthDialogOpen, setCodexAuthDialogOpen] = React.useState(false)
   const [codexAuthFeedback, setCodexAuthFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
+  const [codexAuthManualCallbackInput, setCodexAuthManualCallbackInput] = React.useState('')
   const [claudeAuthDialogOpen, setClaudeAuthDialogOpen] = React.useState(false)
   const [claudeAuthFeedback, setClaudeAuthFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const [claudeAuthManualCodeInput, setClaudeAuthManualCodeInput] = React.useState('')
@@ -2352,9 +2415,18 @@ export function WorkspacePanel({
     if (status === 'cancelled') return 'Sign-in cancelled'
     return null
   })()
+  const codexAuthLoginMethod = normalizeCodexAuthLoginMethod(
+    codexAuthLoginSession?.login_method ?? codexAuthStatus?.selected_login_method
+  )
+  const codexAuthLoginMethodLabel = formatCodexAuthLoginMethodLabel(codexAuthLoginMethod)
   const codexAuthHasSystemOverride = codexAuthSource === 'system_override'
   const codexAuthHasPendingSignIn = String(codexAuthLoginSession?.status || '').trim().toLowerCase() === 'pending'
   const codexAuthCanConnect = canManageCodexAuth && !startCodexDeviceAuthPending && !cancelCodexDeviceAuthPending
+  const codexAuthCanSubmitBrowserCallback = canManageCodexAuth
+    && codexAuthHasPendingSignIn
+    && codexAuthLoginMethod === 'browser'
+    && !submitCodexBrowserCallbackPending
+    && codexAuthManualCallbackInput.trim().length > 0
   const codexAuthCanRemoveOverride = canManageCodexAuth
     && Boolean(codexAuthStatus?.override_available)
     && !deleteCodexAuthOverridePending
@@ -2442,9 +2514,9 @@ export function WorkspacePanel({
       window.setTimeout(() => setRuntimeCopyState('idle'), 1800)
     }
   }, [runtimeSnapshotText])
-  const handleStartCodexDeviceAuth = React.useCallback(async () => {
+  const handleStartCodexDeviceAuth = React.useCallback(async (loginMethod: CodexAuthLoginMethod) => {
     try {
-      await onStartCodexDeviceAuth()
+      await onStartCodexDeviceAuth(loginMethod)
       setCodexAuthFeedback(null)
       setCodexAuthDialogOpen(true)
     } catch (error) {
@@ -2461,6 +2533,26 @@ export function WorkspacePanel({
       setCodexAuthFeedback({ tone: 'error', message })
     }
   }, [onCancelCodexDeviceAuth])
+  const handleSubmitCodexBrowserCallback = React.useCallback(async () => {
+    const callbackUrl = codexAuthManualCallbackInput.trim()
+    if (!callbackUrl) {
+      setCodexAuthFeedback({ tone: 'error', message: 'Callback URL is required.' })
+      return
+    }
+    const sessionId = String(codexAuthLoginSession?.id || '').trim()
+    if (!sessionId) {
+      setCodexAuthFeedback({ tone: 'error', message: 'Codex sign-in session is missing.' })
+      return
+    }
+    try {
+      await onSubmitCodexBrowserCallback({ sessionId, callbackUrl })
+      setCodexAuthManualCallbackInput('')
+      setCodexAuthFeedback({ tone: 'success', message: 'Callback URL submitted. Waiting for Codex to finish sign-in.' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to submit Codex callback URL.'
+      setCodexAuthFeedback({ tone: 'error', message })
+    }
+  }, [codexAuthLoginSession?.id, codexAuthManualCallbackInput, onSubmitCodexBrowserCallback])
   const handleDeleteCodexAuthOverride = React.useCallback(async () => {
     try {
       await onDeleteCodexAuthOverride()
@@ -2496,8 +2588,13 @@ export function WorkspacePanel({
       return
     }
     try {
-      await onSubmitClaudeDeviceAuthCode(code)
+      const payload = await onSubmitClaudeDeviceAuthCode(code)
       setClaudeAuthManualCodeInput('')
+      if (isFinalClaudeAuthStatus(payload)) {
+        setClaudeAuthFeedback(null)
+        setClaudeAuthDialogOpen(false)
+        return
+      }
       setClaudeAuthFeedback({ tone: 'success', message: 'Authentication code submitted. Waiting for Claude to finish sign-in.' })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to submit Claude authentication code.'
@@ -2822,7 +2919,7 @@ export function WorkspacePanel({
                           className="primary profile-action-button"
                           type="button"
                           onClick={() => {
-                            void handleStartCodexDeviceAuth()
+                            void handleStartCodexDeviceAuth('browser')
                           }}
                           disabled={!codexAuthCanConnect}
                         >
@@ -2830,8 +2927,20 @@ export function WorkspacePanel({
                             ? 'Starting...'
                             : codexAuthHasPendingSignIn
                               ? 'Continue sign-in'
-                              : 'Connect Codex'}
+                              : 'Connect in browser'}
                         </button>
+                        {!codexAuthHasPendingSignIn ? (
+                          <button
+                            className="button-secondary profile-action-button"
+                            type="button"
+                            onClick={() => {
+                              void handleStartCodexDeviceAuth('device_code')
+                            }}
+                            disabled={!codexAuthCanConnect}
+                          >
+                            Use device code
+                          </button>
+                        ) : null}
                         {codexAuthLoginSession ? (
                           <button
                             className="button-secondary profile-action-button"
@@ -3206,12 +3315,14 @@ export function WorkspacePanel({
             <Dialog.Overlay className="codex-chat-alert-overlay" />
             <Dialog.Content className="codex-chat-alert-content profile-codex-auth-dialog">
               <Dialog.Title className="codex-chat-alert-title">
-                {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn ? 'Codex connection' : 'Connect Codex'}
+                {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn
+                  ? 'Codex connection'
+                  : `Connect Codex with ${codexAuthLoginMethodLabel.toLowerCase()}`}
               </Dialog.Title>
               <Dialog.Description className="codex-chat-alert-description">
                 {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn
                   ? 'This shared codex-bot connection is active and overrides the host-mounted auth file inside this runtime.'
-                  : 'Finish the browser sign-in and the shared codex-bot connection will be stored inside this runtime only.'}
+                  : `Finish the ${codexAuthLoginMethodLabel.toLowerCase()} flow and the shared codex-bot connection will be stored inside this runtime only.`}
               </Dialog.Description>
               <div className="profile-codex-auth-dialog-body">
                 {codexAuthHasSystemOverride && !codexAuthHasPendingSignIn ? (
@@ -3220,10 +3331,18 @@ export function WorkspacePanel({
                     <span className="status-chip">Connected for codex-bot</span>
                   </div>
                 ) : null}
+                <div className="profile-codex-auth-dialog-block">
+                  <div className="field-label">Sign-in method</div>
+                  <span className="status-chip">{codexAuthLoginMethodLabel}</span>
+                </div>
                 {!codexAuthHasSystemOverride && codexAuthLoginSession?.verification_uri ? (
                   <div className="profile-codex-auth-dialog-block">
                     <div className="field-label">Browser step</div>
-                    <p className="meta">Continue in your browser to approve the sign-in.</p>
+                    <p className="meta">
+                      {codexAuthLoginMethod === 'browser'
+                        ? 'Open the browser flow to complete the Codex sign-in.'
+                        : 'Open the browser flow and approve the device code sign-in.'}
+                    </p>
                     <div className="workspace-auth-inline-actions">
                       <a
                         className="btn btn-primary"
@@ -3240,6 +3359,37 @@ export function WorkspacePanel({
                   <div className="profile-codex-auth-dialog-block">
                     <div className="field-label">One-time code</div>
                     <code className="profile-codex-auth-code">{codexAuthLoginSession.user_code}</code>
+                  </div>
+                ) : null}
+                {codexAuthHasPendingSignIn && codexAuthLoginMethod === 'browser' ? (
+                  <div className="profile-codex-auth-dialog-block">
+                    <div className="field-label">Browser callback URL</div>
+                    <p className="meta">
+                      After browser approval, paste the full `http://localhost:.../auth/callback?...` URL here so Constructos can finish the login inside the container.
+                    </p>
+                    <div className="workspace-auth-inline-actions">
+                      <input
+                        className="search-panel-input"
+                        type="text"
+                        inputMode="url"
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        placeholder="Paste Codex callback URL"
+                        value={codexAuthManualCallbackInput}
+                        onChange={(event) => setCodexAuthManualCallbackInput(event.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => {
+                          void handleSubmitCodexBrowserCallback()
+                        }}
+                        disabled={!codexAuthCanSubmitBrowserCallback}
+                      >
+                        {submitCodexBrowserCallbackPending ? 'Submitting...' : 'Submit callback URL'}
+                      </button>
+                    </div>
                   </div>
                 ) : null}
                 {codexAuthSessionStatusLabel ? (

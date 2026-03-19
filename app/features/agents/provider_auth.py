@@ -12,6 +12,7 @@ import signal
 import subprocess
 import threading
 import time
+from urllib.parse import parse_qsl, urlparse
 import uuid
 
 from shared.realtime import realtime_hub
@@ -32,6 +33,9 @@ _DEVICE_AUTH_OUTPUT_LIMIT = 24
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _DEVICE_CODE_RE = re.compile(r"\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b")
 _URL_RE = re.compile(r"https?://\S+")
+_CODEX_OAUTH_URL_RE = re.compile(
+    r"https://auth\.openai\.com/oauth/authorize\?[^\s]+"
+)
 _CLAUDE_OAUTH_URL_RE = re.compile(
     r"https://platform\.claude\.com/oauth/authorize\?[^\s]+?&state=[A-Za-z0-9._~-]+"
 )
@@ -43,7 +47,10 @@ _CLAUDE_URL_STOP_PREFIXES = (
 )
 _DEVICE_AUTH_LOCK = threading.RLock()
 _CLAUDE_LOGIN_METHODS = ("claudeai", "console")
+_CODEX_LOGIN_METHODS = ("browser", "device_code")
 _DEVICE_AUTH_START_WAIT_SECONDS = 1.5
+_CLAUDE_DEVICE_AUTH_START_WAIT_SECONDS = 6.0
+_CLAUDE_DEVICE_AUTH_SUBMIT_WAIT_SECONDS = 12.0
 _DEVICE_AUTH_START_WAIT_STEP_SECONDS = 0.05
 _AUTH_REALTIME_CHANNEL = "agent-auth"
 _AUTH_REALTIME_REASON_PREFIX = "agent-auth:"
@@ -70,7 +77,7 @@ _AUTH_PROVIDER_SPECS: dict[str, AuthProviderSpec] = {
         system_full_name=CODEX_SYSTEM_FULL_NAME,
         host_auth_relative_path=(".codex", "auth.json"),
         override_auth_relative_path=(".codex", "auth.json"),
-        login_command=("codex", "login", "--device-auth", "-c", 'cli_auth_credentials_store="file"'),
+        login_command=("codex", "login", "-c", 'cli_auth_credentials_store="file"'),
     ),
     "claude": AuthProviderSpec(
         provider="claude",
@@ -174,6 +181,13 @@ def _normalize_claude_login_method(value: object | None) -> str | None:
     return normalized if normalized in _CLAUDE_LOGIN_METHODS else None
 
 
+def _normalize_codex_login_method(value: object | None) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return None
+    return normalized if normalized in _CODEX_LOGIN_METHODS else None
+
+
 def _resolve_provider_settings_path(provider: str, home_path: Path) -> Path | None:
     spec = _provider_spec(provider)
     if spec.provider == "claude":
@@ -210,33 +224,51 @@ def _persist_provider_login_settings(provider: str, home_path: Path, login_metho
 
 def _resolve_provider_login_method(provider: str, requested_login_method: object | None = None) -> str | None:
     spec = _provider_spec(provider)
-    if spec.provider != "claude":
-        return None
-    normalized = _normalize_claude_login_method(requested_login_method)
-    if normalized is not None:
-        return normalized
-    return _resolve_provider_configured_login_method(spec.provider) or "claudeai"
+    if spec.provider == "claude":
+        normalized = _normalize_claude_login_method(requested_login_method)
+        if normalized is not None:
+            return normalized
+        return _resolve_provider_configured_login_method(spec.provider) or "claudeai"
+    if spec.provider == "codex":
+        return _normalize_codex_login_method(requested_login_method) or "device_code"
+    return None
 
 
 def _provider_uses_interactive_login(provider: str) -> bool:
     return _provider_spec(provider).provider == "claude"
 
 
+def _provider_device_auth_start_wait_seconds(provider: str) -> float:
+    return _CLAUDE_DEVICE_AUTH_START_WAIT_SECONDS if _provider_spec(provider).provider == "claude" else _DEVICE_AUTH_START_WAIT_SECONDS
+
+
+def _build_provider_login_command(spec: AuthProviderSpec, *, login_method: str | None) -> tuple[str, ...]:
+    if spec.provider != "codex":
+        return spec.login_command
+    normalized_login_method = _normalize_codex_login_method(login_method) or "device_code"
+    base_command = list(spec.login_command)
+    if normalized_login_method == "device_code":
+        base_command.insert(2, "--device-auth")
+    return tuple(base_command)
+
+
 def _launch_provider_device_auth_process(
     spec: AuthProviderSpec,
     *,
     home_path: Path,
+    login_method: str | None,
 ) -> tuple[subprocess.Popen[str], int | None]:
     env = {
         **os.environ,
         "HOME": str(home_path),
     }
+    command = _build_provider_login_command(spec, login_method=login_method)
     if _provider_uses_interactive_login(spec.provider):
         env["TERM"] = str(os.environ.get("TERM") or "xterm-256color")
         master_fd, slave_fd = pty.openpty()
         try:
             process = subprocess.Popen(
-                list(spec.login_command),
+                list(command),
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,
@@ -253,7 +285,7 @@ def _launch_provider_device_auth_process(
                 pass
         return process, master_fd
     process = subprocess.Popen(
-        list(spec.login_command),
+        list(command),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -383,6 +415,7 @@ class DeviceAuthSessionState:
     requested_by_user_id: str | None = None
     login_method: str | None = None
     verification_uri: str | None = None
+    local_callback_url: str | None = None
     user_code: str | None = None
     error: str | None = None
     output_excerpt: list[str] = field(default_factory=list)
@@ -418,10 +451,13 @@ def _schedule_interactive_auth_write(*, provider: str, session_id: str, master_f
 
 def _refresh_verification_uri_from_output(session: DeviceAuthSessionState) -> None:
     existing_verification_uri = str(session.verification_uri or "").strip()
+    existing_local_callback_url = str(session.local_callback_url or "").strip()
+    preserve_codex_oauth_uri = bool(_CODEX_OAUTH_URL_RE.fullmatch(existing_verification_uri))
     preserve_claude_oauth_uri = bool(_CLAUDE_OAUTH_URL_RE.fullmatch(existing_verification_uri))
     lines = [str(line or "").strip() for line in session.output_excerpt if str(line or "").strip()]
     if not lines:
         return
+    generic_candidates: list[str] = []
     for index, line in enumerate(lines):
         if "http://" not in line and "https://" not in line:
             continue
@@ -433,12 +469,34 @@ def _refresh_verification_uri_from_output(session: DeviceAuthSessionState) -> No
                 break
             candidate_parts.append(continuation)
         candidate = "".join(candidate_parts).rstrip(".,")
+        codex_match = _CODEX_OAUTH_URL_RE.search(candidate)
+        if codex_match:
+            codex_url = codex_match.group(0).rstrip(".,")
+            session.verification_uri = codex_url
+            redirect_uri = dict(parse_qsl(urlparse(codex_url).query, keep_blank_values=True)).get("redirect_uri")
+            redirect_uri = str(redirect_uri or "").strip()
+            if redirect_uri:
+                session.local_callback_url = redirect_uri
+            return
+        if not existing_local_callback_url:
+            callback_match = _URL_RE.search(candidate)
+            if callback_match:
+                callback_url = callback_match.group(0).rstrip(".,")
+                parsed_callback_url = urlparse(callback_url)
+                if (
+                    parsed_callback_url.scheme == "http"
+                    and str(parsed_callback_url.hostname or "").strip().lower() in {"localhost", "127.0.0.1"}
+                    and parsed_callback_url.port is not None
+                ):
+                    session.local_callback_url = callback_url
         claude_match = _CLAUDE_OAUTH_URL_RE.search(candidate)
         if claude_match:
             session.verification_uri = claude_match.group(0).rstrip(".,")
             return
-        if preserve_claude_oauth_uri:
+        if preserve_codex_oauth_uri or preserve_claude_oauth_uri:
             continue
+        generic_candidates.append(candidate)
+    for candidate in generic_candidates:
         match = _URL_RE.search(candidate)
         if match:
             session.verification_uri = match.group(0).rstrip(".,")
@@ -469,14 +527,7 @@ def _append_output_line(
     session.output_excerpt.append(text[:600])
     if len(session.output_excerpt) > _DEVICE_AUTH_OUTPUT_LIMIT:
         session.output_excerpt = session.output_excerpt[-_DEVICE_AUTH_OUTPUT_LIMIT :]
-    if session.verification_uri is None:
-        url_match = _URL_RE.search(text)
-        if url_match:
-            session.verification_uri = url_match.group(0).rstrip(".,")
-    else:
-        _refresh_verification_uri_from_output(session)
-    if session.verification_uri is None:
-        _refresh_verification_uri_from_output(session)
+    _refresh_verification_uri_from_output(session)
     if session.user_code is None:
         code_match = _DEVICE_CODE_RE.search(text)
         if code_match:
@@ -500,6 +551,7 @@ def _serialize_device_auth_session(session: DeviceAuthSessionState | None) -> di
         "updated_at": session.updated_at,
         "login_method": session.login_method,
         "verification_uri": session.verification_uri,
+        "local_callback_url": session.local_callback_url,
         "user_code": session.user_code,
         "error": session.error,
         "output_excerpt": list(session.output_excerpt),
@@ -524,9 +576,17 @@ def _build_provider_auth_status(provider: str) -> dict[str, object]:
             override_updated_at = None
     selected_login_method = None
     if isinstance(login_session, dict):
-        selected_login_method = _normalize_claude_login_method(login_session.get("login_method"))
+        selected_login_method = (
+            _normalize_claude_login_method(login_session.get("login_method"))
+            if spec.provider == "claude"
+            else _normalize_codex_login_method(login_session.get("login_method"))
+        )
     if selected_login_method is None:
-        selected_login_method = _resolve_provider_configured_login_method(spec.provider)
+        selected_login_method = (
+            _resolve_provider_configured_login_method(spec.provider)
+            if spec.provider == "claude"
+            else _resolve_provider_login_method(spec.provider)
+        )
     return {
         "provider": spec.provider,
         "provider_label": spec.display_name,
@@ -540,7 +600,11 @@ def _build_provider_auth_status(provider: str) -> dict[str, object]:
         "target_actor_username": spec.system_username,
         "target_actor_full_name": spec.system_full_name,
         "selected_login_method": selected_login_method,
-        "supported_login_methods": list(_CLAUDE_LOGIN_METHODS) if spec.provider == "claude" else [],
+        "supported_login_methods": (
+            list(_CLAUDE_LOGIN_METHODS)
+            if spec.provider == "claude"
+            else list(_CODEX_LOGIN_METHODS) if spec.provider == "codex" else []
+        ),
         "login_session": login_session,
     }
 
@@ -548,6 +612,18 @@ def _build_provider_auth_status(provider: str) -> dict[str, object]:
 def get_provider_auth_status(provider: str, _requested_by_user_id: str | None = None) -> dict[str, object]:
     with _DEVICE_AUTH_LOCK:
         return _build_provider_auth_status(provider)
+
+
+def get_provider_device_auth_session(provider: str, session_id: str) -> dict[str, object] | None:
+    spec = _provider_spec(provider)
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return None
+    with _DEVICE_AUTH_LOCK:
+        session = _DEVICE_AUTH_SESSIONS.get(spec.provider)
+        if session is None or session.session_id != normalized_session_id:
+            return None
+        return _serialize_device_auth_session(session)
 
 
 def _finalize_device_auth_session(*, provider: str, session_id: str, returncode: int) -> None:
@@ -782,6 +858,8 @@ def start_provider_device_auth_session(
     resolved_login_method = _resolve_provider_login_method(spec.provider, login_method)
     if spec.provider == "claude" and resolved_login_method is None:
         raise ValueError("Unsupported Claude login method.")
+    if spec.provider == "codex" and resolved_login_method is None:
+        raise ValueError("Unsupported Codex login method.")
     with _DEVICE_AUTH_LOCK:
         existing = _DEVICE_AUTH_SESSIONS.get(spec.provider)
         if existing is not None and existing.status == "pending" and existing.process is not None and existing.process.poll() is None:
@@ -800,6 +878,7 @@ def start_provider_device_auth_session(
         process, pty_master_fd = _launch_provider_device_auth_process(
             spec,
             home_path=home_path,
+            login_method=resolved_login_method,
         )
         session.process = process
         session.pty_master_fd = pty_master_fd
@@ -815,7 +894,7 @@ def start_provider_device_auth_session(
         )
         watcher.start()
     _publish_auth_realtime_signal(spec.provider)
-    deadline = time.monotonic() + _DEVICE_AUTH_START_WAIT_SECONDS
+    deadline = time.monotonic() + _provider_device_auth_start_wait_seconds(spec.provider)
     while time.monotonic() < deadline:
         with _DEVICE_AUTH_LOCK:
             current = _DEVICE_AUTH_SESSIONS.get(spec.provider)
@@ -876,6 +955,17 @@ def submit_provider_device_auth_code(
         os.write(master_fd, normalized_code.encode("utf-8", errors="ignore") + b"\r")
     except Exception as exc:
         raise ValueError(f"Failed to submit {spec.display_name} authentication code.") from exc
+    if spec.provider == "claude":
+        deadline = time.monotonic() + _CLAUDE_DEVICE_AUTH_SUBMIT_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            payload = get_provider_auth_status(spec.provider)
+            login_session = payload.get("login_session") if isinstance(payload, dict) else None
+            status = ""
+            if isinstance(login_session, dict):
+                status = str(login_session.get("status") or "").strip().lower()
+            if payload.get("configured") or status in {"succeeded", "failed", "cancelled"}:
+                return payload
+            time.sleep(_DEVICE_AUTH_START_WAIT_STEP_SECONDS)
     return get_provider_auth_status(spec.provider)
 
 

@@ -454,23 +454,22 @@ export function useRealtimeEffects(c: any) {
     }
 
     const onAuthEvent = (evt: MessageEvent) => {
-      let provider = ''
       try {
-        const payload = JSON.parse(evt.data) as { provider?: string }
-        provider = String(payload?.provider || '').trim().toLowerCase()
+        const payload = JSON.parse(evt.data) as {
+          provider?: string
+          auth_status?: unknown
+        }
+        const provider = String(payload?.provider || '').trim().toLowerCase()
+        if (provider === 'codex' && payload.auth_status && typeof payload.auth_status === 'object') {
+          qc.setQueryData(['codex-auth-status', userId], payload.auth_status)
+          return
+        }
+        if (provider === 'claude' && payload.auth_status && typeof payload.auth_status === 'object') {
+          qc.setQueryData(['claude-auth-status', userId], payload.auth_status)
+        }
       } catch {
-        provider = ''
+        // Ignore malformed auth events.
       }
-      if (provider === 'codex') {
-        qc.invalidateQueries({ queryKey: ['codex-auth-status', userId] })
-        return
-      }
-      if (provider === 'claude') {
-        qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
-        return
-      }
-      qc.invalidateQueries({ queryKey: ['codex-auth-status', userId] })
-      qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
     }
 
     es.addEventListener('notification', onNotification as EventListener)

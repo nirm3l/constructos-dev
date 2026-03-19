@@ -5,6 +5,7 @@ from pathlib import Path
 from .provider_auth import (
     delete_provider_system_override_auth,
     ensure_provider_system_override_home,
+    get_provider_device_auth_session,
     get_provider_auth_status,
     is_placeholder_auth_file,
     is_usable_auth_file,
@@ -54,8 +55,16 @@ def get_codex_auth_status(_requested_by_user_id: str | None = None) -> dict[str,
     return get_provider_auth_status("codex", _requested_by_user_id)
 
 
-def start_device_auth_session(requested_by_user_id: str | None = None) -> dict[str, object]:
-    return start_provider_device_auth_session("codex", requested_by_user_id)
+def get_device_auth_session(session_id: str) -> dict[str, object] | None:
+    return get_provider_device_auth_session("codex", session_id)
+
+
+def start_device_auth_session(
+    requested_by_user_id: str | None = None,
+    *,
+    login_method: str | None = None,
+) -> dict[str, object]:
+    return start_provider_device_auth_session("codex", requested_by_user_id, login_method=login_method)
 
 
 def cancel_device_auth_session(_requested_by_user_id: str | None = None) -> dict[str, object]:

@@ -72,6 +72,8 @@ def test_codex_auth_status_reports_none_without_host_or_override(tmp_path, monke
     assert payload["effective_source"] == "none"
     assert payload["host_auth_available"] is False
     assert payload["override_available"] is False
+    assert payload["selected_login_method"] == "device_code"
+    assert payload["supported_login_methods"] == ["browser", "device_code"]
     assert payload["scope"] == "system"
     assert payload["target_actor_username"] == "codex-bot"
 
@@ -107,7 +109,7 @@ def test_codex_auth_device_start_endpoint_returns_manager_status(tmp_path, monke
     monkeypatch.setattr(
         agents_api,
         "start_device_auth_session",
-        lambda _requested_by_user_id=None: {
+        lambda _requested_by_user_id=None, *, login_method=None: {
             "configured": False,
             "effective_source": "none",
             "host_auth_available": False,
@@ -116,11 +118,14 @@ def test_codex_auth_device_start_endpoint_returns_manager_status(tmp_path, monke
             "scope": "system",
             "target_actor_user_id": "00000000-0000-0000-0000-000000000099",
             "target_actor_username": "codex-bot",
+            "selected_login_method": login_method or "device_code",
+            "supported_login_methods": ["browser", "device_code"],
             "login_session": {
                 "id": "session-1",
                 "status": "pending",
                 "started_at": "2026-03-11T10:00:00Z",
                 "updated_at": "2026-03-11T10:00:00Z",
+                "login_method": login_method or "device_code",
                 "verification_uri": "https://auth.openai.com/device",
                 "user_code": None,
                 "error": None,
@@ -136,7 +141,198 @@ def test_codex_auth_device_start_endpoint_returns_manager_status(tmp_path, monke
     assert payload["login_session"]["status"] == "pending"
     assert payload["login_session"]["verification_uri"] == "https://auth.openai.com/device"
     assert payload["login_session"]["user_code"] is None
+    assert payload["selected_login_method"] == "device_code"
     assert payload["target_actor_username"] == "codex-bot"
+
+
+def test_codex_auth_device_start_accepts_login_method(tmp_path, monkeypatch):
+    client = build_client(tmp_path, monkeypatch)
+    import features.agents.api as agents_api
+
+    captured: dict[str, object] = {}
+
+    def _fake_start(_requested_by_user_id=None, *, login_method=None):
+        captured["requested_by_user_id"] = _requested_by_user_id
+        captured["login_method"] = login_method
+        return {
+            "configured": False,
+            "effective_source": "none",
+            "host_auth_available": False,
+            "override_available": False,
+            "override_updated_at": None,
+            "scope": "system",
+            "target_actor_user_id": "00000000-0000-0000-0000-000000000099",
+            "target_actor_username": "codex-bot",
+            "selected_login_method": login_method,
+            "supported_login_methods": ["browser", "device_code"],
+            "login_session": {
+                "id": "session-codex-browser-1",
+                "status": "pending",
+                "started_at": "2026-03-19T10:00:00Z",
+                "updated_at": "2026-03-19T10:00:00Z",
+                "login_method": login_method,
+                "verification_uri": "https://auth.openai.com/oauth/authorize?state=abc123",
+                "user_code": None,
+                "error": None,
+                "output_excerpt": [],
+            },
+        }
+
+    monkeypatch.setattr(agents_api, "start_device_auth_session", _fake_start)
+
+    response = client.post('/api/agents/codex-auth/device/start', json={"login_method": "browser"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert captured["login_method"] == "browser"
+    assert payload["selected_login_method"] == "browser"
+    assert payload["login_session"]["login_method"] == "browser"
+
+
+def test_codex_browser_launch_rewrites_redirect_uri(tmp_path, monkeypatch):
+    client = build_client(tmp_path, monkeypatch)
+    import features.agents.api as agents_api
+
+    monkeypatch.setattr(
+        agents_api,
+        "get_device_auth_session",
+        lambda session_id: {
+            "id": session_id,
+            "status": "pending",
+            "login_method": "browser",
+            "local_callback_url": "http://localhost:1455/auth/callback",
+            "verification_uri": (
+                "https://auth.openai.com/oauth/authorize?"
+                "response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=abc123"
+            ),
+        },
+    )
+
+    response = client.get(
+        "/api/agents/codex-auth/browser/launch",
+        params={"session_id": "session-browser-1"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    redirect_url = str(response.headers["location"])
+    assert redirect_url == (
+        "https://auth.openai.com/oauth/authorize?"
+        "response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=abc123"
+    )
+
+
+def test_codex_browser_callback_proxies_to_local_cli(tmp_path, monkeypatch):
+    client = build_client(tmp_path, monkeypatch)
+    import features.agents.api as agents_api
+
+    captured: dict[str, object] = {}
+
+    class _MockResponse:
+        status_code = 200
+        content = b"browser login finished"
+        headers = {"content-type": "text/plain; charset=utf-8"}
+
+    def _fake_get(url: str, *, params=None, headers=None, follow_redirects=None, timeout=None):
+        captured["url"] = url
+        captured["params"] = list(params or [])
+        captured["headers"] = dict(headers or {})
+        captured["follow_redirects"] = follow_redirects
+        captured["timeout"] = timeout
+        return _MockResponse()
+
+    monkeypatch.setattr(
+        agents_api,
+        "get_device_auth_session",
+        lambda session_id: {
+            "id": session_id,
+            "status": "pending",
+            "login_method": "browser",
+            "local_callback_url": "http://localhost:1455/auth/callback",
+            "verification_uri": "https://auth.openai.com/oauth/authorize?state=abc123",
+        },
+    )
+    monkeypatch.setattr(agents_api.httpx, "get", _fake_get)
+
+    response = client.get(
+        "/api/agents/codex-auth/browser/callback",
+        params={"session_id": "session-browser-2", "code": "oauth-code", "state": "abc123"},
+        headers={"User-Agent": "pytest-browser"},
+    )
+
+    assert response.status_code == 200
+    assert response.text == "browser login finished"
+    assert captured["url"] == "http://localhost:1455/auth/callback"
+    assert captured["params"] == [("code", "oauth-code"), ("state", "abc123")]
+    assert captured["headers"]["User-Agent"] == "pytest-browser"
+    assert captured["follow_redirects"] is True
+    assert captured["timeout"] == 15.0
+
+
+def test_codex_browser_submit_uses_session_local_callback_url(tmp_path, monkeypatch):
+    client = build_client(tmp_path, monkeypatch)
+    import features.agents.api as agents_api
+
+    captured: dict[str, object] = {}
+
+    def _fake_proxy(*, callback_url: str, forwarded_params, user_agent: str | None = None):
+        captured["callback_url"] = callback_url
+        captured["forwarded_params"] = list(forwarded_params)
+        captured["user_agent"] = user_agent
+        return agents_api.Response(content=b"ok", status_code=200, headers={"Content-Type": "text/plain"})
+
+    monkeypatch.setattr(
+        agents_api,
+        "get_device_auth_session",
+        lambda session_id: {
+            "id": session_id,
+            "status": "pending",
+            "login_method": "browser",
+            "local_callback_url": "http://localhost:1455/auth/callback",
+            "verification_uri": "https://auth.openai.com/oauth/authorize?state=abc123",
+        },
+    )
+    monkeypatch.setattr(agents_api, "_proxy_codex_browser_callback", _fake_proxy)
+    monkeypatch.setattr(
+        agents_api,
+        "get_codex_auth_status",
+        lambda _user_id=None: {"configured": False, "effective_source": "none"},
+    )
+
+    response = client.post(
+        "/api/agents/codex-auth/browser/submit",
+        json={
+            "session_id": "session-browser-submit",
+            "callback_url": "http://localhost:1455/auth/callback?code=abc&state=xyz",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["callback_url"] == "http://localhost:1455/auth/callback"
+    assert captured["forwarded_params"] == [("code", "abc"), ("state", "xyz")]
+
+
+def test_codex_auth_extracts_local_callback_url_from_output():
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import features.agents.provider_auth as provider_auth
+
+    session = provider_auth.DeviceAuthSessionState(
+        session_id="session-codex-local-callback",
+        status="pending",
+        started_at="2026-03-19T14:00:00Z",
+        updated_at="2026-03-19T14:00:01Z",
+        login_method="browser",
+    )
+
+    provider_auth._append_output_line(session, "Starting local login server on http://localhost:1455.")
+    provider_auth._append_output_line(
+        session,
+        "https://auth.openai.com/oauth/authorize?response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=abc123",
+    )
+
+    assert session.local_callback_url == "http://localhost:1455/auth/callback"
 
 
 def test_codex_auth_device_start_requires_admin_role(tmp_path, monkeypatch):
@@ -368,11 +564,104 @@ def test_claude_interactive_login_uses_full_login_command(tmp_path, monkeypatch)
     process, master_fd = provider_auth._launch_provider_device_auth_process(
         provider_auth._provider_spec("claude"),
         home_path=tmp_path,
+        login_method="console",
     )
 
     assert isinstance(process, _DummyProcess)
     assert master_fd == 101
     assert captured["args"] == ["claude"]
+
+
+def test_codex_browser_login_uses_default_login_command(tmp_path, monkeypatch):
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import features.agents.provider_auth as provider_auth
+
+    captured: dict[str, object] = {}
+
+    class _DummyProcess:
+        pid = 123
+
+        def poll(self):
+            return None
+
+    def _fake_popen(args, **kwargs):
+        captured["args"] = list(args)
+        captured["env"] = kwargs.get("env")
+        return _DummyProcess()
+
+    monkeypatch.setattr(provider_auth.subprocess, "Popen", _fake_popen)
+
+    process, master_fd = provider_auth._launch_provider_device_auth_process(
+        provider_auth._provider_spec("codex"),
+        home_path=tmp_path,
+        login_method="browser",
+    )
+
+    assert isinstance(process, _DummyProcess)
+    assert master_fd is None
+    assert captured["args"] == ["codex", "login", "-c", 'cli_auth_credentials_store="file"']
+    assert captured["env"]["HOME"] == str(tmp_path)
+
+
+def test_codex_device_code_login_uses_device_auth_flag(tmp_path, monkeypatch):
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import features.agents.provider_auth as provider_auth
+
+    captured: dict[str, object] = {}
+
+    class _DummyProcess:
+        pid = 123
+
+        def poll(self):
+            return None
+
+    def _fake_popen(args, **kwargs):
+        captured["args"] = list(args)
+        captured["env"] = kwargs.get("env")
+        return _DummyProcess()
+
+    monkeypatch.setattr(provider_auth.subprocess, "Popen", _fake_popen)
+
+    process, master_fd = provider_auth._launch_provider_device_auth_process(
+        provider_auth._provider_spec("codex"),
+        home_path=tmp_path,
+        login_method="device_code",
+    )
+
+    assert isinstance(process, _DummyProcess)
+    assert master_fd is None
+    assert captured["args"] == ["codex", "login", "--device-auth", "-c", 'cli_auth_credentials_store="file"']
+    assert captured["env"]["HOME"] == str(tmp_path)
+
+
+def test_codex_auth_prefers_oauth_url_over_local_callback():
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import features.agents.provider_auth as provider_auth
+
+    session = provider_auth.DeviceAuthSessionState(
+        session_id="session-codex-url",
+        status="pending",
+        started_at="2026-03-19T14:00:00Z",
+        updated_at="2026-03-19T14:00:01Z",
+        login_method="browser",
+    )
+
+    provider_auth._append_output_line(session, "Starting local login server on http://localhost:1455.")
+    provider_auth._append_output_line(session, "If your browser did not open, navigate to this URL to authenticate:")
+    provider_auth._append_output_line(
+        session,
+        "https://auth.openai.com/oauth/authorize?response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=abc123",
+    )
+
+    assert session.verification_uri is not None
+    assert session.verification_uri.startswith("https://auth.openai.com/oauth/authorize?")
+    assert "localhost%3A1455%2Fauth%2Fcallback" in session.verification_uri
 
 
 def test_claude_interactive_auth_sends_theme_login_and_console_choice(tmp_path, monkeypatch):
@@ -641,6 +930,49 @@ def test_claude_auth_submit_code_writes_to_live_session(monkeypatch):
     provider_auth.submit_provider_device_auth_code("claude", "abc-123")
 
     assert writes == [b"abc-123\r"]
+
+
+def test_claude_auth_submit_code_waits_for_configured_status(monkeypatch):
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import features.agents.provider_auth as provider_auth
+
+    writes: list[bytes] = []
+    session = provider_auth.DeviceAuthSessionState(
+        session_id="session-submit-wait",
+        status="pending",
+        started_at="2026-03-12T14:00:00Z",
+        updated_at="2026-03-12T14:00:01Z",
+        login_method="console",
+        pty_master_fd=77,
+    )
+    session.process = SimpleNamespace(poll=lambda: None)
+    monkeypatch.setitem(provider_auth._DEVICE_AUTH_SESSIONS, "claude", session)
+    monkeypatch.setattr(provider_auth.os, "write", lambda _fd, data: writes.append(data))
+
+    responses = iter([
+        {
+            "configured": False,
+            "login_session": {
+                "status": "pending",
+            },
+        },
+        {
+            "configured": True,
+            "effective_source": "system_override",
+            "login_session": {
+                "status": "pending",
+            },
+        },
+    ])
+    monkeypatch.setattr(provider_auth, "get_provider_auth_status", lambda provider: next(responses))
+    monkeypatch.setattr(provider_auth.time, "sleep", lambda _seconds: None)
+
+    payload = provider_auth.submit_provider_device_auth_code("claude", "abc-123")
+
+    assert writes == [b"abc-123\r"]
+    assert payload["configured"] is True
 
 
 def test_agents_chat_returns_claude_guidance_when_selected_provider_auth_missing(tmp_path, monkeypatch):

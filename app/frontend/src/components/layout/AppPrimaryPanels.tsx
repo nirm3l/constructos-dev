@@ -477,6 +477,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             startCodexDeviceAuthPending={state.startCodexDeviceAuthPending}
             onCancelCodexDeviceAuth={state.cancelCodexDeviceAuth}
             cancelCodexDeviceAuthPending={state.cancelCodexDeviceAuthPending}
+            onSubmitCodexBrowserCallback={state.submitCodexBrowserCallback}
+            submitCodexBrowserCallbackPending={state.submitCodexBrowserCallbackPending}
             onDeleteCodexAuthOverride={state.deleteCodexAuthOverride}
             deleteCodexAuthOverridePending={state.deleteCodexAuthOverridePending}
             onStartClaudeDeviceAuth={state.startClaudeDeviceAuth}
@@ -600,6 +602,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             startCodexDeviceAuthPending={state.startCodexDeviceAuthPending}
             onCancelCodexDeviceAuth={state.cancelCodexDeviceAuth}
             cancelCodexDeviceAuthPending={state.cancelCodexDeviceAuthPending}
+            onSubmitCodexBrowserCallback={state.submitCodexBrowserCallback}
+            submitCodexBrowserCallbackPending={state.submitCodexBrowserCallbackPending}
             onDeleteCodexAuthOverride={state.deleteCodexAuthOverride}
             deleteCodexAuthOverridePending={state.deleteCodexAuthOverridePending}
             onStartClaudeDeviceAuth={state.startClaudeDeviceAuth}

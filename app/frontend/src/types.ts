@@ -1246,6 +1246,7 @@ export type AgentChatResponse = {
 
 export type AgentAuthProvider = 'codex' | 'claude'
 export type AgentAuthEffectiveSource = 'system_override' | 'host_mount' | 'none'
+export type CodexAuthLoginMethod = 'browser' | 'device_code'
 export type ClaudeAuthLoginMethod = 'claudeai' | 'console'
 
 export type AgentAuthLoginSession = {
@@ -1253,8 +1254,9 @@ export type AgentAuthLoginSession = {
   status: 'pending' | 'succeeded' | 'failed' | 'cancelled'
   started_at: string
   updated_at: string
-  login_method?: ClaudeAuthLoginMethod | string | null
+  login_method?: CodexAuthLoginMethod | ClaudeAuthLoginMethod | string | null
   verification_uri?: string | null
+  local_callback_url?: string | null
   user_code?: string | null
   error?: string | null
   output_excerpt?: string[]
@@ -1272,8 +1274,8 @@ export type AgentAuthStatus = {
   target_actor_user_id?: string | null
   target_actor_username?: string | null
   target_actor_full_name?: string | null
-  selected_login_method?: ClaudeAuthLoginMethod | string | null
-  supported_login_methods?: Array<ClaudeAuthLoginMethod | string>
+  selected_login_method?: CodexAuthLoginMethod | ClaudeAuthLoginMethod | string | null
+  supported_login_methods?: Array<CodexAuthLoginMethod | ClaudeAuthLoginMethod | string>
   login_session?: AgentAuthLoginSession | null
 }
 

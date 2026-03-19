@@ -498,9 +498,6 @@ def _prepare_codex_home(
             if normalized_provider == "codex":
                 shutil.copy2(source_auth_path, target_auth_path)
                 return
-            source_claude_dir = source_auth_path.parent / ".claude"
-            if source_claude_dir.exists() and source_claude_dir.is_dir():
-                shutil.copytree(source_claude_dir, claude_dir, dirs_exist_ok=True)
             # Keep per-session Claude auth in sync, but preserve session metadata already
             # written into the persistent session home.
             if not target_auth_path.exists():

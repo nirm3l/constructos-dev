@@ -20,6 +20,7 @@ from shared.models import SessionLocal
 from shared.observability import incr
 from shared.realtime import realtime_hub
 from features.licensing.read_models import license_status_read_model
+from features.agents.provider_auth import get_provider_auth_status
 
 from .application import NotificationApplicationService
 from .read_models import (
@@ -204,6 +205,11 @@ async def notifications_stream(
                         if signal_reason.startswith(_AGENT_AUTH_REALTIME_REASON_PREFIX):
                             provider = signal_reason.removeprefix(_AGENT_AUTH_REALTIME_REASON_PREFIX).strip()
                             payload = {"provider": provider} if provider else {}
+                            if provider in {"codex", "claude"}:
+                                try:
+                                    payload["auth_status"] = get_provider_auth_status(provider)
+                                except Exception:
+                                    pass
                             yield f"event: auth_event\ndata: {json.dumps(payload)}\n\n"
                             continue
                         # Forward a lightweight refresh event even when no new rows are

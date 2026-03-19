@@ -30,6 +30,7 @@ import {
   startCodexDeviceAuth,
   submitFeedback,
   submitClaudeDeviceAuthCode,
+  submitCodexBrowserCallback,
   updateAdminUserRole,
   updateAdminUserAgentRuntime,
 } from '../api'
@@ -427,17 +428,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     enabled: Boolean(bootstrap.data),
     retry: 1,
     refetchOnWindowFocus: false,
-    refetchInterval: (query) => {
-      const data = query.state.data as {
-        configured?: boolean
-        effective_source?: string | null
-        login_session?: { status?: string | null }
-      } | undefined
-      if (data?.configured || String(data?.effective_source || '').trim().toLowerCase() === 'system_override') {
-        return false
-      }
-      return data?.login_session?.status === 'pending' ? 5000 : false
-    },
+    refetchInterval: false,
   })
   const claudeAuthStatus = useQuery({
     queryKey: ['claude-auth-status', userId],
@@ -445,17 +436,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     enabled: Boolean(bootstrap.data),
     retry: 1,
     refetchOnWindowFocus: false,
-    refetchInterval: (query) => {
-      const data = query.state.data as {
-        configured?: boolean
-        effective_source?: string | null
-        login_session?: { status?: string | null }
-      } | undefined
-      if (data?.configured || String(data?.effective_source || '').trim().toLowerCase() === 'system_override') {
-        return false
-      }
-      return data?.login_session?.status === 'pending' ? 5000 : false
-    },
+    refetchInterval: false,
   })
   const activateLicenseMutation = useMutation({
     mutationFn: (activationCode: string) =>
@@ -529,9 +510,10 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     },
   })
   const startCodexDeviceAuthMutation = useMutation({
-    mutationFn: () => startCodexDeviceAuth(userId),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ['codex-auth-status', userId] })
+    mutationFn: (loginMethod: 'browser' | 'device_code') =>
+      startCodexDeviceAuth(userId, { login_method: loginMethod }),
+    onSuccess: (payload) => {
+      qc.setQueryData(['codex-auth-status', userId], payload)
       setUiError(null)
     },
     onError: (error: unknown) => {
@@ -540,18 +522,32 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   })
   const cancelCodexDeviceAuthMutation = useMutation({
     mutationFn: () => cancelCodexDeviceAuth(userId),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ['codex-auth-status', userId] })
+    onSuccess: (payload) => {
+      qc.setQueryData(['codex-auth-status', userId], payload)
       setUiError(null)
     },
     onError: (error: unknown) => {
       setUiError(toErrorMessage(error, 'Codex sign-in could not be cancelled'))
     },
   })
+  const submitCodexBrowserCallbackMutation = useMutation({
+    mutationFn: (payload: { sessionId: string; callbackUrl: string }) =>
+      submitCodexBrowserCallback(userId, {
+        session_id: payload.sessionId,
+        callback_url: payload.callbackUrl,
+      }),
+    onSuccess: (payload) => {
+      qc.setQueryData(['codex-auth-status', userId], payload)
+      setUiError(null)
+    },
+    onError: (error: unknown) => {
+      setUiError(toErrorMessage(error, 'Codex browser callback URL could not be submitted'))
+    },
+  })
   const deleteCodexAuthOverrideMutation = useMutation({
     mutationFn: () => deleteCodexAuthOverride(userId),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ['codex-auth-status', userId] })
+    onSuccess: (payload) => {
+      qc.setQueryData(['codex-auth-status', userId], payload)
       setUiError(null)
     },
     onError: (error: unknown) => {
@@ -561,8 +557,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const startClaudeDeviceAuthMutation = useMutation({
     mutationFn: (loginMethod: 'claudeai' | 'console') =>
       startClaudeDeviceAuth(userId, { login_method: loginMethod }),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
+    onSuccess: (payload) => {
+      qc.setQueryData(['claude-auth-status', userId], payload)
       setUiError(null)
     },
     onError: (error: unknown) => {
@@ -571,8 +567,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   })
   const cancelClaudeDeviceAuthMutation = useMutation({
     mutationFn: () => cancelClaudeDeviceAuth(userId),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
+    onSuccess: (payload) => {
+      qc.setQueryData(['claude-auth-status', userId], payload)
       setUiError(null)
     },
     onError: (error: unknown) => {
@@ -581,8 +577,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   })
   const submitClaudeDeviceAuthCodeMutation = useMutation({
     mutationFn: (code: string) => submitClaudeDeviceAuthCode(userId, { code }),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
+    onSuccess: (payload) => {
+      qc.setQueryData(['claude-auth-status', userId], payload)
       setUiError(null)
     },
     onError: (error: unknown) => {
@@ -591,8 +587,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   })
   const deleteClaudeAuthOverrideMutation = useMutation({
     mutationFn: () => deleteClaudeAuthOverride(userId),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ['claude-auth-status', userId] })
+    onSuccess: (payload) => {
+      qc.setQueryData(['claude-auth-status', userId], payload)
       setUiError(null)
     },
     onError: (error: unknown) => {
@@ -2757,6 +2753,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       startCodexDeviceAuthPending: startCodexDeviceAuthMutation.isPending,
       cancelCodexDeviceAuth: cancelCodexDeviceAuthMutation.mutateAsync,
       cancelCodexDeviceAuthPending: cancelCodexDeviceAuthMutation.isPending,
+      submitCodexBrowserCallback: submitCodexBrowserCallbackMutation.mutateAsync,
+      submitCodexBrowserCallbackPending: submitCodexBrowserCallbackMutation.isPending,
       deleteCodexAuthOverride: deleteCodexAuthOverrideMutation.mutateAsync,
       deleteCodexAuthOverridePending: deleteCodexAuthOverrideMutation.isPending,
       startClaudeDeviceAuth: startClaudeDeviceAuthMutation.mutateAsync,
