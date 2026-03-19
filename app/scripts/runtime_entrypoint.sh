@@ -141,6 +141,26 @@ resolve_writable_codex_home_dir() {
   printf '%s' "${fallback_dir}"
 }
 
+sync_optional_host_claude_state() {
+  local source_dir="${1:-/home/app/.claude-host-ro}"
+  local target_dir="${2:-/home/app/.claude}"
+
+  if [ ! -d "${source_dir}" ]; then
+    return 0
+  fi
+
+  mkdir -p "${target_dir}"
+
+  if command -v cp >/dev/null 2>&1; then
+    cp -R "${source_dir}/." "${target_dir}/" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if command -v tar >/dev/null 2>&1; then
+    (cd "${source_dir}" && tar -cf - .) | (cd "${target_dir}" && tar -xf -) >/dev/null 2>&1 || true
+  fi
+}
+
 main() {
   local app_dir="${APP_RUNTIME_APP_DIR:-/app}"
   local requested_workspace_dir="${AGENT_WORKDIR:-${AGENT_CODEX_WORKDIR:-/home/app/workspace}}"
@@ -163,6 +183,7 @@ main() {
   export AGENT_CODEX_WORKDIR="${app_workspace_dir}"
   export AGENT_HOME_ROOT="${app_codex_home_dir}"
   export AGENT_CODEX_HOME_ROOT="${app_codex_home_dir}"
+  sync_optional_host_claude_state
 
   if ! is_truthy "${encrypted_enabled}"; then
     setup_git_runtime "${app_dir}" "${app_workspace_dir}"
