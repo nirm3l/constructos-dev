@@ -4,7 +4,7 @@ import * as Accordion from '@radix-ui/react-accordion'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as ToggleGroup from '@radix-ui/react-toggle-group'
 import type { ProjectBoard, Task, TaskGroup } from '../../types'
-import { priorityTone, tagHue } from '../../utils/ui'
+import { orderProjectStatuses, priorityTone, tagHue } from '../../utils/ui'
 import { Icon } from '../shared/uiHelpers'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
 import { ChipTooltip, taskDescriptionPreview, TaskListItem } from './taskViews'
@@ -342,6 +342,7 @@ type TasksPanelProps = {
   clearSearchTags: () => void
   boardData: ProjectBoard | undefined
   actorNames: Record<string, string>
+  taskTeamAgentLabelsByProjectId: Record<string, Record<string, string>>
   onOpenTaskEditor: (taskId: string) => void
   onOpenSpecification: (specificationId: string, projectId: string) => void
   specificationNames: Record<string, string>
@@ -373,6 +374,7 @@ export function TasksPanel({
   clearSearchTags,
   boardData,
   actorNames,
+  taskTeamAgentLabelsByProjectId,
   onOpenTaskEditor,
   onOpenSpecification,
   specificationNames,
@@ -386,40 +388,17 @@ export function TasksPanel({
   onNewTask,
 }: TasksPanelProps) {
   const getTeamAgentLabel = React.useCallback((task: Task): string => {
+    const projectId = String(task.project_id || '').trim()
     const slot = String(task.assigned_agent_code || '').trim()
-    if (!slot) return ''
-    const normalizedSlot = slot.toLowerCase()
-    if (normalizedSlot === 'dev-a') return 'Developer A'
-    if (normalizedSlot === 'dev-b') return 'Developer B'
-    if (normalizedSlot === 'qa-a') return 'QA A'
-    if (normalizedSlot === 'lead-a') return 'Lead A'
-    const parts = slot
-      .split('-')
-      .filter(Boolean)
-    if (parts.length === 2) {
-      const role = String(parts[0] || '')
-      const ordinal = String(parts[1] || '')
-      const normalizedRole = role.toLowerCase()
-      const roleLabel =
-        normalizedRole === 'dev'
-          ? 'Developer'
-          : normalizedRole === 'qa'
-            ? 'QA'
-            : normalizedRole === 'lead'
-              ? 'Lead'
-              : `${role.charAt(0).toUpperCase()}${role.slice(1)}`
-      return `${roleLabel} ${ordinal.toUpperCase()}`
-    }
-    return parts
-      .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
-      .join(' ')
-  }, [])
+    if (!projectId || !slot) return ''
+    return String(taskTeamAgentLabelsByProjectId?.[projectId]?.[slot] || '').trim()
+  }, [taskTeamAgentLabelsByProjectId])
   const getAssigneeLabel = React.useCallback((task: Task): string => {
-    const assigneeId = String(task.assignee_id || '').trim()
-    const assignee = assigneeId ? String(actorNames?.[assigneeId] || assigneeId).trim() : ''
     const agent = getTeamAgentLabel(task)
     if (agent) return agent
-    return assignee
+    if (String(task.assigned_agent_code || '').trim()) return ''
+    const assigneeId = String(task.assignee_id || '').trim()
+    return assigneeId ? String(actorNames?.[assigneeId] || assigneeId).trim() : ''
   }, [actorNames, getTeamAgentLabel])
 
   const selectedGroupFilter = ''
@@ -645,23 +624,9 @@ export function TasksPanel({
 
   const visibleBoardStatuses = React.useMemo(() => {
     if (!boardData || !boardLanes) return []
-    const statuses: string[] = []
-    const seen = new Set<string>()
-
-    const pushStatus = (raw: string) => {
-      const status = String(raw || '').trim()
-      if (!status) return
-      const key = status.toLowerCase()
-      if (seen.has(key)) return
-      seen.add(key)
-      statuses.push(status)
-    }
-
-    for (const status of boardData.statuses) pushStatus(status)
-    for (const status of Object.keys(boardLanes)) pushStatus(status)
-
-    if (hasGroups) return statuses
-    return statuses.filter((status) => (boardLanes[status] ?? []).length > 0)
+    const orderedStatuses = orderProjectStatuses([...boardData.statuses, ...Object.keys(boardLanes)])
+    if (hasGroups) return orderedStatuses
+    return orderedStatuses.filter((status) => (boardLanes[status] ?? []).length > 0)
   }, [boardData, boardLanes, hasGroups])
 
   const onProjectsModeChange = React.useCallback((value: string) => {
@@ -802,7 +767,7 @@ export function TasksPanel({
                                 key={task.id}
                                 task={task}
                                 status={status}
-                                statuses={boardData.statuses}
+                                statuses={visibleBoardStatuses}
                                 targetGroupId={null}
                                 assigneeLabel={getAssigneeLabel(task)}
                                 onTagClick={toggleSearchTag}
@@ -900,7 +865,7 @@ export function TasksPanel({
                                       key={task.id}
                                       task={task}
                                       status={status}
-                                      statuses={boardData.statuses}
+                                      statuses={visibleBoardStatuses}
                                       targetGroupId={group.groupId}
                                       assigneeLabel={getAssigneeLabel(task)}
                                       onTagClick={toggleSearchTag}
@@ -954,7 +919,7 @@ export function TasksPanel({
                               key={task.id}
                               task={task}
                               status={status}
-                              statuses={boardData.statuses}
+                              statuses={visibleBoardStatuses}
                               targetGroupId={null}
                               assigneeLabel={getAssigneeLabel(task)}
                               onTagClick={toggleSearchTag}

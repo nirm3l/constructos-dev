@@ -5,9 +5,9 @@ import * as Popover from '@radix-ui/react-popover'
 import * as Select from '@radix-ui/react-select'
 import * as ToggleGroup from '@radix-ui/react-toggle-group'
 import * as Tooltip from '@radix-ui/react-tooltip'
-import { archiveChatSession, updateChatSessionContext } from '../../api'
+import { archiveChatSession, getProjectStarters, updateChatSessionContext } from '../../api'
 import { MarkdownView } from '../../markdown/MarkdownView'
-import type { AttachmentRef } from '../../types'
+import type { AttachmentRef, ProjectStarterCatalog, ProjectStarterDefinition } from '../../types'
 import {
   authStatusForProvider,
   getAgentExecutionProviderLabel,
@@ -30,8 +30,26 @@ function appendTranscript(base: string, transcript: string): string {
   return `${base}${separator}${cleanTranscript}`
 }
 
-function buildProjectCreationStarter(): string {
-  return 'Help me set up a new project in chat. Use setup_project_orchestration and, if inputs are missing, ask only the next missing question from the tool response.'
+function buildProjectCreationStarter(options?: {
+  starter?: ProjectStarterDefinition | null
+  userPrompt?: string
+}): string {
+  const starter = options?.starter ?? null
+  const userPrompt = String(options?.userPrompt || '').trim()
+  const setupPrefix = starter
+    ? `Help me set up a new project in chat. Use setup_project_orchestration with primary_starter_key=\"${starter.key}\". Treat ${starter.label} as the explicit starter choice and, if inputs are missing, ask only the next missing question from the tool response.`
+    : 'Help me set up a new project in chat. Use setup_project_orchestration and, if inputs are missing, ask only the next missing question from the tool response.'
+  if (!userPrompt) return setupPrefix
+  return `${setupPrefix}\n\nUser request: ${userPrompt}`
+}
+
+function buildStarterPlaceholder(starter: ProjectStarterDefinition | null): string {
+  if (!starter) {
+    return 'Ask anything, create tasks or notes, or start a new project setup.'
+  }
+  const exampleUseCase = String(starter.recommended_use_cases?.[0] || '').trim()
+  const exampleDetail = exampleUseCase ? ` focused on ${exampleUseCase}` : ''
+  return `Describe your ${starter.label} project${exampleDetail}. Chat will keep ${starter.label} as the selected starter.`
 }
 
 const CHAT_INPUT_MIN_HEIGHT_PX = 64
@@ -221,7 +239,11 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const [deleteSessionDialogOpen, setDeleteSessionDialogOpen] = React.useState(false)
   const [clearChatDialogOpen, setClearChatDialogOpen] = React.useState(false)
   const [deleteSessionId, setDeleteSessionId] = React.useState<string | null>(null)
-  const [projectSetupStarterUsed, setProjectSetupStarterUsed] = React.useState(false)
+  const [projectSetupChooserOpen, setProjectSetupChooserOpen] = React.useState(false)
+  const [selectedProjectStarterKey, setSelectedProjectStarterKey] = React.useState('')
+  const [projectStarterCatalog, setProjectStarterCatalog] = React.useState<ProjectStarterCatalog | null>(null)
+  const [isLoadingProjectStarters, setIsLoadingProjectStarters] = React.useState(false)
+  const [projectStartersError, setProjectStartersError] = React.useState<string | null>(null)
   const [resumeCommandCopyState, setResumeCommandCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
   const [turnCopyState, setTurnCopyState] = React.useState<TurnCopyState>({ status: 'idle', turnId: null })
   const [expandedDebugTurns, setExpandedDebugTurns] = React.useState<Record<string, boolean>>({})
@@ -301,8 +323,48 @@ export function CodexChatDrawer({ state }: { state: any }) {
   }, [state.codexChatSessionId])
 
   React.useEffect(() => {
-    setProjectSetupStarterUsed(false)
+    setProjectSetupChooserOpen(false)
+    setSelectedProjectStarterKey('')
+    setProjectStartersError(null)
   }, [state.codexChatSessionId])
+
+  React.useEffect(() => {
+    if (state.codexChatProjectId.trim()) {
+      setProjectSetupChooserOpen(false)
+      setSelectedProjectStarterKey('')
+      setProjectStartersError(null)
+    }
+  }, [state.codexChatProjectId])
+
+  React.useEffect(() => {
+    if (!state.showCodexChat || state.codexChatProjectId.trim() || !projectSetupChooserOpen) return
+    if (!state.userId || isLoadingProjectStarters || projectStarterCatalog) return
+    let cancelled = false
+    setIsLoadingProjectStarters(true)
+    void getProjectStarters(state.userId)
+      .then((payload) => {
+        if (cancelled) return
+        setProjectStarterCatalog(payload)
+        setProjectStartersError(null)
+      })
+      .catch((err: any) => {
+        if (cancelled) return
+        setProjectStartersError(String(err?.message || '').trim() || 'Failed to load project starters')
+      })
+      .finally(() => {
+        if (cancelled) return
+        setIsLoadingProjectStarters(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    projectSetupChooserOpen,
+    projectStarterCatalog,
+    state.codexChatProjectId,
+    state.showCodexChat,
+    state.userId,
+  ])
 
   React.useEffect(() => {
     if (resumeCommandCopyState === 'idle') return
@@ -531,8 +593,9 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const canCreateSession = !isChatBusy
   const canUseProjectCreationStarter =
     !isChatBusy &&
-    Boolean(state.workspaceId) &&
-    !projectSetupStarterUsed
+    Boolean(state.workspaceId)
+  const projectStarterItems = Array.isArray(projectStarterCatalog?.items) ? projectStarterCatalog.items : []
+  const selectedProjectStarter = projectStarterItems.find((item) => item.key === selectedProjectStarterKey) ?? null
   const canClearChat = !isChatBusy && state.codexChatTurns.length > 0
   const activeSpeechLang = String(state.speechLang || '').trim() || 'en-US'
   const speechLangName = activeSpeechLang === 'bs-BA' ? 'Bosnian' : 'English'
@@ -569,6 +632,11 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const providerAuthMissingPlaceholder = canManageProviderAuth
     ? `Connect ${activeExecutionProviderLabel} in Settings under Workspace > Connections before starting a chat session.`
     : `Ask a workspace admin to connect ${activeExecutionProviderLabel} in Settings under Workspace > Connections before starting a chat session.`
+  const chatInputPlaceholder = providerAuthMissing
+    ? providerAuthMissingPlaceholder
+    : !state.codexChatProjectId.trim()
+      ? buildStarterPlaceholder(selectedProjectStarter)
+      : 'Try: Create 3 high-priority tasks for tomorrow in the Website Redesign project and assign them to me.'
 
   const stopVoiceInput = () => {
     const recognition = recognitionRef.current
@@ -747,8 +815,13 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const applyProjectCreationStarter = () => {
     if (!canUseProjectCreationStarter) return
     state.setUiError(null)
-    setProjectSetupStarterUsed(true)
-    sendChatInstruction(buildProjectCreationStarter())
+    setProjectSetupChooserOpen((prev) => !prev)
+  }
+
+  const applySelectedProjectStarter = () => {
+    if (!canUseProjectCreationStarter || !selectedProjectStarter) return
+    state.setUiError(null)
+    sendChatInstruction(buildProjectCreationStarter({ starter: selectedProjectStarter }))
   }
 
   const openVoiceLanguageSettings = () => {
@@ -851,12 +924,22 @@ export function CodexChatDrawer({ state }: { state: any }) {
       appendLocalCodexAuthGuidance()
       return
     }
+    const effectiveInstruction = (
+      !state.codexChatProjectId.trim()
+      && selectedProjectStarter
+      && instruction
+    )
+      ? buildProjectCreationStarter({
+        starter: selectedProjectStarter,
+        userPrompt: instruction,
+      })
+      : instruction
     if (opts?.clearInput) state.setCodexChatInstruction('')
     const attachedRefs = [...chatAttachmentRefs]
     const nextUserTurn = {
       id: globalThis.crypto?.randomUUID?.() ?? `u-${Date.now()}`,
       role: 'user',
-      content: instruction,
+      content: effectiveInstruction,
       createdAt: Date.now(),
       attachmentRefs: attachedRefs,
     }
@@ -877,7 +960,7 @@ export function CodexChatDrawer({ state }: { state: any }) {
     state.setCodexChatRunStartedAt(Date.now())
     state.setCodexChatElapsedSeconds(0)
     state.runAgentChatMutation.mutate({
-      instruction,
+      instruction: effectiveInstruction,
       history,
       sessionId: state.codexChatSessionId,
       projectId: state.codexChatProjectId.trim() ? state.codexChatProjectId : null,
@@ -1295,25 +1378,124 @@ export function CodexChatDrawer({ state }: { state: any }) {
             value={state.codexChatInstruction}
             onChange={(e) => state.setCodexChatInstruction(e.target.value)}
             rows={2}
-            placeholder={
-              providerAuthMissing
-                ? providerAuthMissingPlaceholder
-                : 'Try: Create 3 high-priority tasks for tomorrow in the Website Redesign project and assign them to me.'
-            }
+            placeholder={chatInputPlaceholder}
           />
           {!state.codexChatProjectId.trim() && (
-            <div className="row wrap" style={{ marginTop: 8, alignItems: 'center', gap: 8 }}>
-              <button
-                className="status-chip"
-                type="button"
-                disabled={!canUseProjectCreationStarter}
-                onClick={() => applyProjectCreationStarter()}
-              >
-                Start project setup
-              </button>
-              <span className="meta">
-                No project is selected, so chat can create a new one interactively.
-              </span>
+            <div className="codex-chat-project-setup-entry">
+              <div className="codex-chat-project-setup-row">
+                <button
+                  className={`status-chip ${projectSetupChooserOpen ? 'active' : ''}`.trim()}
+                  type="button"
+                  disabled={!canUseProjectCreationStarter}
+                  onClick={() => applyProjectCreationStarter()}
+                >
+                  Start project setup
+                </button>
+                <span className="meta codex-chat-project-setup-copy">
+                  Tasks, notes, questions, or a new project.
+                </span>
+              </div>
+              {projectSetupChooserOpen && (
+                selectedProjectStarter ? (
+                  <div className="codex-chat-project-starter-compact">
+                    <div className="codex-chat-project-starter-compact-main">
+                      <span className="meta">Starter</span>
+                      <span className="status-chip active">{selectedProjectStarter.label}</span>
+                      <span className="meta codex-chat-project-starter-compact-copy">
+                        Bound for this setup flow.
+                      </span>
+                    </div>
+                    <div className="codex-chat-project-starter-compact-actions">
+                      <Popover.Root>
+                        <Popover.Trigger asChild>
+                          <button className="status-chip" type="button">
+                            Details
+                          </button>
+                        </Popover.Trigger>
+                        <Popover.Portal>
+                          <Popover.Content
+                            className="codex-chat-project-starter-popover"
+                            side="top"
+                            align="end"
+                            sideOffset={8}
+                            collisionPadding={12}
+                          >
+                            <div className="codex-chat-project-starter-popover-title">
+                              {selectedProjectStarter.label}
+                            </div>
+                            <div className="codex-chat-project-starter-popover-copy">
+                              {selectedProjectStarter.description}
+                            </div>
+                            <div className="codex-chat-project-starter-hints">
+                              {selectedProjectStarter.question_set.slice(0, 3).map((question) => (
+                                <span key={question} className="status-chip">{question}</span>
+                              ))}
+                            </div>
+                            <Popover.Arrow className="codex-chat-project-starter-popover-arrow" />
+                          </Popover.Content>
+                        </Popover.Portal>
+                      </Popover.Root>
+                      <button
+                        className="status-chip"
+                        type="button"
+                        disabled={!canUseProjectCreationStarter}
+                        onClick={() => setSelectedProjectStarterKey('')}
+                      >
+                        Change
+                      </button>
+                      <button
+                        className="status-chip"
+                        type="button"
+                        disabled={!canUseProjectCreationStarter}
+                        onClick={() => applySelectedProjectStarter()}
+                      >
+                        Ask setup questions
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="codex-chat-project-starter-panel">
+                    <div className="codex-chat-project-starter-header">
+                      <div className="codex-chat-project-starter-title-row">
+                        <span className="meta">Project Starter</span>
+                      </div>
+                      <span className="meta">
+                        Select a starter to pre-bind project setup, or keep typing freely in chat.
+                      </span>
+                    </div>
+                    {projectStartersError ? (
+                      <div className="notice notice-error" role="alert">{projectStartersError}</div>
+                    ) : null}
+                    {isLoadingProjectStarters ? (
+                      <div className="meta">Loading starters...</div>
+                    ) : (
+                      <div className="codex-chat-project-starter-grid">
+                        {projectStarterItems.map((starter) => (
+                          <button
+                            key={starter.key}
+                            type="button"
+                            className="codex-chat-project-starter-card"
+                            onClick={() => {
+                              setSelectedProjectStarterKey(starter.key)
+                              state.setUiError(null)
+                            }}
+                            disabled={isChatBusy}
+                          >
+                            <div className="codex-chat-project-starter-card-top">
+                              <span className="codex-chat-project-starter-card-title">{starter.label}</span>
+                              <span className="status-chip">Select</span>
+                            </div>
+                            <div className="codex-chat-project-starter-card-copy">
+                              <div>{starter.description}</div>
+                              <div className="meta">{starter.positioning_text}</div>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              )}
             </div>
           )}
           <input

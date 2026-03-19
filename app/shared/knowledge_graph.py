@@ -49,9 +49,6 @@ _SCHEMA_READY = False
 _ENTITY_LABELS = {
     "workspace": "Workspace",
     "project": "Project",
-    "template": "Template",
-    "templateversion": "TemplateVersion",
-    "template_version": "TemplateVersion",
     "task": "Task",
     "note": "Note",
     "chatsession": "ChatSession",
@@ -221,8 +218,6 @@ def ensure_graph_schema() -> None:
         statements = [
             "CREATE CONSTRAINT workspace_id_unique IF NOT EXISTS FOR (n:Workspace) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT project_id_unique IF NOT EXISTS FOR (n:Project) REQUIRE n.id IS UNIQUE",
-            "CREATE CONSTRAINT template_id_unique IF NOT EXISTS FOR (n:Template) REQUIRE n.id IS UNIQUE",
-            "CREATE CONSTRAINT template_version_id_unique IF NOT EXISTS FOR (n:TemplateVersion) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT task_id_unique IF NOT EXISTS FOR (n:Task) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT note_id_unique IF NOT EXISTS FOR (n:Note) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT chat_session_id_unique IF NOT EXISTS FOR (n:ChatSession) REQUIRE n.id IS UNIQUE",
@@ -239,7 +234,6 @@ def ensure_graph_schema() -> None:
             "CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (n:User) REQUIRE n.id IS UNIQUE",
             "CREATE CONSTRAINT tag_value_unique IF NOT EXISTS FOR (n:Tag) REQUIRE n.value IS UNIQUE",
             "CREATE INDEX project_workspace_idx IF NOT EXISTS FOR (n:Project) ON (n.workspace_id)",
-            "CREATE INDEX template_key_idx IF NOT EXISTS FOR (n:Template) ON (n.key)",
             "CREATE INDEX task_project_idx IF NOT EXISTS FOR (n:Task) ON (n.project_id)",
             "CREATE INDEX note_project_idx IF NOT EXISTS FOR (n:Note) ON (n.project_id)",
             "CREATE INDEX chat_session_project_idx IF NOT EXISTS FOR (n:ChatSession) ON (n.project_id)",
@@ -314,7 +308,9 @@ def graph_get_project_overview(project_id: str, *, top_limit: int = 8) -> dict[s
         return {
             "project_id": project_id,
             "project_name": "",
+            "total_entities": 0,
             "counts": {"tasks": 0, "notes": 0, "specifications": 0, "project_rules": 0, "comments": 0},
+            "entity_type_counts": [],
             "top_tags": [],
             "top_relationships": [],
         }
@@ -362,6 +358,32 @@ def graph_get_project_overview(project_id: str, *, top_limit: int = 8) -> dict[s
     )
     counts = counts_rows[0] if counts_rows else {}
 
+    entity_type_rows = run_graph_query(
+        """
+        MATCH (p:Project {id:$project_id})
+        MATCH (n)
+        WHERE coalesce(n.is_deleted, false) = false
+          AND n.id IS NOT NULL
+          AND n.id <> $project_id
+          AND (
+            coalesce(n.project_id, '') = $project_id
+            OR EXISTS { MATCH (n)-[:IN_PROJECT]->(p) }
+          )
+        RETURN toLower(head(labels(n))) AS entity_type, count(DISTINCT n) AS count
+        ORDER BY count DESC, entity_type ASC
+        """,
+        {"project_id": project_id},
+    )
+    entity_type_counts = [
+        {
+            "entity_type": str(row.get("entity_type") or "").strip(),
+            "count": int(row.get("count") or 0),
+        }
+        for row in entity_type_rows
+        if str(row.get("entity_type") or "").strip() and int(row.get("count") or 0) > 0
+    ]
+    total_entities = sum(int(item.get("count") or 0) for item in entity_type_counts)
+
     top_tags = run_graph_query(
         """
         MATCH (p:Project {id:$project_id})
@@ -398,6 +420,7 @@ def graph_get_project_overview(project_id: str, *, top_limit: int = 8) -> dict[s
     return {
         "project_id": first.get("project_id") or project_id,
         "project_name": first.get("project_name") or "",
+        "total_entities": int(total_entities),
         "counts": {
             "tasks": int(counts.get("task_count") or 0),
             "notes": int(counts.get("note_count") or 0),
@@ -405,6 +428,7 @@ def graph_get_project_overview(project_id: str, *, top_limit: int = 8) -> dict[s
             "project_rules": int(counts.get("rule_count") or 0),
             "comments": int(counts.get("comment_count") or 0),
         },
+        "entity_type_counts": entity_type_counts,
         "top_tags": [{"tag": str(row.get("tag") or ""), "usage": int(row.get("usage") or 0)} for row in top_tags],
         "top_relationships": [
             {"relationship": str(row.get("relationship") or ""), "count": int(row.get("count") or 0)}
@@ -2122,23 +2146,26 @@ def graph_get_dependency_path(
     }
 
 
-def _load_project_template_binding(project_id: str) -> dict[str, Any] | None:
-    from .models import ProjectTemplateBinding, SessionLocal
+def _load_project_setup_profile(project_id: str) -> dict[str, Any] | None:
+    from .models import ProjectSetupProfile, SessionLocal
 
     with SessionLocal() as db:
-        binding = (
-            db.query(ProjectTemplateBinding)
-            .filter(ProjectTemplateBinding.project_id == project_id)
-            .order_by(ProjectTemplateBinding.id.desc())
+        profile = (
+            db.query(ProjectSetupProfile)
+            .filter(ProjectSetupProfile.project_id == project_id)
+            .order_by(ProjectSetupProfile.id.desc())
             .first()
         )
-        if binding is None:
+        if profile is None:
             return None
         return {
-            "template_key": str(binding.template_key or "").strip(),
-            "template_version": str(binding.template_version or "").strip(),
-            "applied_by": str(binding.applied_by or "").strip(),
-            "applied_at": binding.created_at.isoformat().replace("+00:00", "Z") if binding.created_at else None,
+            "primary_starter_key": str(profile.primary_starter_key or "").strip(),
+            "facet_keys": json.loads(profile.facet_keys_json or "[]"),
+            "starter_version": str(profile.starter_version or "").strip(),
+            "resolved_inputs": json.loads(profile.resolved_inputs_json or "{}"),
+            "retrieval_hints": json.loads(profile.retrieval_hints_json or "[]"),
+            "applied_by": str(profile.applied_by or "").strip(),
+            "applied_at": profile.created_at.isoformat().replace("+00:00", "Z") if profile.created_at else None,
         }
 
 
@@ -2242,9 +2269,13 @@ def search_project_knowledge(
     with SessionLocal() as db:
         runtime = resolve_project_embedding_runtime(db, project_id)
         vector_candidates: list[dict[str, Any]] = []
-        template_binding = _load_project_template_binding(project_id)
-        template_key = str((template_binding or {}).get("template_key") or "").strip()
-        expanded_query = " ".join([text_query, *_template_query_terms(template_key)]).strip() or text_query
+        setup_profile = _load_project_setup_profile(project_id)
+        starter_key = str((setup_profile or {}).get("primary_starter_key") or "").strip()
+        facet_keys = [str(item or "").strip() for item in ((setup_profile or {}).get("facet_keys") or []) if str(item or "").strip()]
+        profile_hints = [str(item or "").strip() for item in ((setup_profile or {}).get("retrieval_hints") or []) if str(item or "").strip()]
+        expanded_query = " ".join(
+            [text_query, *_starter_query_terms(starter_key, facet_keys=facet_keys), *profile_hints]
+        ).strip() or text_query
         if runtime.enabled:
             try:
                 vector_candidates = search_project_chunks(
@@ -2282,8 +2313,9 @@ def search_project_knowledge(
             source_priority = _score_source_type_priority(source_type)
             lexical_overlap = _score_query_snippet_overlap(query=text_query, snippet=snippet)
             graph_path = path_lookup.get(key, [entity_type])
-            template_alignment = _template_alignment_score(
-                template_key=template_key,
+            starter_alignment = _starter_alignment_score(
+                starter_key=starter_key,
+                facet_keys=facet_keys,
                 entity_type=entity_type,
                 source_type=source_type,
                 graph_path=graph_path,
@@ -2294,7 +2326,7 @@ def search_project_knowledge(
                 + (0.12 * freshness)
                 + (0.07 * entity_priority)
                 + (0.05 * source_priority)
-                + (0.04 * template_alignment)
+                + (0.04 * starter_alignment)
                 + (0.16 * lexical_overlap)
             )
             updated_at = _as_datetime_utc(candidate.get("source_updated_at"))
@@ -2307,11 +2339,11 @@ def search_project_knowledge(
                     "vector_similarity": round(vector_similarity, 4),
                     "graph_score": round(graph_score, 4),
                     "lexical_overlap": round(lexical_overlap, 4),
-                    "template_alignment": round(template_alignment, 4),
+                    "starter_alignment": round(starter_alignment, 4),
                     "final_score": float(final_score),
                     "graph_path": graph_path,
                     "updated_at": updated_at.isoformat().replace("+00:00", "Z") if updated_at else None,
-                    "why_selected": "combined vector similarity, graph relevance, and template alignment",
+                    "why_selected": "combined vector similarity, graph relevance, and starter alignment",
                 }
             )
     elif candidate_scores:
@@ -2336,8 +2368,9 @@ def search_project_knowledge(
             source_priority = _score_source_type_priority(source_type)
             key = (entity_type, entity_id)
             graph_path = path_lookup.get(key, [entity_type])
-            template_alignment = _template_alignment_score(
-                template_key=template_key,
+            starter_alignment = _starter_alignment_score(
+                starter_key=starter_key,
+                facet_keys=facet_keys,
                 entity_type=entity_type,
                 source_type=source_type,
                 graph_path=graph_path,
@@ -2347,7 +2380,7 @@ def search_project_knowledge(
                 + (0.16 * freshness)
                 + (0.08 * entity_priority)
                 + (0.06 * source_priority)
-                + (0.08 * template_alignment)
+                + (0.08 * starter_alignment)
             )
             updated_at = _as_datetime_utc(candidate.get("source_updated_at"))
             items.append(
@@ -2358,11 +2391,11 @@ def search_project_knowledge(
                     "snippet": snippet,
                     "vector_similarity": None,
                     "graph_score": round(graph_score, 4),
-                    "template_alignment": round(template_alignment, 4),
+                    "starter_alignment": round(starter_alignment, 4),
                     "final_score": float(final_score),
                     "graph_path": graph_path,
                     "updated_at": updated_at.isoformat().replace("+00:00", "Z") if updated_at else None,
-                    "why_selected": "graph fallback strengthened by template-aware ranking",
+                    "why_selected": "graph fallback strengthened by starter-aware ranking",
                 }
             )
     else:
@@ -2371,7 +2404,7 @@ def search_project_knowledge(
     items.sort(
         key=lambda item: (
             -float(item.get("final_score") or 0.0),
-            -float(item.get("template_alignment") or 0.0),
+            -float(item.get("starter_alignment") or 0.0),
             -float(item.get("graph_score") or 0.0),
             -float(item.get("vector_similarity") or 0.0),
             str(item.get("entity_type") or ""),
@@ -2399,8 +2432,8 @@ def search_project_knowledge(
     }
     if focus_type and focus_id:
         response["focus"] = {"entity_type": focus_type, "entity_id": focus_id}
-    if template_binding is not None:
-        response["template"] = template_binding
+    if setup_profile is not None:
+        response["setup_profile"] = setup_profile
     if gaps:
         response["gaps"] = gaps
     return response
@@ -2529,8 +2562,8 @@ def _effective_graph_score(
     return min(base, semantic_cap)
 
 
-_TEMPLATE_ENTITY_ALIGNMENT: dict[str, set[str]] = {
-    "ddd_product_build": {
+_STARTER_ENTITY_ALIGNMENT: dict[str, set[str]] = {
+    "ddd_system": {
         "boundedcontext",
         "aggregate",
         "command",
@@ -2542,7 +2575,7 @@ _TEMPLATE_ENTITY_ALIGNMENT: dict[str, set[str]] = {
         "task",
         "projectrule",
     },
-    "mobile_browser_game_development": {
+    "web_game": {
         "gameplayloop",
         "inputscheme",
         "assetpipeline",
@@ -2555,10 +2588,12 @@ _TEMPLATE_ENTITY_ALIGNMENT: dict[str, set[str]] = {
         "task",
         "projectrule",
     },
+    "api_service": {"service", "deploymenttarget", "integrationboundary", "task", "projectrule", "specification"},
+    "web_app": {"uiview", "task", "projectrule", "specification"},
 }
 
-_TEMPLATE_QUERY_HINTS: dict[str, list[str]] = {
-    "ddd_product_build": [
+_STARTER_QUERY_HINTS: dict[str, list[str]] = {
+    "ddd_system": [
         "bounded context",
         "aggregate",
         "command",
@@ -2566,7 +2601,7 @@ _TEMPLATE_QUERY_HINTS: dict[str, list[str]] = {
         "read model",
         "policy",
     ],
-    "mobile_browser_game_development": [
+    "web_game": [
         "mobile browser game",
         "touch controls",
         "asset pipeline",
@@ -2574,15 +2609,20 @@ _TEMPLATE_QUERY_HINTS: dict[str, list[str]] = {
         "docker compose",
         "lan port",
     ],
+    "api_service": ["api", "worker", "integration", "deployment", "runtime"],
+    "web_app": ["dashboard", "auth", "workflow", "frontend", "portal"],
+    "realtime": ["realtime", "websocket", "streaming"],
+    "mobile_first": ["mobile first", "touch", "device matrix"],
+    "api_backend": ["api backend", "service", "integration"],
 }
 
 
-def _normalize_template_key(value: str | None) -> str:
+def _normalize_starter_key(value: str | None) -> str:
     key = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     if key == "ddd":
-        return "ddd_product_build"
+        return "ddd_system"
     if key in {"mobile_game", "browser_game", "mobile_browser_game"}:
-        return "mobile_browser_game_development"
+        return "web_game"
     return key
 
 
@@ -2590,20 +2630,29 @@ def _normalize_entity_key(value: str | None) -> str:
     return str(value or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
 
 
-def _template_query_terms(template_key: str | None) -> list[str]:
-    key = _normalize_template_key(template_key)
-    return list(_TEMPLATE_QUERY_HINTS.get(key) or [])
+def _starter_query_terms(starter_key: str | None, *, facet_keys: list[str] | None = None) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw_key in [_normalize_starter_key(starter_key), *[_normalize_starter_key(item) for item in (facet_keys or [])]]:
+        for term in (_STARTER_QUERY_HINTS.get(raw_key) or []):
+            if term in seen:
+                continue
+            seen.add(term)
+            terms.append(term)
+    return terms
 
 
-def _template_alignment_score(
+def _starter_alignment_score(
     *,
-    template_key: str | None,
+    starter_key: str | None,
+    facet_keys: list[str] | None = None,
     entity_type: str | None,
     source_type: str | None = None,
     graph_path: list[str] | None = None,
 ) -> float:
-    normalized_template = _normalize_template_key(template_key)
-    priority = _TEMPLATE_ENTITY_ALIGNMENT.get(normalized_template)
+    priority: set[str] = set()
+    for raw_key in [_normalize_starter_key(starter_key), *[_normalize_starter_key(item) for item in (facet_keys or [])]]:
+        priority.update(_STARTER_ENTITY_ALIGNMENT.get(raw_key) or set())
     if not priority:
         return 0.5
 
@@ -2939,11 +2988,27 @@ def _render_context_markdown(
 
     project_name = str(overview.get("project_name") or "").strip() or overview.get("project_id") or "(unknown)"
     counts = overview.get("counts") or {}
+    total_entities = int(overview.get("total_entities") or 0)
+    entity_type_counts = [
+        (
+            str(item.get("entity_type") or "").strip(),
+            int(item.get("count") or 0),
+        )
+        for item in (overview.get("entity_type_counts") or [])
+        if str(item.get("entity_type") or "").strip() and int(item.get("count") or 0) > 0
+    ]
     lines.append(f"# Graph Context: {project_name}")
     lines.append("")
     lines.append("## Structure")
+    lines.append(f"- indexed_entities={total_entities}")
+    if entity_type_counts:
+        lines.append(
+            "- entity_type_counts: {items}".format(
+                items=", ".join(f"{entity_type}={count}" for entity_type, count in entity_type_counts[:12])
+            )
+        )
     lines.append(
-        "- tasks={tasks}, notes={notes}, specifications={specs}, project_rules={rules}, comments={comments}".format(
+        "- legacy_artifact_counts: tasks={tasks}, notes={notes}, specifications={specs}, project_rules={rules}, comments={comments}".format(
             tasks=int(counts.get("tasks") or 0),
             notes=int(counts.get("notes") or 0),
             specs=int(counts.get("specifications") or 0),
@@ -3143,13 +3208,15 @@ def graph_context_pack(
         )
         path_lookup = _dependency_path_lookup(dependency_paths)
 
-        template_binding = _load_project_template_binding(project_id)
-        template_key = str((template_binding or {}).get("template_key") or "").strip()
+        setup_profile = _load_project_setup_profile(project_id)
+        starter_key = str((setup_profile or {}).get("primary_starter_key") or "").strip()
+        facet_keys = [str(item or "").strip() for item in ((setup_profile or {}).get("facet_keys") or []) if str(item or "").strip()]
+        retrieval_hints = [str(item or "").strip() for item in ((setup_profile or {}).get("retrieval_hints") or []) if str(item or "").strip()]
         project_name = str(overview.get("project_name") or project_id).strip() or project_id
         top_tags = [str(item.get("tag") or "").strip() for item in (overview.get("top_tags") or []) if str(item.get("tag") or "").strip()]
         focus_hint = str(focus_entity_id or "").strip()
         retrieval_query = " ".join(
-            [project_name, focus_hint, *top_tags, *_template_query_terms(template_key)]
+            [project_name, focus_hint, *top_tags, *_starter_query_terms(starter_key, facet_keys=facet_keys), *retrieval_hints]
         ).strip() or project_name
 
         evidence: list[dict[str, Any]] = []
@@ -3201,8 +3268,9 @@ def graph_context_pack(
                 entity_priority = _score_entity_priority(entity_type)
                 source_priority = _score_source_type_priority(source_type)
                 graph_path = path_lookup.get(key, [entity_type])
-                template_alignment = _template_alignment_score(
-                    template_key=template_key,
+                starter_alignment = _starter_alignment_score(
+                    starter_key=starter_key,
+                    facet_keys=facet_keys,
                     entity_type=entity_type,
                     source_type=source_type,
                     graph_path=graph_path,
@@ -3213,7 +3281,7 @@ def graph_context_pack(
                     + (0.14 * freshness)
                     + (0.08 * entity_priority)
                     + (0.07 * source_priority)
-                    + (0.05 * template_alignment)
+                    + (0.05 * starter_alignment)
                 )
                 source_updated_at = _as_datetime_utc(item.get("source_updated_at"))
                 evidence.append(
@@ -3224,11 +3292,11 @@ def graph_context_pack(
                         "snippet": snippet,
                         "vector_similarity": vector_similarity,
                         "graph_score": graph_score,
-                        "template_alignment": template_alignment,
+                        "starter_alignment": starter_alignment,
                         "final_score": final_score,
                         "graph_path": graph_path,
                         "updated_at": source_updated_at.isoformat().replace("+00:00", "Z") if source_updated_at else None,
-                        "why_selected": "high semantic similarity with graph relevance and template alignment",
+                        "why_selected": "high semantic similarity with graph relevance and starter alignment",
                     }
                 )
         else:
@@ -3259,8 +3327,9 @@ def graph_context_pack(
                 source_updated_at = _as_datetime_utc(item.get("source_updated_at"))
                 key = (entity_type, entity_id)
                 graph_path = path_lookup.get(key, [entity_type])
-                template_alignment = _template_alignment_score(
-                    template_key=template_key,
+                starter_alignment = _starter_alignment_score(
+                    starter_key=starter_key,
+                    facet_keys=facet_keys,
                     entity_type=entity_type,
                     source_type=source_type,
                     graph_path=graph_path,
@@ -3270,7 +3339,7 @@ def graph_context_pack(
                     + (0.18 * freshness)
                     + (0.08 * entity_priority)
                     + (0.06 * source_priority)
-                    + (0.08 * template_alignment)
+                    + (0.08 * starter_alignment)
                 )
                 evidence.append(
                     {
@@ -3280,18 +3349,18 @@ def graph_context_pack(
                         "snippet": snippet,
                         "vector_similarity": None,
                         "graph_score": graph_score,
-                        "template_alignment": template_alignment,
+                        "starter_alignment": starter_alignment,
                         "final_score": final_score,
                         "graph_path": graph_path,
                         "updated_at": source_updated_at.isoformat().replace("+00:00", "Z") if source_updated_at else None,
-                        "why_selected": "graph-only fallback based on topology, freshness, and template alignment",
+                        "why_selected": "graph-only fallback based on topology, freshness, and starter alignment",
                     }
                 )
 
         evidence.sort(
             key=lambda item: (
                 -float(item.get("final_score") or 0.0),
-                -float(item.get("template_alignment") or 0.0),
+                -float(item.get("starter_alignment") or 0.0),
                 -float(item.get("graph_score") or 0.0),
                 str(item.get("entity_type") or ""),
                 str(item.get("entity_id") or ""),
@@ -3305,7 +3374,7 @@ def graph_context_pack(
             vector_similarity = item.get("vector_similarity")
             if vector_similarity is not None:
                 item["vector_similarity"] = round(float(vector_similarity), 4)
-            item["template_alignment"] = round(float(item.get("template_alignment") or 0.0), 4)
+            item["starter_alignment"] = round(float(item.get("starter_alignment") or 0.0), 4)
 
         summary: dict[str, Any] | None = None
         if rag_enabled:
@@ -3350,8 +3419,8 @@ def graph_context_pack(
             "evidence": evidence,
             "markdown": markdown,
         }
-        if template_binding is not None:
-            response["template"] = template_binding
+        if setup_profile is not None:
+            response["setup_profile"] = setup_profile
         if summary is not None:
             response["summary"] = summary
             summary_emitted = True

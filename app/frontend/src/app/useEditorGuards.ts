@@ -128,6 +128,10 @@ export function useEditorGuards(c: any) {
   )
   const projectIsDirty = React.useMemo(() => {
     if (!c.showProjectEditForm || !c.selectedProject) return false
+    const selectedProjectId = String(c.selectedProject.id || '').trim()
+    if (!selectedProjectId) return false
+    if (String(c.projectEditorHydratedProjectId || '').trim() !== selectedProjectId) return false
+    if (String(c.projectEditorMembersHydratedProjectId || '').trim() !== selectedProjectId) return false
     return (
       c.editProjectName.trim() !== (c.selectedProject.name ?? '').trim() ||
       c.editProjectDescription !== (c.selectedProject.description ?? '') ||
@@ -158,6 +162,8 @@ export function useEditorGuards(c: any) {
     c.editProjectEmbeddingEnabled,
     c.editProjectEmbeddingModel,
     c.editProjectVectorIndexDistillEnabled,
+    c.projectEditorHydratedProjectId,
+    c.projectEditorMembersHydratedProjectId,
     c.editProjectContextPackEvidenceTopKText,
     c.editProjectAutomationMaxParallelTasksText,
     c.editProjectChatIndexMode,
@@ -225,6 +231,7 @@ export function useEditorGuards(c: any) {
   const taskIsDirty = React.useMemo(() => {
     const baselineTask = c.taskEditorBaselineTask ?? c.selectedTask
     if (!baselineTask) return false
+    if (!c.taskEditorTouched) return false
     const hydratedTaskId = String(c.taskEditorHydratedTaskId || '')
     const baselineTaskId = String(baselineTask.id || '')
     const selectedTaskId = String(c.selectedTask?.id || '')
@@ -358,6 +365,7 @@ export function useEditorGuards(c: any) {
     c.currentUserTimezone,
     c.parseAttachmentRefsText,
     c.parseExternalRefsText,
+    c.taskEditorTouched,
     c.taskEditorHydratedTaskId,
     c.taskEditorBaselineTask,
     c.selectedTask,

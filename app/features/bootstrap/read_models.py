@@ -14,7 +14,7 @@ from shared.models import (
     Notification,
     Project,
     ProjectMember,
-    ProjectTemplateBinding,
+    ProjectSetupProfile,
     SavedView,
     User,
     Workspace,
@@ -124,10 +124,10 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             ProjectMember.project_id.in_(project_ids),
         )
     ).scalars().all()
-    project_template_bindings = db.execute(
-        select(ProjectTemplateBinding).where(
-            ProjectTemplateBinding.workspace_id.in_(workspace_ids),
-            ProjectTemplateBinding.project_id.in_(project_ids),
+    project_setup_profiles = db.execute(
+        select(ProjectSetupProfile).where(
+            ProjectSetupProfile.workspace_id.in_(workspace_ids),
+            ProjectSetupProfile.project_id.in_(project_ids),
         )
     ).scalars().all()
     saved = db.execute(
@@ -138,14 +138,16 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
         )
     ).scalars().all()
     project_creator_map = load_created_by_map(db, "Project", project_ids)
-    project_template_binding_map = {
-        binding.project_id: {
-            "template_key": binding.template_key,
-            "template_version": binding.template_version,
-            "applied_by": binding.applied_by,
-            "applied_at": to_iso_utc(binding.created_at),
+    project_setup_profile_map = {
+        profile.project_id: {
+            "primary_starter_key": profile.primary_starter_key,
+            "facet_keys": json.loads(profile.facet_keys_json or "[]"),
+            "starter_version": profile.starter_version,
+            "retrieval_hints": json.loads(profile.retrieval_hints_json or "[]"),
+            "applied_by": profile.applied_by,
+            "applied_at": to_iso_utc(profile.created_at),
         }
-        for binding in project_template_bindings
+        for profile in project_setup_profiles
     }
     projects_payload = []
     for p in projects:
@@ -187,7 +189,7 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
                 "created_by": project_creator_map.get(p.id, ""),
                 "created_at": to_iso_utc(p.created_at),
                 "updated_at": to_iso_utc(p.updated_at),
-                "template_binding": project_template_binding_map.get(p.id),
+                "setup_profile": project_setup_profile_map.get(p.id),
             }
         )
     vector_enabled = bool(vector_store_enabled())

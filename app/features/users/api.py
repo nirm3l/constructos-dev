@@ -225,7 +225,8 @@ def change_password(
         new_password=str(payload.new_password or ""),
         keep_session_hash=current_hash or None,
     )
-    return {"ok": True, "user": _serialize_auth_user(db, user)}
+    refreshed_user = db.get(User, user.id) or user
+    return {"ok": True, "user": _serialize_auth_user(db, refreshed_user)}
 
 
 @router.get("/api/admin/users")

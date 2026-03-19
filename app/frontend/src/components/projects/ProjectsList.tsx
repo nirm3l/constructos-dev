@@ -101,14 +101,6 @@ export function ProjectsList({
                 <ChipTooltip label={`Status: ${project.status || 'active'}`}>
                   <span className="status-chip project-status-chip">{project.status || 'active'}</span>
                 </ChipTooltip>
-                {project.template_binding ? (
-                  <ChipTooltip label={`Template: ${project.template_binding.template_key} v${project.template_binding.template_version}`}>
-                    <span className="note-meta-chip">
-                      <Icon path="M3 7h7l2 2h9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2" />
-                      <span>{`${project.template_binding.template_key} v${project.template_binding.template_version}`}</span>
-                    </span>
-                  </ChipTooltip>
-                ) : null}
                 {typeof noteCount === 'number' && noteCount > 0 && (
                   <ChipTooltip label={`${noteCount} notes`}>
                     <span className="note-meta-chip project-count-chip">
@@ -150,9 +142,6 @@ export function ProjectsList({
                   </ChipTooltip>
                 )}
               </div>
-              {project.template_binding ? (
-                <div className="meta">{`Template applied: ${formatTemplateAppliedAt(project.template_binding.applied_at)}`}</div>
-              ) : null}
               {updatedAtLabel && <div className="meta">{`Updated: ${updatedAtLabel}`}</div>}
               {isOpen && selectedProject && renderInlineEditor(project)}
             </div>

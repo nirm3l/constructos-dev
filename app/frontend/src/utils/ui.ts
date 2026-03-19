@@ -202,10 +202,53 @@ export function parseCommaTags(raw: string): string[] {
 }
 
 export const DEFAULT_PROJECT_STATUSES: string[] = ['To Do', 'In Progress', 'Done']
+const KNOWN_PROJECT_STATUS_ORDER = [
+  'backlog',
+  'to do',
+  'in progress',
+  'in review',
+  'awaiting decision',
+  'blocked',
+  'done',
+  'completed',
+] as const
+const KNOWN_PROJECT_STATUS_ORDER_INDEX = new Map<string, number>(
+  KNOWN_PROJECT_STATUS_ORDER.map((status, index) => [status, index])
+)
 export const PROJECT_EVIDENCE_TOP_K_MIN = 1
 export const PROJECT_EVIDENCE_TOP_K_MAX = 40
 export const PROJECT_AUTOMATION_MAX_PARALLEL_MIN = 1
 export const PROJECT_AUTOMATION_MAX_PARALLEL_MAX = 50
+
+function normalizeStatusOrderToken(raw: string | null | undefined): string {
+  return String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+}
+
+export function orderProjectStatuses(values: Array<string | null | undefined>): string[] {
+  const uniqueStatuses: Array<{ value: string; knownIndex: number; originalIndex: number }> = []
+  const seen = new Set<string>()
+  values.forEach((raw, originalIndex) => {
+    const value = String(raw || '').trim()
+    if (!value) return
+    const normalized = normalizeStatusOrderToken(value)
+    if (!normalized || seen.has(normalized)) return
+    seen.add(normalized)
+    uniqueStatuses.push({
+      value,
+      knownIndex: KNOWN_PROJECT_STATUS_ORDER_INDEX.get(normalized) ?? Number.POSITIVE_INFINITY,
+      originalIndex,
+    })
+  })
+  uniqueStatuses.sort((left, right) => {
+    if (left.knownIndex !== right.knownIndex) return left.knownIndex - right.knownIndex
+    return left.originalIndex - right.originalIndex
+  })
+  return uniqueStatuses.map((entry) => entry.value)
+}
 
 export function parseProjectStatusesText(raw: string): string[] {
   const seen = new Set<string>()

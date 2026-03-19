@@ -163,6 +163,7 @@ def _emit_task_assigned_to_me(
     if not task_id:
         return
 
+    previous_assignee_token = "none"
     if env.event_type == TASK_EVENT_CREATED:
         assignee_id = normalize_optional_id(payload.get("assignee_id") or task_state.get("assignee_id"))
         previous_assignee_id = None
@@ -173,6 +174,8 @@ def _emit_task_assigned_to_me(
         previous_assignee_id = normalize_optional_id(payload.get("previous_assignee_id"))
         if assignee_id == previous_assignee_id:
             return
+    if previous_assignee_id:
+        previous_assignee_token = previous_assignee_id
 
     if not assignee_id:
         return
@@ -190,7 +193,7 @@ def _emit_task_assigned_to_me(
     project_id = normalize_optional_id(payload.get("project_id")) or normalize_optional_id(metadata.get("project_id")) or normalize_optional_id(task_state.get("project_id"))
     title = str(task_state.get("title") or payload.get("title") or "Task").strip() or "Task"
     status = str(task_state.get("status") or payload.get("status") or "").strip() or None
-    dedupe_key = f"task-assigned:{task_id}:{assignee_id}:{env.version}"
+    dedupe_key = f"task-assigned:{task_id}:{previous_assignee_token}:{assignee_id}"
     append_notification_created_event(
         db,
         append_event_fn=append_event_fn,

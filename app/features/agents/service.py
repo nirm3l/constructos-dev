@@ -14,7 +14,8 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 
 from features.projects.application import ProjectApplicationService
-from features.project_templates.application import ProjectTemplateApplicationService
+from features.project_starters.application import ProjectStarterApplicationService
+from features.project_starters.catalog import get_project_starter, list_project_facets, list_project_starters, normalize_starter_key
 from features.project_skills.application import ProjectSkillApplicationService
 from features.project_skills.read_models import (
     ProjectSkillListQuery,
@@ -79,7 +80,6 @@ from shared.core import (
     load_specification_command_state,
     load_specification_view,
 )
-from features.project_templates.schemas import ProjectFromTemplateCreate, ProjectFromTemplatePreview
 from features.agents.agent_mcp_adapter import run_structured_agent_prompt
 from features.agents.intent_classifier import (
     AUTOMATION_REQUEST_INTENT_FIELDS,
@@ -199,9 +199,9 @@ _READ_ONLY_MCP_METHODS = frozenset(
         "verify_team_mode_workflow",
         "verify_delivery_workflow",
         "validate_project_plugin_config",
-        "list_project_templates",
-        "get_project_template",
-        "preview_project_from_template",
+        "list_project_starters",
+        "get_project_starter",
+        "get_project_setup_profile",
     }
 )
 _LICENSE_WRITE_BLOCKED_MESSAGE = "License expired. Write access is disabled until subscription is reactivated."
@@ -522,6 +522,15 @@ def _validate_team_mode_config(config: dict[str, Any]) -> tuple[list[dict[str, s
                 "path": "review_policy.require_code_review",
                 "code": "invalid_type",
                 "message": "review_policy.require_code_review must be a boolean",
+            }
+        )
+    reviewer_user_id = str(review_policy.get("reviewer_user_id") or "").strip()
+    if reviewer_user_id and not re.fullmatch(r"[0-9a-fA-F-]{36}", reviewer_user_id):
+        errors.append(
+            {
+                "path": "review_policy.reviewer_user_id",
+                "code": "invalid_format",
+                "message": "review_policy.reviewer_user_id must be a UUID",
             }
         )
 
@@ -1598,15 +1607,47 @@ class AgentTaskService:
             },
         )
 
-    def _fallback_project_template_create_command_id(self, *, workspace_id: str, template_key: str, name: str) -> str:
-        return self._fallback_command_id(
-            prefix="mcp-project-template-create",
-            payload={
-                "workspace_id": workspace_id,
-                "template_key": str(template_key or "").strip().lower(),
-                "name_key": self._normalize_project_name(name).casefold(),
-            },
-        )
+    def _normalize_facet_keys(self, facet_keys: list[str] | None) -> list[str]:
+        normalized: list[str] = []
+        allowed = {item.lower() for item in list_project_facets()}
+        for item in facet_keys or []:
+            key = normalize_starter_key(item)
+            if not key or key.lower() not in allowed:
+                continue
+            if key not in normalized:
+                normalized.append(key)
+        return normalized
+
+    def _resolve_starter_setup(
+        self,
+        *,
+        primary_starter_key: str | None,
+        facet_keys: list[str] | None,
+    ) -> tuple[dict[str, Any] | None, list[str], list[str]]:
+        starter = get_project_starter(primary_starter_key)
+        normalized_facets = self._normalize_facet_keys(facet_keys)
+        if starter is None:
+            return None, normalized_facets, []
+        for default_facet in starter.facet_defaults:
+            if default_facet not in normalized_facets and default_facet != starter.key:
+                normalized_facets.append(default_facet)
+        retrieval_hints: list[str] = []
+        for hint in starter.retrieval_hints:
+            if hint not in retrieval_hints:
+                retrieval_hints.append(hint)
+        for facet in normalized_facets:
+            facet_starter = get_project_starter(facet)
+            if facet_starter is None:
+                continue
+            for hint in facet_starter.retrieval_hints:
+                if hint not in retrieval_hints:
+                    retrieval_hints.append(hint)
+        return {
+            "key": starter.key,
+            "label": starter.label,
+            "default_custom_statuses": list(starter.default_custom_statuses),
+            "definition": starter,
+        }, normalized_facets, retrieval_hints
 
     def _resolve_workspace_for_note_create(
         self,
@@ -4367,6 +4408,8 @@ class AgentTaskService:
         *,
         name: str | None = None,
         short_description: str = "",
+        primary_starter_key: str | None = None,
+        facet_keys: list[str] | None = None,
         project_id: str | None = None,
         workspace_id: str | None = None,
         enable_team_mode: bool | None = None,
@@ -4386,6 +4429,10 @@ class AgentTaskService:
         normalized_name = str(name or "").strip()
         normalized_project_id = str(project_id or "").strip()
         is_new_project_setup = not bool(normalized_project_id)
+        starter_setup, normalized_facet_keys, retrieval_hints = self._resolve_starter_setup(
+            primary_starter_key=primary_starter_key,
+            facet_keys=facet_keys,
+        )
         normalized_docker_port: int | None
         if docker_port is None:
             normalized_docker_port = None
@@ -4417,6 +4464,14 @@ class AgentTaskService:
             if isinstance(options, list) and options:
                 payload["options"] = list(options)
             missing_inputs.append(payload)
+
+        if is_new_project_setup and starter_setup is None:
+            _add_missing_input(
+                key="primary_starter_key",
+                question="Which project starter should be used?",
+                value_type="string",
+                options=[item.key for item in list_project_starters()],
+            )
 
         if is_new_project_setup and not normalized_name:
             _add_missing_input(
@@ -4479,6 +4534,8 @@ class AgentTaskService:
 
         if missing_inputs:
             resolved_inputs = {
+                "primary_starter_key": starter_setup["key"] if isinstance(starter_setup, dict) else None,
+                "facet_keys": normalized_facet_keys,
                 "name": normalized_name or None,
                 "short_description": normalized_short_description or None,
                 "enable_team_mode": enable_team_mode,
@@ -4488,6 +4545,8 @@ class AgentTaskService:
             }
             setup_path = {
                 "is_new_project": bool(is_new_project_setup),
+                "primary_starter_key": starter_setup["key"] if isinstance(starter_setup, dict) else None,
+                "facet_keys": normalized_facet_keys,
                 "team_mode_selected": bool(enable_team_mode) if enable_team_mode is not None else None,
                 "git_delivery_selected": (
                     bool(enable_git_delivery)
@@ -4627,6 +4686,96 @@ class AgentTaskService:
                 reason="No explicit Event Storming target was requested",
             )
 
+        setup_profile: dict[str, Any] | None = None
+        if not blocking_errors and isinstance(starter_setup, dict):
+            def _persist_setup_profile() -> dict[str, Any]:
+                with SessionLocal() as db:
+                    return ProjectStarterApplicationService(db, self._resolve_actor_user()).upsert_setup_profile(
+                        project_id=resolved_project_id,
+                        workspace_id=resolved_workspace_id,
+                        primary_starter_key=starter_setup["key"],
+                        facet_keys=normalized_facet_keys,
+                        resolved_inputs={
+                            "name": normalized_name,
+                            "short_description": normalized_short_description,
+                            "primary_starter_key": starter_setup["key"],
+                            "facet_keys": normalized_facet_keys,
+                            "enable_team_mode": enable_team_mode,
+                            "enable_git_delivery": enable_git_delivery,
+                            "enable_docker_compose": enable_docker_compose,
+                            "docker_port": docker_port,
+                            "expected_event_storming_enabled": expected_event_storming_enabled,
+                        },
+                        retrieval_hints=retrieval_hints,
+                    )
+
+            setup_profile = self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="persist_setup_profile",
+                title="Persist starter setup profile",
+                blocking=True,
+                max_attempts=2,
+                action=_persist_setup_profile,
+            )
+        else:
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="persist_setup_profile",
+                title="Persist starter setup profile",
+                reason="No starter setup profile was requested",
+            )
+
+        starter_artifacts: dict[str, Any] | None = None
+        if not blocking_errors and created_project and isinstance(starter_setup, dict):
+            def _bootstrap_starter_artifacts() -> dict[str, Any]:
+                with SessionLocal() as db:
+                    return ProjectStarterApplicationService(db, self._resolve_actor_user()).bootstrap_starter_artifacts(
+                        project_id=resolved_project_id,
+                        workspace_id=resolved_workspace_id,
+                        starter=starter_setup["definition"],
+                    )
+
+            starter_artifacts = self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="bootstrap_starter_artifacts",
+                title="Bootstrap starter artifacts",
+                blocking=False,
+                max_attempts=1,
+                action=_bootstrap_starter_artifacts,
+            )
+        else:
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="bootstrap_starter_artifacts",
+                title="Bootstrap starter artifacts",
+                reason="Starter artifacts are only generated for newly created starter-driven projects",
+            )
+
+        if not blocking_errors and created_project and isinstance(starter_setup, dict):
+            self._run_setup_step(
+                steps=steps,
+                blocking_errors=blocking_errors,
+                step_id="apply_starter_statuses",
+                title="Apply starter default statuses",
+                blocking=False,
+                max_attempts=1,
+                action=lambda: self.update_project(
+                    project_id=resolved_project_id,
+                    patch={"custom_statuses": starter_setup["default_custom_statuses"]},
+                    auth_token=auth_token,
+                    command_id=self._derive_child_command_id(command_id, "starter-statuses"),
+                ),
+            )
+        else:
+            self._append_skipped_setup_step(
+                steps=steps,
+                step_id="apply_starter_statuses",
+                title="Apply starter default statuses",
+                reason="Starter default statuses apply only when a new starter-driven project is created",
+            )
+
         capabilities = self._run_setup_step(
             steps=steps,
             blocking_errors=blocking_errors,
@@ -4680,6 +4829,8 @@ class AgentTaskService:
             blocking_errors.append({"error": validation_error})
 
         requested = {
+            "primary_starter_key": starter_setup["key"] if isinstance(starter_setup, dict) else None,
+            "facet_keys": normalized_facet_keys,
             "team_mode_enabled": requested_team,
             "git_delivery_enabled": requested_git,
             "docker_compose_enabled": requested_docker,
@@ -5167,6 +5318,8 @@ class AgentTaskService:
                 ),
                 "event_storming_enabled": current_event_storming_enabled,
                 "runtime_deploy_target": docker_runtime_target,
+                "primary_starter_key": setup_profile.get("primary_starter_key") if isinstance(setup_profile, dict) else None,
+                "facet_keys": setup_profile.get("facet_keys") if isinstance(setup_profile, dict) else [],
             },
             "kickoff_required": kickoff_required,
             "kickoff_hint": kickoff_hint or "Start execution only when ready by running kickoff from chat.",
@@ -5216,6 +5369,11 @@ class AgentTaskService:
                 "developer_dispatch_confirmed": developer_dispatch_confirmed,
                 "developer_active_task_ids": list(kickoff_result.get("developer_active_task_ids") or []),
             }
+        if isinstance(setup_profile, dict):
+            user_facing_summary["setup_profile"] = setup_profile
+
+        if isinstance(starter_artifacts, dict):
+            seeded_entities["starter_artifacts"] = starter_artifacts
 
         return {
             "contract_version": 1,
@@ -5231,6 +5389,9 @@ class AgentTaskService:
             },
             "requested": requested,
             "effective": {
+                "primary_starter_key": setup_profile.get("primary_starter_key") if isinstance(setup_profile, dict) else None,
+                "facet_keys": setup_profile.get("facet_keys") if isinstance(setup_profile, dict) else [],
+                "retrieval_hints": setup_profile.get("retrieval_hints") if isinstance(setup_profile, dict) else [],
                 "team_mode_enabled": bool(final_configs.get("team_mode", {}).get("enabled")),
                 "git_delivery_enabled": bool(final_configs.get("git_delivery", {}).get("enabled")),
                 "docker_compose_enabled": bool(final_configs.get("docker_compose", {}).get("enabled")),
@@ -5474,7 +5635,7 @@ class AgentTaskService:
             command_id=command_id,
         )
 
-    def list_project_templates(
+    def list_project_starters(
         self,
         *,
         auth_token: str | None = None,
@@ -5482,108 +5643,29 @@ class AgentTaskService:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
-            return ProjectTemplateApplicationService(db, user).list_templates()
+            return ProjectStarterApplicationService(db, user).list_starters()
 
-    def get_project_template(
+    def get_project_starter(
         self,
         *,
-        template_key: str,
+        starter_key: str,
         auth_token: str | None = None,
     ) -> dict:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
-            return ProjectTemplateApplicationService(db, user).get_template(template_key)
+            return ProjectStarterApplicationService(db, user).get_starter(starter_key)
 
-    def preview_project_from_template(
+    def get_project_setup_profile(
         self,
         *,
-        template_key: str,
-        workspace_id: str | None = None,
+        project_id: str,
         auth_token: str | None = None,
-        name: str = "",
-        description: str = "",
-        custom_statuses: Any | None = None,
-        member_user_ids: list[str] | None = None,
-        embedding_enabled: bool | None = None,
-        embedding_model: str | None = None,
-        context_pack_evidence_top_k: int | None = None,
-        chat_index_mode: str | None = None,
-        chat_attachment_ingestion_mode: str | None = None,
-        parameters: dict[str, Any] | None = None,
     ) -> dict:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
         with SessionLocal() as db:
-            resolved_workspace_id = self._resolve_workspace_for_project_create(explicit_workspace_id=workspace_id)
-            payload = ProjectFromTemplatePreview(
-                workspace_id=resolved_workspace_id,
-                template_key=template_key,
-                name=name,
-                description=description,
-                custom_statuses=self._normalize_custom_statuses(custom_statuses),
-                member_user_ids=member_user_ids or [],
-                embedding_enabled=embedding_enabled,
-                embedding_model=embedding_model,
-                context_pack_evidence_top_k=context_pack_evidence_top_k,
-                chat_index_mode=chat_index_mode,
-                chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
-                parameters=parameters or {},
-            )
-            return ProjectTemplateApplicationService(db, user).preview_project_from_template(payload)
-
-    def create_project_from_template(
-        self,
-        *,
-        template_key: str,
-        name: str,
-        workspace_id: str | None = None,
-        auth_token: str | None = None,
-        description: str = "",
-        custom_statuses: Any | None = None,
-        member_user_ids: list[str] | None = None,
-        embedding_enabled: bool | None = None,
-        embedding_model: str | None = None,
-        context_pack_evidence_top_k: int | None = None,
-        chat_index_mode: str | None = None,
-        chat_attachment_ingestion_mode: str | None = None,
-        parameters: dict[str, Any] | None = None,
-        command_id: str | None = None,
-    ) -> dict:
-        self._require_token(auth_token)
-        user = self._resolve_actor_user()
-        with SessionLocal() as db:
-            resolved_workspace_id = self._resolve_workspace_for_project_create(explicit_workspace_id=workspace_id)
-            effective_member_user_ids = self._augment_project_member_user_ids_for_human_visibility(
-                db=db,
-                workspace_id=resolved_workspace_id,
-                actor_user=user,
-                member_user_ids=member_user_ids,
-            )
-            effective_command_id = command_id or self._fallback_project_template_create_command_id(
-                workspace_id=resolved_workspace_id,
-                template_key=template_key,
-                name=name,
-            )
-            payload = ProjectFromTemplateCreate(
-                workspace_id=resolved_workspace_id,
-                template_key=template_key,
-                name=name,
-                description=description,
-                custom_statuses=self._normalize_custom_statuses(custom_statuses),
-                member_user_ids=effective_member_user_ids,
-                embedding_enabled=embedding_enabled,
-                embedding_model=embedding_model,
-                context_pack_evidence_top_k=context_pack_evidence_top_k,
-                chat_index_mode=chat_index_mode,
-                chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
-                parameters=parameters or {},
-            )
-            return ProjectTemplateApplicationService(
-                db,
-                user,
-                command_id=effective_command_id,
-            ).create_project_from_template(payload)
+            return ProjectStarterApplicationService(db, user).get_setup_profile(project_id)
 
     def create_task(
         self,

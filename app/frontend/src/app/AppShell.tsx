@@ -1,5 +1,5 @@
 import React from 'react'
-import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   activateLicense,
   authChangePassword,
@@ -17,11 +17,15 @@ import {
   getClaudeAuthStatus,
   getCodexAuthStatus,
   getLicenseStatus,
+  getWorkspaceDoctorStatus,
+  resetWorkspaceDoctor,
   triggerLicenseAutoUpdate,
   linkTaskToSpecification,
   listAdminUsers,
   patchMyPreferences,
   resetAdminUserPassword,
+  runWorkspaceDoctor,
+  seedWorkspaceDoctor,
   startClaudeDeviceAuth,
   startCodexDeviceAuth,
   submitFeedback,
@@ -55,6 +59,7 @@ import {
   attachmentRefsToText,
   externalRefsToText,
   formatActivitySummary,
+  orderProjectStatuses,
   parseAttachmentRefsText,
   parseCommaTags,
   parseExternalRefsText,
@@ -82,6 +87,35 @@ const SEMANTIC_RELATIVE_VECTOR_FACTOR = 0.66
 const SEMANTIC_STRONG_VECTOR_SIMILARITY = 0.72
 const SEMANTIC_MIN_FALLBACK_VECTOR_SIMILARITY = 0.38
 const SEMANTIC_FALLBACK_MAX_ITEMS_WITHOUT_TOKEN_MATCH = 2
+
+type TeamAgentDescriptor = {
+  id: string
+  name: string
+  authority_role: string
+  executor_user_id: string
+}
+
+function parseTeamAgentsFromConfig(config: unknown): TeamAgentDescriptor[] {
+  if (!config || typeof config !== 'object') return []
+  const team = (config as Record<string, unknown>).team
+  if (!team || typeof team !== 'object') return []
+  const agents = (team as Record<string, unknown>).agents
+  if (!Array.isArray(agents)) return []
+  return agents
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null
+      const asObj = item as Record<string, unknown>
+      const id = String(asObj.id || '').trim()
+      if (!id) return null
+      return {
+        id,
+        name: String(asObj.name || '').trim(),
+        authority_role: String(asObj.authority_role || '').trim(),
+        executor_user_id: String(asObj.executor_user_id || '').trim(),
+      }
+    })
+    .filter((item): item is TeamAgentDescriptor => Boolean(item))
+}
 
 function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | 'xhigh' {
   const normalized = String(value || '').trim().toLowerCase()
@@ -164,14 +198,13 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const [quickDueDate, setQuickDueDate] = React.useState('')
   const [quickDueDateFocused, setQuickDueDateFocused] = React.useState(false)
   const {
-    projectName, setProjectName, projectTemplateKey, setProjectTemplateKey, projectDescription, setProjectDescription, projectCustomStatusesText, setProjectCustomStatusesText,
+    projectName, setProjectName, projectDescription, setProjectDescription, projectCustomStatusesText, setProjectCustomStatusesText,
     projectExternalRefsText, setProjectExternalRefsText, projectAttachmentRefsText, setProjectAttachmentRefsText,
     projectEmbeddingEnabled, setProjectEmbeddingEnabled, projectEmbeddingModel, setProjectEmbeddingModel,
     projectContextPackEvidenceTopKText, setProjectContextPackEvidenceTopKText,
     projectAutomationMaxParallelTasksText, setProjectAutomationMaxParallelTasksText,
     projectChatIndexMode, setProjectChatIndexMode, projectChatAttachmentIngestionMode, setProjectChatAttachmentIngestionMode,
     projectEventStormingEnabled, setProjectEventStormingEnabled,
-    projectTemplateParametersText, setProjectTemplateParametersText,
     projectDescriptionView, setProjectDescriptionView, showProjectCreateForm,
     setShowProjectCreateForm, showProjectEditForm, setShowProjectEditForm, editProjectName, setEditProjectName, editProjectDescription,
     setEditProjectDescription, editProjectCustomStatusesText, setEditProjectCustomStatusesText, editProjectExternalRefsText,
@@ -186,6 +219,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     createProjectMemberIds,
     setCreateProjectMemberIds, createProjectWorkspaceSkillIds, setCreateProjectWorkspaceSkillIds, toggleCreateProjectWorkspaceSkill,
     editProjectMemberIds, setEditProjectMemberIds, editProjectDescriptionView,
+    projectEditorHydratedProjectId, setProjectEditorHydratedProjectId,
+    projectEditorMembersHydratedProjectId, setProjectEditorMembersHydratedProjectId,
     setEditProjectDescriptionView, selectedProjectRuleId, setSelectedProjectRuleId, projectRuleTitle, setProjectRuleTitle,
     projectRuleBody, setProjectRuleBody, projectRuleView, setProjectRuleView, draftProjectRules, setDraftProjectRules,
     selectedDraftProjectRuleId, setSelectedDraftProjectRuleId, draftProjectRuleTitle, setDraftProjectRuleTitle,
@@ -589,6 +624,44 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     queryFn: () => listAdminUsers(userId, workspaceId),
     enabled: Boolean(workspaceId && canManageUsers && tab === 'settings'),
   })
+  const workspaceDoctorQuery = useQuery({
+    queryKey: ['workspace-doctor', userId, workspaceId],
+    queryFn: () => getWorkspaceDoctorStatus(userId, workspaceId),
+    enabled: Boolean(workspaceId && tab === 'settings'),
+  })
+  const seedWorkspaceDoctorMutation = useMutation({
+    mutationFn: () => seedWorkspaceDoctor(userId, workspaceId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['workspace-doctor', userId, workspaceId] })
+      await qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+      setUiError(null)
+    },
+    onError: (err: any) => {
+      setUiError(err?.message || 'Unable to seed ConstructOS Doctor')
+    },
+  })
+  const runWorkspaceDoctorMutation = useMutation({
+    mutationFn: () => runWorkspaceDoctor(userId, workspaceId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['workspace-doctor', userId, workspaceId] })
+      await qc.invalidateQueries({ queryKey: ['tasks', userId] })
+      setUiError(null)
+    },
+    onError: (err: any) => {
+      setUiError(err?.message || 'Unable to run ConstructOS Doctor')
+    },
+  })
+  const resetWorkspaceDoctorMutation = useMutation({
+    mutationFn: () => resetWorkspaceDoctor(userId, workspaceId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['workspace-doctor', userId, workspaceId] })
+      await qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+      setUiError(null)
+    },
+    onError: (err: any) => {
+      setUiError(err?.message || 'Unable to reset ConstructOS Doctor')
+    },
+  })
 
   const createAdminUserMutation = useMutation({
     mutationFn: (payload: { workspace_id: string; username: string; full_name?: string; role?: string }) =>
@@ -731,6 +804,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setCreateProjectMemberIds,
     showProjectEditForm,
     setEditProjectMemberIds,
+    setProjectEditorMembersHydratedProjectId,
   })
 
   const taskParams = useTaskQueryParams({
@@ -770,7 +844,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectRules,
     projectSkills,
     workspaceSkills,
-    projectTemplates,
     projectGraphOverview,
     projectGraphContextPack,
     projectGraphSubgraph,
@@ -1044,26 +1117,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     staleTime: 10_000,
   })
   const taskEditorTeamAgents = React.useMemo(() => {
-    const config = taskEditorTeamModeConfigQuery.data?.config
-    if (!config || typeof config !== 'object') return []
-    const team = (config as Record<string, unknown>).team
-    if (!team || typeof team !== 'object') return []
-    const agents = (team as Record<string, unknown>).agents
-    if (!Array.isArray(agents)) return []
-    return agents
-      .map((item) => {
-        if (!item || typeof item !== 'object') return null
-        const asObj = item as Record<string, unknown>
-        const id = String(asObj.id || '').trim()
-        if (!id) return null
-        return {
-          id,
-          name: String(asObj.name || '').trim(),
-          authority_role: String(asObj.authority_role || '').trim(),
-          executor_user_id: String(asObj.executor_user_id || '').trim(),
-        }
-      })
-      .filter(Boolean)
+    return parseTeamAgentsFromConfig(taskEditorTeamModeConfigQuery.data?.config)
   }, [taskEditorTeamModeConfigQuery.data?.config])
   const selectedNote = React.useMemo(() => {
     const fromList = notes.data?.items.find((n) => n.id === selectedNoteId) ?? null
@@ -1079,6 +1133,39 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const taskListItems = tasks.data?.items ?? []
   const noteListItems = notes.data?.items ?? []
   const specificationListItems = specifications.data?.items ?? []
+  const taskListProjectIdsWithAssignedAgents = React.useMemo(() => {
+    const projectIds = new Set<string>()
+    for (const task of taskListItems) {
+      const assignedAgentCode = String(task.assigned_agent_code || '').trim()
+      const projectId = String(task.project_id || '').trim()
+      if (!assignedAgentCode || !projectId) continue
+      projectIds.add(projectId)
+    }
+    return Array.from(projectIds).sort()
+  }, [taskListItems])
+  const taskListTeamModeConfigQueries = useQueries({
+    queries: taskListProjectIdsWithAssignedAgents.map((projectId) => ({
+      queryKey: ['project-plugin-config', userId, projectId, 'team_mode', 'tasks-panel'],
+      queryFn: () => getProjectPluginConfig(userId, projectId, 'team_mode'),
+      enabled: Boolean(userId && projectId),
+      staleTime: 10_000,
+    })),
+  })
+  const taskTeamAgentLabelsByProjectId = React.useMemo(() => {
+    const labelsByProjectId: Record<string, Record<string, string>> = {}
+    taskListProjectIdsWithAssignedAgents.forEach((projectId, index) => {
+      const agents = parseTeamAgentsFromConfig(taskListTeamModeConfigQueries[index]?.data?.config)
+      if (!agents.length) return
+      const labels: Record<string, string> = {}
+      for (const agent of agents) {
+        const label = String(agent.name || '').trim()
+        if (!label) continue
+        labels[agent.id] = label
+      }
+      if (Object.keys(labels).length > 0) labelsByProjectId[projectId] = labels
+    })
+    return labelsByProjectId
+  }, [taskListProjectIdsWithAssignedAgents, taskListTeamModeConfigQueries])
   const canLoadMoreTasks = tasksPageLimit < 500 && taskListItems.length < Number(tasks.data?.total ?? 0)
   const canLoadMoreNotes = notesPageLimit < 500 && noteListItems.length < Number(notes.data?.total ?? 0)
   const canLoadMoreSpecifications =
@@ -1131,17 +1218,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     const base = Array.isArray(project?.custom_statuses) && project.custom_statuses.length > 0
       ? project.custom_statuses
       : DEFAULT_PROJECT_STATUSES
-    const out: string[] = []
-    const seen = new Set<string>()
-    for (const raw of [...base, editStatus, selectedTask?.status]) {
-      const status = String(raw || '').trim()
-      if (!status) continue
-      const key = status.toLowerCase()
-      if (seen.has(key)) continue
-      seen.add(key)
-      out.push(status)
-    }
-    return out.length > 0 ? out : [...DEFAULT_PROJECT_STATUSES]
+    const ordered = orderProjectStatuses([...base, editStatus, selectedTask?.status])
+    return ordered.length > 0 ? ordered : [...DEFAULT_PROJECT_STATUSES]
   }, [bootstrap.data?.projects, editProjectId, editStatus, selectedProjectId, selectedTask?.project_id, selectedTask?.status])
   const specificationNameMap = React.useMemo(() => {
     const out: Record<string, string> = {}
@@ -1495,6 +1573,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectMembers: bootstrap.data?.project_members ?? [],
     selectedProjectId,
     showProjectEditForm,
+    projectEditorHydratedProjectId,
+    projectEditorMembersHydratedProjectId,
     selectedProject,
     editProjectName,
     editProjectDescription,
@@ -1826,7 +1906,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     reopenTaskMutation,
     archiveTaskMutation,
     restoreTaskMutation,
-    previewProjectFromTemplateMutation,
+    reviewTaskMutation,
     createProjectMutation,
     deleteProjectMutation,
     createProjectRuleMutation,
@@ -1920,7 +2000,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setEditStatus,
     setSelectedTaskId,
     projectName,
-    projectTemplateKey,
     projectDescription,
     projectCustomStatusesText,
     projectExternalRefsText,
@@ -1932,13 +2011,11 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectChatIndexMode,
     projectChatAttachmentIngestionMode,
     projectEventStormingEnabled,
-    projectTemplateParametersText,
     createProjectMemberIds,
     createProjectWorkspaceSkillIds,
     workspaceSkills,
     draftProjectRules,
     setProjectName,
-    setProjectTemplateKey,
     setProjectDescription,
     setProjectCustomStatusesText,
     setProjectExternalRefsText,
@@ -1950,7 +2027,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setProjectChatIndexMode,
     setProjectChatAttachmentIngestionMode,
     setProjectEventStormingEnabled,
-    setProjectTemplateParametersText,
     setProjectDescriptionView,
     setCreateProjectMemberIds,
     setCreateProjectWorkspaceSkillIds,
@@ -2069,6 +2145,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     selectedProject,
     setEditProjectName,
     setEditProjectDescription,
+    setProjectEditorHydratedProjectId,
     setEditProjectCustomStatusesText,
     setEditProjectExternalRefsText,
     setEditProjectAttachmentRefsText,
@@ -2088,7 +2165,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setProjectRuleView,
     showProjectCreateForm,
     projectDescription,
-    projectTemplateKey,
     projectCustomStatusesText,
     setProjectCustomStatusesText,
     setProjectDescriptionView,
@@ -2243,6 +2319,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       reorderTaskGroupsMutation,
       restoreTaskMutation,
       reopenTaskMutation,
+      reviewTaskMutation,
       completeTaskMutation,
       showProjectCreateForm,
       showProjectEditForm,
@@ -2258,9 +2335,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setShowProjectCreateForm,
       projectName,
       setProjectName,
-      projectTemplateKey,
-      setProjectTemplateKey,
-      previewProjectFromTemplateMutation,
       createProjectMutation,
       projectCustomStatusesText,
       setProjectCustomStatusesText,
@@ -2276,8 +2350,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setProjectChatAttachmentIngestionMode,
       projectEventStormingEnabled,
       setProjectEventStormingEnabled,
-      projectTemplateParametersText,
-      setProjectTemplateParametersText,
       projectDescriptionView,
       setProjectDescriptionView,
       projectDescriptionRef,
@@ -2306,6 +2378,10 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       projectRuleCountQueries,
       projectMemberCounts,
       canManageUsers,
+      workspaceDoctorQuery,
+      seedWorkspaceDoctorMutation,
+      runWorkspaceDoctorMutation,
+      resetWorkspaceDoctorMutation,
       adminUsers,
       adminUsersLoading: adminUsersQuery.isLoading,
       adminUsersError,
@@ -2347,7 +2423,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       projectRules,
       projectSkills,
       workspaceSkills,
-      projectTemplates,
       projectGraphOverview,
       projectGraphContextPack,
       projectGraphSubgraph,
@@ -2542,6 +2617,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       submitFeedbackPending: submitFeedbackMutation.isPending,
       projectNames,
       taskListItems,
+      taskTeamAgentLabelsByProjectId,
       canLoadMoreTasks,
       loadMoreTasks: () => setTasksPageLimit((prev) => Math.min(prev + 250, 500)),
       taskLookupItems: taskLookup.data?.items ?? [],

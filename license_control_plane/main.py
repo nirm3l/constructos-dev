@@ -2023,7 +2023,11 @@ def _serialize_installation(
     customer_email_override: str | None = None,
 ) -> dict[str, Any]:
     metadata = _load_metadata(installation.metadata_json)
-    activation_ip = str(metadata.get("activation_ip") or "").strip() or None
+    activation_ip = (
+        str(metadata.get("activation_ip") or "").strip()
+        or str(metadata.get("install_exchange_last_ip") or "").strip()
+        or None
+    )
     customer_email = (
         str(customer_email_override or "").strip().lower() or _installation_customer_email(metadata)
     )

@@ -14,6 +14,7 @@ def test_default_team_mode_config_has_resolved_human_owner() -> None:
     config = default_team_mode_config()
 
     assert config["oversight"]["human_owner_user_id"] == DEFAULT_USER_ID
+    assert config["review_policy"]["reviewer_user_id"] is None
 
 
 def test_semantic_status_key_maps_required_statuses() -> None:

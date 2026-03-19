@@ -1,9 +1,13 @@
 import type { ExternalRef } from '../types'
 
 export type ProjectGitRepositoryTarget = {
+  mode?: 'explorer' | 'diff'
   ref?: string
   path?: string
   pathKind?: 'file' | 'directory'
+  baseRef?: string
+  headRef?: string
+  reviewTaskId?: string
 }
 
 function normalizeText(value: string | undefined): string {

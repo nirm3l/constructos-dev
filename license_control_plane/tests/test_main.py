@@ -741,6 +741,31 @@ def test_startup_backfills_customer_email_for_existing_installations(tmp_path: P
         assert payload["installation"]["metadata"]["customer_email_backfilled"] is True
 
 
+def test_admin_installation_details_fallback_to_install_exchange_ip(tmp_path: Path):
+    with _build_client(tmp_path) as client:
+        register = client.post(
+            "/v1/installations/register",
+            headers={"Authorization": "Bearer control-plane-token"},
+            json={
+                "installation_id": "cp-install-exchange-ip",
+                "workspace_id": "workspace-install-exchange-ip",
+                "metadata": {
+                    "source": "test",
+                    "install_exchange_last_ip": "198.51.100.42",
+                },
+            },
+        )
+        assert register.status_code == 200
+
+        details = client.get(
+            "/v1/admin/installations/cp-install-exchange-ip",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert details.status_code == 200
+        payload = details.json()
+        assert payload["installation"]["activation_ip"] == "198.51.100.42"
+
+
 def test_admin_customer_subscription_update_applies_to_all_installations(tmp_path: Path):
     with _build_client(tmp_path) as client:
         for installation_id in ["cp-customer-a1", "cp-customer-a2"]:

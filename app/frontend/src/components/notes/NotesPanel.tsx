@@ -508,7 +508,6 @@ export function NotesPanel({
                   <DropdownMenu.Item
                     className="task-group-menu-item"
                     onSelect={(event) => {
-                      event.preventDefault()
                       event.stopPropagation()
                       openNotePreviewDialog(n)
                     }}

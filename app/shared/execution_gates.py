@@ -74,6 +74,11 @@ EXECUTION_GATE_DEFINITIONS: dict[str, dict[str, Any]] = {
         "blocking": True,
         "description": "Lead deploy completed without a healthy runtime on the configured deploy target.",
     },
+    "lead_deploy_topology_reconciliation_required": {
+        "label": "Deploy topology reconciliation",
+        "blocking": True,
+        "description": "Lead found a deploy topology or service-identity mismatch that must be reconciled by Developer before deploy can continue.",
+    },
     "qa_handoff_ready": {
         "label": "Lead handoff",
         "blocking": True,

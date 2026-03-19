@@ -194,6 +194,7 @@ def review_resolution_transition(*, action: str) -> dict[str, Any]:
 
 def lead_deploy_success_transition() -> dict[str, Any]:
     return {
+        "status": REQUIRED_SEMANTIC_STATUSES["active"],
         "phase": "qa_validation",
         "next_role": "QA",
     }

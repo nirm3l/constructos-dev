@@ -19,6 +19,7 @@ export function useProjectEditorEffects(c: any) {
   React.useEffect(() => {
     if (!c.selectedProject) {
       if (c.selectedProjectId) return
+      c.setProjectEditorHydratedProjectId('')
       c.setEditProjectName('')
       c.setEditProjectDescription('')
       c.setEditProjectCustomStatusesText('')
@@ -40,6 +41,7 @@ export function useProjectEditorEffects(c: any) {
       c.setProjectRuleView('split')
       return
     }
+    c.setProjectEditorHydratedProjectId('')
     c.setEditProjectName(c.selectedProject.name ?? '')
     c.setEditProjectDescription(c.selectedProject.description ?? '')
     c.setEditProjectCustomStatusesText(projectStatusesToText(c.selectedProject.custom_statuses))
@@ -64,6 +66,7 @@ export function useProjectEditorEffects(c: any) {
     c.setProjectRuleTitle('')
     c.setProjectRuleBody('')
     c.setProjectRuleView('split')
+    c.setProjectEditorHydratedProjectId(String(c.selectedProject.id || ''))
   }, [c.selectedProject?.id, c.selectedProjectId, c.showProjectEditForm, c.setShowProjectEditForm])
 
   React.useEffect(() => {
@@ -76,10 +79,9 @@ export function useProjectEditorEffects(c: any) {
 
   React.useEffect(() => {
     if (!c.showProjectCreateForm) return
-    if (String(c.projectTemplateKey || '').trim()) return
     if (String(c.projectCustomStatusesText || '').trim()) return
     c.setProjectCustomStatusesText(projectStatusesToText(null))
-  }, [c.projectCustomStatusesText, c.projectTemplateKey, c.setProjectCustomStatusesText, c.showProjectCreateForm])
+  }, [c.projectCustomStatusesText, c.setProjectCustomStatusesText, c.showProjectCreateForm])
 
   React.useEffect(() => {
     if (!c.selectedProjectRule) return

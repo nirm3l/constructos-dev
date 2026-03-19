@@ -13,6 +13,55 @@ import {
   runTaskAutomationStream,
   runTaskWithCodex,
 } from '../../api'
+import { attachmentRefsToText, externalRefsToText, toLocalDateTimeInput } from '../../utils/ui'
+import {
+  deriveInstruction,
+  extractEnabledScheduleTrigger,
+  extractEnabledStatusTrigger,
+  listToCsv,
+  normalizeExecutionTriggers,
+  normalizeScheduleRunOnStatuses,
+  parseRecurringRule,
+} from '../../utils/taskAutomation'
+
+function hydrateTaskEditorFromTask(c: any, task: any): void {
+  if (!task) return
+  c.setEditTitle?.(task.title ?? '')
+  c.setEditStatus?.(task.status ?? 'To Do')
+  c.setEditDescription?.(task.description ?? '')
+  c.setEditPriority?.(task.priority ?? 'Med')
+  c.setEditDueDate?.(toLocalDateTimeInput(task.due_date))
+  c.setEditProjectId?.(task.project_id ?? '')
+  c.setEditTaskGroupId?.(task.task_group_id ?? '')
+  c.setEditAssigneeId?.(task.assignee_id ?? '')
+  c.setEditAssignedAgentCode?.(task.assigned_agent_code ?? '')
+  c.setEditTaskTags?.(task.labels ?? [])
+  c.setEditTaskExternalRefsText?.(externalRefsToText(task.external_refs))
+  c.setEditTaskAttachmentRefsText?.(attachmentRefsToText(task.attachment_refs))
+  c.setEditTaskType?.((task.task_type ?? 'manual') as 'manual' | 'scheduled_instruction')
+  c.setEditScheduledAtUtc?.(toLocalDateTimeInput(task.scheduled_at_utc))
+  c.setEditScheduleTimezone?.(task.schedule_timezone ?? (c.currentUserTimezone ?? 'UTC'))
+  c.setEditScheduledInstruction?.(deriveInstruction(task))
+  const parsedRecurring = parseRecurringRule(task.recurring_rule)
+  c.setEditRecurringEvery?.(parsedRecurring.every)
+  c.setEditRecurringUnit?.(parsedRecurring.unit)
+  const triggers = normalizeExecutionTriggers(task.execution_triggers)
+  const scheduleTrigger = extractEnabledScheduleTrigger(triggers)
+  const selfTrigger = extractEnabledStatusTrigger(triggers, 'self')
+  const externalTrigger = extractEnabledStatusTrigger(triggers, 'external')
+  c.setEditScheduleRunOnStatuses?.(normalizeScheduleRunOnStatuses(scheduleTrigger?.run_on_statuses))
+  c.setEditStatusTriggerSelfEnabled?.(Boolean(selfTrigger))
+  c.setEditStatusTriggerSelfFromStatusesText?.(listToCsv(selfTrigger?.from_statuses))
+  c.setEditStatusTriggerSelfToStatusesText?.(listToCsv(selfTrigger?.to_statuses))
+  c.setEditStatusTriggerExternalEnabled?.(Boolean(externalTrigger))
+  c.setEditStatusTriggerExternalMatchMode?.(externalTrigger?.match_mode === 'all' ? 'all' : 'any')
+  c.setEditStatusTriggerExternalTaskIdsText?.(listToCsv(externalTrigger?.selector?.task_ids))
+  c.setEditStatusTriggerExternalFromStatusesText?.(listToCsv(externalTrigger?.from_statuses))
+  c.setEditStatusTriggerExternalToStatusesText?.(listToCsv(externalTrigger?.to_statuses))
+  c.setTaskEditorBaselineTask?.(JSON.parse(JSON.stringify(task)))
+  c.setTaskEditorHydratedTaskId?.(task.id ?? null)
+  c.setTaskEditorTouched?.(false)
+}
 
 export function useTaskMutations(c: any) {
   const resetQuickTaskComposer = (mode: 'full' | 'title-only' = 'full') => {
@@ -161,7 +210,10 @@ export function useTaskMutations(c: any) {
     mutationFn: (id: string) => completeTask(c.userId, id),
     onSuccess: async (task) => {
       c.setUiError(null)
-      if (c.selectedTaskId === task.id) c.setEditStatus(task.status)
+      c.setTaskEditorError?.(null)
+      if (c.selectedTaskId === task.id) {
+        hydrateTaskEditorFromTask(c, task)
+      }
       await c.invalidateAll()
     },
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Complete failed')
@@ -172,17 +224,27 @@ export function useTaskMutations(c: any) {
       reviewTask(c.userId, taskId, { action, comment }),
     onSuccess: async (task) => {
       c.setUiError(null)
-      if (c.selectedTaskId === task.id) c.setEditStatus(task.status)
+      c.setTaskEditorError?.(null)
+      if (c.selectedTaskId === task.id) {
+        hydrateTaskEditorFromTask(c, task)
+      }
       await c.invalidateAll()
     },
-    onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Review action failed')
+    onError: (err) => {
+      const message = err instanceof Error ? err.message : 'Review action failed'
+      c.setUiError(message)
+      c.setTaskEditorError?.(message)
+    }
   })
 
   const reopenTaskMutation = useMutation({
     mutationFn: (id: string) => reopenTask(c.userId, id),
     onSuccess: async (task) => {
       c.setUiError(null)
-      if (c.selectedTaskId === task.id) c.setEditStatus(task.status)
+      c.setTaskEditorError?.(null)
+      if (c.selectedTaskId === task.id) {
+        hydrateTaskEditorFromTask(c, task)
+      }
       await c.invalidateAll()
     },
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Reopen failed')

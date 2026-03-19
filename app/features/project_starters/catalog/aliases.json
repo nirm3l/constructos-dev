@@ -1,0 +1,10 @@
+{
+  "ddd_product_build": "ddd_system",
+  "ddd_product": "ddd_system",
+  "mobile_browser_game_development": "web_game",
+  "mobile_browser_game": "web_game",
+  "browser_game": "web_game",
+  "mobile_game": "web_game",
+  "ddd": "ddd_system",
+  "domain_driven_design": "ddd_system"
+}

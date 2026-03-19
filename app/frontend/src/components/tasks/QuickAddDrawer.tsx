@@ -160,6 +160,8 @@ function QuickAddTooltip({
 }
 
 export function QuickAddDrawer({ state }: { state: any }) {
+  const [quickAddInitialTaskType, setQuickAddInitialTaskType] = React.useState<QuickTaskType>('manual')
+  const previousQuickAddOpenRef = React.useRef(false)
   const [showValidation, setShowValidation] = React.useState(false)
   const [confirmDiscardOpen, setConfirmDiscardOpen] = React.useState(false)
   const localTimezone = React.useMemo(() => detectLocalTimezone(), [])
@@ -273,6 +275,17 @@ export function QuickAddDrawer({ state }: { state: any }) {
         ? 'Low'
         : 'Med'
 
+  React.useEffect(() => {
+    const isOpen = Boolean(state.showQuickAdd)
+    if (isOpen && !previousQuickAddOpenRef.current) {
+      setQuickAddInitialTaskType(quickTaskType)
+    }
+    if (!isOpen && previousQuickAddOpenRef.current) {
+      setQuickAddInitialTaskType('manual')
+    }
+    previousQuickAddOpenRef.current = isOpen
+  }, [quickTaskType, state.showQuickAdd])
+
   const hasUnsavedChanges =
     String(state.taskTitle || '').trim().length > 0 ||
     String(state.quickDueDate || '').trim().length > 0 ||
@@ -280,7 +293,7 @@ export function QuickAddDrawer({ state }: { state: any }) {
     String(state.quickTaskAssigneeId || '').trim().length > 0 ||
     (Array.isArray(state.quickTaskTags) && state.quickTaskTags.length > 0) ||
     quickTaskPriority !== 'Med' ||
-    quickTaskType !== 'manual' ||
+    quickTaskType !== quickAddInitialTaskType ||
     String(state.quickTaskScheduledInstruction || '').trim().length > 0
 
   const closeQuickAddImmediately = React.useCallback(() => {

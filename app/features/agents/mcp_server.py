@@ -75,8 +75,8 @@ CREATE_NOTE_TOOL_DESCRIPTION = (
 )
 
 CREATE_PROJECT_TOOL_DESCRIPTION = (
-    "Create a project in a workspace for manual/custom setup (no template). "
-    "Use when required fields are known and template seeding is not requested. "
+    "Create a project in a workspace for manual/custom setup without starter binding. "
+    "Use when required fields are known and starter-driven setup is not being used. "
     "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
     "chat_attachment_ingestion_mode=METADATA_ONLY. "
     "custom_statuses must be an array of strings (for example [\"To Do\",\"In Progress\",\"In Review\",\"Awaiting Decision\",\"Blocked\",\"Completed\"]). "
@@ -99,28 +99,16 @@ UPDATE_PROJECT_RULE_TOOL_DESCRIPTION = (
     "If patch.body is sent as an object it will be JSON-serialized."
 )
 
-LIST_PROJECT_TEMPLATES_TOOL_DESCRIPTION = (
-    "List available project templates for template-based project setup."
+LIST_PROJECT_STARTERS_TOOL_DESCRIPTION = (
+    "List available project starters and starter-independent facets for chat-first project setup."
 )
 
-GET_PROJECT_TEMPLATE_TOOL_DESCRIPTION = (
-    "Get one project template definition by key, including expected parameters and seeded entities."
+GET_PROJECT_STARTER_TOOL_DESCRIPTION = (
+    "Get one project starter definition by key, including positioning, retrieval hints, and artifact counts."
 )
 
-PREVIEW_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION = (
-    "Preview project creation from a template without writing data. "
-    "Use after parameters are known to validate what would be created. "
-    "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
-    "chat_attachment_ingestion_mode=METADATA_ONLY. "
-    "custom_statuses must be an array of strings when provided."
-)
-
-CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION = (
-    "Create a project and seed specifications/tasks/rules from a project template. "
-    "Recommended flow: list_project_templates -> get_project_template -> preview_project_from_template -> create_project_from_template. "
-    "Chat default profile: embedding_enabled=true, chat_index_mode=KG_AND_VECTOR, "
-    "chat_attachment_ingestion_mode=METADATA_ONLY. "
-    "custom_statuses must be an array of strings when provided."
+GET_PROJECT_SETUP_PROFILE_TOOL_DESCRIPTION = (
+    "Read the persisted starter-driven setup profile for a project."
 )
 
 VERIFY_TEAM_MODE_WORKFLOW_TOOL_DESCRIPTION = (
@@ -1032,6 +1020,8 @@ def create_mcp():
         def setup_project_orchestration(
             name: str | None = None,
             short_description: str = "",
+            primary_starter_key: str | None = None,
+            facet_keys: list[str] | None = None,
             project_id: str | None = None,
             workspace_id: str | None = None,
             auth_token: str | None = None,
@@ -1051,6 +1041,8 @@ def create_mcp():
             return service.setup_project_orchestration(
                 name=name,
                 short_description=short_description,
+                primary_starter_key=primary_starter_key,
+                facet_keys=facet_keys,
                 project_id=project_id,
                 workspace_id=workspace_id,
                 auth_token=auth_token,
@@ -1082,91 +1074,31 @@ def create_mcp():
             command_id=command_id,
         )
 
-    @mcp.tool(description=LIST_PROJECT_TEMPLATES_TOOL_DESCRIPTION)
-    def list_project_templates(
+    @mcp.tool(description=LIST_PROJECT_STARTERS_TOOL_DESCRIPTION)
+    def list_project_starters(
         auth_token: str | None = None,
     ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
-        return service.list_project_templates(auth_token=auth_token)
+        return service.list_project_starters(auth_token=auth_token)
 
-    @mcp.tool(description=GET_PROJECT_TEMPLATE_TOOL_DESCRIPTION)
-    def get_project_template(
-        template_key: str,
+    @mcp.tool(description=GET_PROJECT_STARTER_TOOL_DESCRIPTION)
+    def get_project_starter(
+        starter_key: str,
         auth_token: str | None = None,
     ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
-        return service.get_project_template(
-            template_key=template_key,
+        return service.get_project_starter(
+            starter_key=starter_key,
             auth_token=auth_token,
         )
 
-    @mcp.tool(description=PREVIEW_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION)
-    def preview_project_from_template(
-        template_key: str,
-        workspace_id: str | None = None,
+    @mcp.tool(description=GET_PROJECT_SETUP_PROFILE_TOOL_DESCRIPTION)
+    def get_project_setup_profile(
+        project_id: str,
         auth_token: str | None = None,
-        name: str = "",
-        description: str = "",
-        custom_statuses: list[str] | str | None = None,
-        member_user_ids: list[str] | None = None,
-        embedding_enabled: bool | None = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED,
-        embedding_model: str | None = None,
-        context_pack_evidence_top_k: int | None = None,
-        chat_index_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE,
-        chat_attachment_ingestion_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE,
-        parameters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         auth_token = auth_token or default_tool_token
-        return service.preview_project_from_template(
-            template_key=template_key,
-            workspace_id=workspace_id,
-            auth_token=auth_token,
-            name=name,
-            description=description,
-            custom_statuses=custom_statuses,
-            member_user_ids=member_user_ids,
-            embedding_enabled=embedding_enabled,
-            embedding_model=embedding_model,
-            context_pack_evidence_top_k=context_pack_evidence_top_k,
-            chat_index_mode=chat_index_mode,
-            chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
-            parameters=parameters,
-        )
-
-    @mcp.tool(description=CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION)
-    def create_project_from_template(
-        template_key: str,
-        name: str,
-        workspace_id: str | None = None,
-        auth_token: str | None = None,
-        description: str = "",
-        custom_statuses: list[str] | str | None = None,
-        member_user_ids: list[str] | None = None,
-        embedding_enabled: bool | None = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED,
-        embedding_model: str | None = None,
-        context_pack_evidence_top_k: int | None = None,
-        chat_index_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE,
-        chat_attachment_ingestion_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE,
-        parameters: dict[str, Any] | None = None,
-        command_id: str | None = None,
-    ) -> dict[str, Any]:
-        auth_token = auth_token or default_tool_token
-        return service.create_project_from_template(
-            template_key=template_key,
-            name=name,
-            workspace_id=workspace_id,
-            auth_token=auth_token,
-            description=description,
-            custom_statuses=custom_statuses,
-            member_user_ids=member_user_ids,
-            embedding_enabled=embedding_enabled,
-            embedding_model=embedding_model,
-            context_pack_evidence_top_k=context_pack_evidence_top_k,
-            chat_index_mode=chat_index_mode,
-            chat_attachment_ingestion_mode=chat_attachment_ingestion_mode,
-            parameters=parameters,
-            command_id=command_id,
-        )
+        return service.get_project_setup_profile(project_id=project_id, auth_token=auth_token)
 
     if plugin_enabled("team_mode"):
         @mcp.tool(description=VERIFY_TEAM_MODE_WORKFLOW_TOOL_DESCRIPTION)

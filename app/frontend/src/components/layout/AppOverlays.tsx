@@ -67,6 +67,7 @@ export function AppOverlays({ state }: { state: any }) {
           copyShareLink: state.copyShareLink,
           openNote: state.openNote,
           reopenTaskMutation: state.reopenTaskMutation,
+          reviewTaskMutation: state.reviewTaskMutation,
           completeTaskMutation: state.completeTaskMutation,
           restoreTaskMutation: state.restoreTaskMutation,
           archiveTaskMutation: state.archiveTaskMutation,

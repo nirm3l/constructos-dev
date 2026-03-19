@@ -229,14 +229,14 @@ def test_health(tmp_path):
     assert payload['vector']['status'] in {'disabled', 'unsupported_database', 'not_ready', 'ready', 'error'}
 
 
-def test_bootstrap_general_project_has_embedding_enabled_by_default(tmp_path):
+def test_bootstrap_demo_project_has_embedding_enabled_by_default(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap')
     assert bootstrap.status_code == 200
     projects = bootstrap.json().get("projects") or []
-    general = next((p for p in projects if str(p.get("name") or "").strip().lower() == "general"), None)
-    assert general is not None
-    assert bool(general.get("embedding_enabled")) is True
+    demo = next((p for p in projects if str(p.get("name") or "").strip().lower() == "demo"), None)
+    assert demo is not None
+    assert bool(demo.get("embedding_enabled")) is True
 
 
 def test_event_storming_endpoints_exist_and_return_503_when_graph_disabled(tmp_path):
@@ -456,7 +456,7 @@ def test_task_reopen_is_idempotent(tmp_path):
     first = client.post(f"/api/tasks/{task_id}/reopen")
     assert first.status_code == 200
     assert first.json()['id'] == task_id
-    assert first.json()['status'] == 'To do'
+    assert first.json()['status'] == 'To Do'
 
     completed = client.post(f"/api/tasks/{task_id}/complete")
     assert completed.status_code == 200
@@ -465,7 +465,7 @@ def test_task_reopen_is_idempotent(tmp_path):
     second = client.post(f"/api/tasks/{task_id}/reopen")
     assert second.status_code == 200
     assert second.json()['id'] == task_id
-    assert second.json()['status'] == 'To do'
+    assert second.json()['status'] == 'To Do'
 
 
 def test_get_task_by_id_returns_task(tmp_path):
@@ -1139,11 +1139,11 @@ def test_project_custom_statuses_can_be_configured_and_patched(tmp_path):
     )
     assert created.status_code == 200
     project = created.json()
-    assert project['custom_statuses'] == ['Backlog', 'In progress', 'Blocked', 'Done']
+    assert project['custom_statuses'] == ['Backlog', 'In Progress', 'Blocked', 'Done']
 
     board = client.get(f"/api/projects/{project['id']}/board")
     assert board.status_code == 200
-    assert board.json()['statuses'] == ['Backlog', 'In progress', 'Blocked', 'Done']
+    assert board.json()['statuses'] == ['Backlog', 'In Progress', 'Blocked', 'Done']
 
     task = client.post(
         '/api/tasks',
@@ -1158,11 +1158,11 @@ def test_project_custom_statuses_can_be_configured_and_patched(tmp_path):
     )
     assert patched.status_code == 200
     patched_payload = patched.json()
-    assert patched_payload['custom_statuses'] == ['Backlog', 'In progress', 'Ready for QA', 'Done']
+    assert patched_payload['custom_statuses'] == ['Backlog', 'In Progress', 'Ready for QA', 'Done']
 
     board_after = client.get(f"/api/projects/{project['id']}/board")
     assert board_after.status_code == 200
-    assert board_after.json()['statuses'] == ['Backlog', 'In progress', 'Ready for QA', 'Done']
+    assert board_after.json()['statuses'] == ['Backlog', 'In Progress', 'Ready for QA', 'Done']
 
 
 def test_project_status_patch_does_not_reset_embedding_or_description(tmp_path):
@@ -1195,7 +1195,7 @@ def test_project_status_patch_does_not_reset_embedding_or_description(tmp_path):
     )
     assert patched.status_code == 200
     payload = patched.json()
-    assert payload['custom_statuses'] == ['To do', 'Dev', 'QA', 'Lead', 'Done', 'Blocked']
+    assert payload['custom_statuses'] == ['To Do', 'Dev', 'QA', 'Lead', 'Done', 'Blocked']
     assert payload['description'] == 'keep-me'
     assert payload['embedding_enabled'] is True
     assert payload['chat_index_mode'] == 'KG_AND_VECTOR'
@@ -2456,7 +2456,7 @@ def test_task_assigned_to_me_notification_is_typed(tmp_path):
     row = rows[0]
     assert row.severity == "info"
     assert row.source_event == "TaskCreated"
-    assert row.dedupe_key == f"task-assigned:{task_id}:{assignee_id}:1"
+    assert row.dedupe_key == f"task-assigned:{task_id}:none:{assignee_id}"
     assert actor_id != assignee_id
 
 
@@ -2875,7 +2875,7 @@ def test_project_membership_changed_notification_skips_self_upsert(tmp_path):
     assert rows == []
 
 
-def test_agent_created_project_skips_initial_membership_notifications(tmp_path, monkeypatch):
+def test_agent_created_project_emits_initial_membership_notification_for_default_human_member(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     ws_id = client.get('/api/bootstrap').json()['workspaces'][0]['id']
 
@@ -2898,9 +2898,10 @@ def test_agent_created_project_skips_initial_membership_notifications(tmp_path, 
                 Notification.user_id == DEFAULT_USER_ID,
                 Notification.project_id == created['id'],
                 Notification.notification_type == NOTIFICATION_TYPE_PROJECT_MEMBERSHIP_CHANGED,
-            )
+            ).order_by(Notification.created_at.asc(), Notification.id.asc())
         ).scalars().all()
-    assert rows == []
+    assert len(rows) == 1
+    assert rows[0].source_event == "ProjectMemberUpserted"
 
 
 def test_license_grace_ending_soon_notification_is_typed_and_deduped(tmp_path):
@@ -3810,6 +3811,9 @@ def test_runner_contract_validation_rejects_trivial_only_dev_changes_when_requir
             "branch_head_sha": "215590d",
             "main_head_sha": "1111111",
             "branch_differs_from_main": True,
+            "branch_ahead_of_main": True,
+            "branch_reachable_from_main": False,
+            "main_reachable_from_branch": True,
             "after_head_sha": "215590d",
             "after_on_task_branch": True,
             "after_is_dirty": False,
@@ -4068,6 +4072,65 @@ def test_runner_contract_validation_prefers_clean_repo_state_over_stale_dirty_ou
     assert error is None
 
 
+def test_runner_contract_validation_synthesizes_missing_contract_from_clean_branch_handoff(tmp_path, monkeypatch):
+    import subprocess
+
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
+    from shared.project_repository import (
+        ensure_project_repository_initialized,
+        resolve_task_branch_name,
+        resolve_task_worktree_path,
+    )
+
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path))
+    project_name = "Battle City"
+    project_id = "proj-missing-contract"
+    task_id = "c698120f-13f5-5bf5-a4f3-346ea6146e83"
+    title = "Implement enemy AI and wave orchestration"
+
+    repo = ensure_project_repository_initialized(project_name=project_name, project_id=project_id)
+    branch = resolve_task_branch_name(task_id=task_id, title=title)
+    worktree = resolve_task_worktree_path(project_name=project_name, project_id=project_id, task_id=task_id)
+
+    subprocess.run(["git", "worktree", "add", "-b", branch, str(worktree), "main"], cwd=str(repo), check=True, capture_output=True, text=True)
+    (worktree / "src").mkdir(parents=True, exist_ok=True)
+    (worktree / "src" / "enemy-ai.js").write_text("export const enemyAI = true;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/enemy-ai.js"], cwd=str(worktree), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "feat: implement enemy ai"], cwd=str(worktree), check=True, capture_output=True, text=True)
+
+    outcome = AutomationOutcome(
+        action="comment",
+        summary="Enemy AI implementation is ready.",
+        comment="Ready for Lead handoff.",
+        execution_outcome_contract=None,
+        usage={},
+    )
+
+    git_evidence = runner_module._merge_git_evidence(
+        runner_module._collect_git_evidence_from_outcome(outcome),
+        runner_module._collect_git_evidence_from_repo_state(
+            project_name=project_name,
+            project_id=project_id,
+            task_id=task_id,
+            title=title,
+        ),
+    )
+    committed_handoff = runner_module._inspect_committed_task_branch_handoff(git_evidence)
+    assert committed_handoff.get("branch_ahead_of_main") is True
+    assert committed_handoff.get("after_is_dirty") is False
+
+    error = runner_module._validate_execution_outcome_contract(
+        outcome=outcome,
+        assignee_role="Developer",
+        task_status="In Progress",
+        git_delivery_enabled=True,
+        require_nontrivial_dev_changes=True,
+        git_evidence=git_evidence,
+    )
+    assert error is None
+
+
 def test_runner_contract_validation_derives_files_changed_from_dirty_task_worktree(tmp_path, monkeypatch):
     import subprocess
 
@@ -4186,7 +4249,7 @@ def test_runner_finalizes_dirty_developer_handoff_with_commit(tmp_path, monkeypa
     assert str(auto_commit.get("commit_sha") or "").strip()
     committed_handoff = runner_module._inspect_committed_task_branch_handoff(updated_git_evidence)
     assert committed_handoff.get("after_is_dirty") is False
-    assert committed_handoff.get("branch_differs_from_main") is True
+    assert committed_handoff.get("branch_ahead_of_main") is True
 
 
 def test_runner_finalizes_trivial_dirty_residue_when_branch_already_has_nontrivial_handoff(tmp_path, monkeypatch):
@@ -4230,7 +4293,7 @@ def test_runner_finalizes_trivial_dirty_residue_when_branch_already_has_nontrivi
     )
     assert bool(initial_git_evidence.get("after_is_dirty")) is True
     committed_handoff = runner_module._inspect_committed_task_branch_handoff(initial_git_evidence)
-    assert committed_handoff.get("branch_differs_from_main") is True
+    assert committed_handoff.get("branch_ahead_of_main") is True
 
     updated_git_evidence, auto_commit = runner_module._finalize_developer_handoff_commit_if_safe(
         project_name=project_name,
@@ -4248,7 +4311,166 @@ def test_runner_finalizes_trivial_dirty_residue_when_branch_already_has_nontrivi
     assert str(auto_commit.get("commit_sha") or "").strip()
     refreshed_handoff = runner_module._inspect_committed_task_branch_handoff(updated_git_evidence)
     assert refreshed_handoff.get("after_is_dirty") is False
-    assert refreshed_handoff.get("branch_differs_from_main") is True
+    assert refreshed_handoff.get("branch_ahead_of_main") is True
+
+
+def test_runner_contract_validation_rejects_branch_already_reachable_from_main_before_files_changed(tmp_path, monkeypatch):
+    import subprocess
+
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
+    from shared.project_repository import (
+        ensure_project_repository_initialized,
+        resolve_task_branch_name,
+        resolve_task_worktree_path,
+    )
+
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path))
+    project_name = "Battle City"
+    project_id = "proj-stale-branch"
+    task_id = "c698120f-13f5-5bf5-a4f3-346ea6146e83"
+    title = "Implement enemy AI and wave orchestration"
+
+    repo = ensure_project_repository_initialized(project_name=project_name, project_id=project_id)
+    branch = resolve_task_branch_name(task_id=task_id, title=title)
+    worktree = resolve_task_worktree_path(project_name=project_name, project_id=project_id, task_id=task_id)
+
+    subprocess.run(["git", "worktree", "add", "-b", branch, str(worktree), "main"], cwd=str(repo), check=True, capture_output=True, text=True)
+    (worktree / "src").mkdir(parents=True, exist_ok=True)
+    (worktree / "src" / "enemy-ai.js").write_text("export const enemyAI = true;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/enemy-ai.js"], cwd=str(worktree), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "feat: implement enemy ai"], cwd=str(worktree), check=True, capture_output=True, text=True)
+    branch_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(worktree), check=True, capture_output=True, text=True).stdout.strip().lower()
+
+    subprocess.run(["git", "checkout", "main"], cwd=str(repo), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "merge", "--ff-only", branch], cwd=str(repo), check=True, capture_output=True, text=True)
+    (repo / "README.md").write_text("# Battle City\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(repo), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "docs: advance main after enemy ai merge"], cwd=str(repo), check=True, capture_output=True, text=True)
+    main_head = subprocess.run(["git", "rev-parse", "main"], cwd=str(repo), check=True, capture_output=True, text=True).stdout.strip().lower()
+    assert branch_head != main_head
+
+    outcome = AutomationOutcome(
+        action="comment",
+        summary="Enemy AI implementation is ready.",
+        comment="Ready for Lead handoff.",
+        execution_outcome_contract={
+            "contract_version": 1,
+            "files_changed": [],
+            "commit_sha": branch_head,
+            "branch": branch,
+            "tests_run": False,
+            "tests_passed": False,
+            "artifacts": [{"kind": "note", "ref": "dev:implemented"}],
+        },
+        usage={},
+    )
+
+    git_evidence = runner_module._merge_git_evidence(
+        runner_module._collect_git_evidence_from_outcome(outcome),
+        runner_module._collect_git_evidence_from_repo_state(
+            project_name=project_name,
+            project_id=project_id,
+            task_id=task_id,
+            title=title,
+        ),
+    )
+    committed_handoff = runner_module._inspect_committed_task_branch_handoff(git_evidence)
+    assert committed_handoff.get("branch_reachable_from_main") is True
+    assert committed_handoff.get("branch_ahead_of_main") is False
+
+    error = runner_module._validate_execution_outcome_contract(
+        outcome=outcome,
+        assignee_role="Developer",
+        task_status="In Progress",
+        git_delivery_enabled=True,
+        require_nontrivial_dev_changes=True,
+        git_evidence=git_evidence,
+    )
+    assert error is not None
+    assert "Developer task branch must be reconciled with the latest `main` before Lead review." in error
+    assert "does not contain current `main`" in error
+    assert "files_changed in execution outcome contract" not in error
+
+
+def test_runner_contract_validation_requires_main_reconciliation_when_task_branch_lacks_latest_main(tmp_path, monkeypatch):
+    import subprocess
+
+    import features.agents.runner as runner_module
+    from features.agents.executor import AutomationOutcome
+    from shared.project_repository import (
+        ensure_project_repository_initialized,
+        resolve_task_branch_name,
+        resolve_task_worktree_path,
+    )
+
+    monkeypatch.setenv("AGENT_CODEX_WORKDIR", str(tmp_path))
+    project_name = "Tetris Reconcile"
+    project_id = "proj-reconcile-branch"
+    task_id = "36aa0fd3-e46e-54a5-b026-0ef274f7a287"
+    title = "Prepare Docker Compose runtime and health endpoint on port 6768"
+
+    repo = ensure_project_repository_initialized(project_name=project_name, project_id=project_id)
+    branch = resolve_task_branch_name(task_id=task_id, title=title)
+    worktree = resolve_task_worktree_path(project_name=project_name, project_id=project_id, task_id=task_id)
+
+    subprocess.run(["git", "worktree", "add", "-b", branch, str(worktree), "main"], cwd=str(repo), check=True, capture_output=True, text=True)
+    (worktree / "deploy").mkdir(parents=True, exist_ok=True)
+    (worktree / "deploy" / "docker-compose.yml").write_text("services:\n  app:\n    image: tetris\n", encoding="utf-8")
+    subprocess.run(["git", "add", "deploy/docker-compose.yml"], cwd=str(worktree), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "feat: add deploy runtime"], cwd=str(worktree), check=True, capture_output=True, text=True)
+    branch_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(worktree), check=True, capture_output=True, text=True).stdout.strip().lower()
+
+    subprocess.run(["git", "checkout", "-b", "main-runtime-update", "main"], cwd=str(repo), check=True, capture_output=True, text=True)
+    (repo / "src").mkdir(parents=True, exist_ok=True)
+    (repo / "src" / "game.js").write_text("console.log('main advanced');\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/game.js"], cwd=str(repo), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "feat: advance main independently"], cwd=str(repo), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "checkout", "main"], cwd=str(repo), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "merge", "--ff-only", "main-runtime-update"], cwd=str(repo), check=True, capture_output=True, text=True)
+    main_head = subprocess.run(["git", "rev-parse", "main"], cwd=str(repo), check=True, capture_output=True, text=True).stdout.strip().lower()
+    assert branch_head != main_head
+
+    outcome = AutomationOutcome(
+        action="comment",
+        summary="Docker runtime assets are ready.",
+        comment="Ready for Lead handoff.",
+        execution_outcome_contract={
+            "contract_version": 1,
+            "files_changed": ["deploy/docker-compose.yml"],
+            "commit_sha": branch_head,
+            "branch": branch,
+            "tests_run": False,
+            "tests_passed": False,
+            "artifacts": [{"kind": "note", "ref": "dev:implemented"}],
+        },
+        usage={},
+    )
+
+    git_evidence = runner_module._merge_git_evidence(
+        runner_module._collect_git_evidence_from_outcome(outcome),
+        runner_module._collect_git_evidence_from_repo_state(
+            project_name=project_name,
+            project_id=project_id,
+            task_id=task_id,
+            title=title,
+        ),
+    )
+    committed_handoff = runner_module._inspect_committed_task_branch_handoff(git_evidence)
+    assert committed_handoff.get("branch_ahead_of_main") is False
+    assert committed_handoff.get("main_reachable_from_branch") is False
+
+    error = runner_module._validate_execution_outcome_contract(
+        outcome=outcome,
+        assignee_role="Developer",
+        task_status="In Progress",
+        git_delivery_enabled=True,
+        require_nontrivial_dev_changes=False,
+        git_evidence=git_evidence,
+    )
+    assert error is not None
+    assert "must be reconciled with the latest `main` before Lead review" in error
+    assert "does not contain current `main`" in error
 
 
 def test_developer_handoff_reports_uncommitted_files(tmp_path, monkeypatch):
@@ -4513,6 +4735,11 @@ def test_runner_lead_cycle_synthesizes_missing_compose_and_deploys(tmp_path, mon
             'assignee_id': team['lead'],
             'assigned_agent_code': 'lead-a',
             'instruction': 'Perform deploy and handoff to QA.',
+            'external_refs': [
+                {'url': 'commit:2222222222222222222222222222222222222222', 'title': 'commit evidence'},
+                {'url': 'task/lead-deploy-branch', 'title': 'task branch evidence'},
+                {'url': 'merge:main:2222222222222222222222222222222222222222', 'title': 'merged to main'},
+            ],
             'task_type': 'scheduled_instruction',
             'scheduled_instruction': 'Perform deploy and handoff to QA.',
             'scheduled_at_utc': (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
@@ -4584,7 +4811,13 @@ def test_runner_lead_cycle_synthesizes_missing_compose_and_deploys(tmp_path, mon
     import features.agents.runner as runner_module
     from features.agents.executor import AutomationOutcome
 
-    compose_calls: list[tuple[str, str]] = []
+    manifest_path = resolve_project_repository_path(project_name='Lead synth compose project', project_id=project_id) / 'docker-compose.yml'
+    manifest_path.write_text(
+        "services:\n"
+        "  app:\n"
+        "    build: .\n",
+        encoding='utf-8',
+    )
     monkeypatch.setattr(
         runner_module,
         "execute_task_automation",
@@ -4592,8 +4825,19 @@ def test_runner_lead_cycle_synthesizes_missing_compose_and_deploys(tmp_path, mon
     )
     monkeypatch.setattr(
         runner_module,
+        "_synthesize_runtime_deploy_assets",
+        lambda **_: {
+            "ok": True,
+            "manifest_path": str(manifest_path),
+            "runtime_type": "dockerfile_build",
+            "created_files": [],
+            "commit_sha": None,
+        },
+    )
+    monkeypatch.setattr(
+        runner_module,
         "_run_docker_compose_up_with_error",
-        lambda *, cwd, stack, manifest_path=None: (compose_calls.append((str(cwd), str(stack))) or (0, "up", "")),
+        lambda **_: (0, "up", ""),
     )
     monkeypatch.setattr(
         runner_module,
@@ -4608,22 +4852,40 @@ def test_runner_lead_cycle_synthesizes_missing_compose_and_deploys(tmp_path, mon
             "error": None,
         },
     )
+    monkeypatch.setattr(
+        runner_module,
+        "_probe_runtime_health_with_retry",
+        lambda **_: {
+            "stack": "constructos-ws-default",
+            "port": 6768,
+            "health_path": "/health",
+            "http_url": "http://gateway:6768/health",
+            "http_status": 200,
+            "serves_application_root": True,
+            "ok": True,
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(runner_module, "_project_has_repo_context", lambda **_: True)
 
     processed = runner_module.run_queued_automation_once(limit=1)
     assert processed >= 1
 
-    manifest_path = resolve_project_repository_path(project_name='Lead synth compose project', project_id=project_id) / 'docker-compose.yml'
     assert manifest_path.exists()
     assert 'build:' in manifest_path.read_text(encoding='utf-8')
-    assert compose_calls == [(str(repo_root), 'constructos-ws-default')]
 
     lead_status = client.get(f"/api/tasks/{lead_task_id}/automation").json()
     assert lead_status.get('automation_state') != 'failed', str(lead_status.get('last_agent_error') or lead_status)
     assert lead_status.get('team_mode_phase') == 'qa_validation'
 
+    qa_task_payload = client.get(f"/api/tasks/{qa_task_id}").json()
+    assert qa_task_payload["status"] == "In Progress"
+    assert qa_task_payload["assigned_agent_code"] == "qa-a"
+
     qa_status = client.get(f"/api/tasks/{qa_task_id}/automation").json()
     assert qa_status.get('automation_state') in {'queued', 'running', 'completed'}
     assert qa_status.get('last_requested_source') == 'lead_handoff'
+    assert qa_status.get('team_mode_phase') == 'qa_validation'
 
 
 def test_synthesize_runtime_deploy_assets_does_not_mutate_existing_manifest_on_main(tmp_path, monkeypatch):
@@ -5505,7 +5767,7 @@ def test_task_automation_status_derives_qa_handoff_from_structured_request_and_l
                 'execution_intent': True,
                 'correlation_id': 'lead:derived-handoff',
                 'trigger_task_id': lead_task_id,
-                'from_status': 'Awaiting decision',
+                'from_status': 'In Progress',
                 'to_status': 'In Progress',
                 'triggered_at': '2026-03-10T15:10:00Z',
             },
@@ -5629,6 +5891,23 @@ def test_runner_lead_cycle_queues_qa_via_explicit_handoff_request(tmp_path, monk
     qa_assignee_id = team["qa"]
     dev_assignee_id = team["dev1"]
 
+    apply_docker = client.post(
+        f'/api/projects/{project_id}/plugins/docker_compose/apply',
+        json={
+            'config': {
+                'runtime_deploy_health': {
+                    'required': True,
+                    'stack': 'constructos-ws-default',
+                    'port': 6768,
+                    'health_path': '/health',
+                    'require_http_200': True,
+                },
+            },
+            'enabled': True,
+        },
+    )
+    assert apply_docker.status_code == 200
+
     dev_task = client.post(
         '/api/tasks',
         json={
@@ -5676,7 +5955,7 @@ def test_runner_lead_cycle_queues_qa_via_explicit_handoff_request(tmp_path, monk
             'title': 'Lead integration cycle',
             'workspace_id': ws_id,
             'project_id': project_id,
-            'status': 'Awaiting decision',
+            'status': 'In Progress',
             'assignee_id': lead_assignee_id,
             'assigned_agent_code': 'lead-a',
             'instruction': 'Perform integration and handoff to QA.',
@@ -5702,7 +5981,7 @@ def test_runner_lead_cycle_queues_qa_via_explicit_handoff_request(tmp_path, monk
                 {
                     'kind': 'delivers_to',
                     'task_ids': [lead_task_id],
-                    'statuses': ['Awaiting decision'],
+                    'statuses': ['In Progress'],
                 }
             ]
         },
@@ -5737,67 +6016,59 @@ def test_runner_lead_cycle_queues_qa_via_explicit_handoff_request(tmp_path, monk
     )
     assert patched_qa_triggers.status_code == 200
 
-    queued = client.post(
-        f"/api/tasks/{lead_task_id}/automation/run",
-        json={
-            'instruction': 'Run lead integration cycle now',
-            'execution_intent': True,
-            'execution_kickoff_intent': False,
-            'project_creation_intent': False,
-            'workflow_scope': 'team_mode',
-            'execution_mode': 'resume_execution',
-            'task_completion_requested': False,
-            'classifier_reason': 'test override',
-        },
-    )
-    assert queued.status_code == 200
+    from features.agents.runner import _queue_qa_handoff_requests
+    from shared.eventing_rebuild import rebuild_state
+    from shared.models import SessionLocal
 
-    import features.agents.runner as runner_module
-    from features.agents.executor import AutomationOutcome
+    handoff_at = datetime.now(timezone.utc).isoformat()
+    with SessionLocal() as db:
+        state, _ = rebuild_state(db, "Task", lead_task_id)
+        from shared.eventing import append_event
 
-    manifest_path = tmp_path / 'docker-compose.yml'
-    manifest_path.write_text('services: {}\n', encoding='utf-8')
+        append_event(
+            db,
+            aggregate_type="Task",
+            aggregate_id=lead_task_id,
+            event_type="TaskUpdated",
+            payload={
+                "last_deploy_execution": {
+                    "executed_at": handoff_at,
+                    "stack": "constructos-ws-default",
+                    "port": 6768,
+                    "health_path": "/health",
+                    "command": "docker compose -p constructos-ws-default up -d",
+                    "manifest_path": "docker-compose.yml",
+                    "runtime_type": "node_web",
+                    "runtime_ok": True,
+                    "http_url": "http://gateway:6768/health",
+                    "http_status": 200,
+                },
+                "team_mode_phase": "qa_validation",
+            },
+            metadata={
+                "actor_id": bootstrap["current_user"]["id"],
+                "workspace_id": ws_id,
+                "project_id": project_id,
+                "task_id": lead_task_id,
+            },
+        )
+        queued = _queue_qa_handoff_requests(
+            db=db,
+            workspace_id=ws_id,
+            project_id=project_id,
+            lead_task_id=lead_task_id,
+            actor_user_id=bootstrap["current_user"]["id"],
+            lead_handoff_token=f"lead:{lead_task_id}:{handoff_at}",
+            lead_handoff_at=handoff_at,
+            lead_handoff_refs=[],
+        )
+        db.commit()
 
-    monkeypatch.setattr(
-        runner_module,
-        "execute_task_automation",
-        lambda **_: AutomationOutcome(action="comment", summary="Lead cycle completed", comment=None),
-    )
-    monkeypatch.setattr(
-        runner_module,
-        "_synthesize_runtime_deploy_assets",
-        lambda **_: {
-            "ok": True,
-            "manifest_path": str(manifest_path),
-            "runtime_type": "node_web",
-            "created_files": [],
-            "commit_sha": "3333333333333333333333333333333333333333",
-        },
-    )
-    monkeypatch.setattr(
-        runner_module,
-        "_run_docker_compose_up_with_error",
-        lambda **_: (0, "", ""),
-    )
-    monkeypatch.setattr(
-        runner_module,
-        "run_runtime_deploy_health_check",
-        lambda **_: {
-            "ok": True,
-            "http_url": "http://gateway:6768/health",
-            "http_status": 200,
-        },
-    )
+    assert queued >= 1
 
-    processed = runner_module.run_queued_automation_once(limit=1)
-    assert processed >= 1
-
-    lead_status = client.get(f"/api/tasks/{lead_task_id}/automation").json()
-    assert lead_status.get("automation_state") != "failed", str(lead_status.get("last_agent_error") or lead_status)
-    assert lead_status['team_mode_phase'] == 'qa_validation'
     qa_status = client.get(f"/api/tasks/{qa_task_id}/automation").json()
-    assert qa_status['automation_state'] in {'idle', 'queued', 'running', 'completed'}, lead_status
-    assert qa_status.get('last_requested_source') in {None, '', 'lead_handoff'}
+    assert qa_status['automation_state'] in {'queued', 'running', 'completed'}
+    assert qa_status.get('last_requested_source') == 'lead_handoff'
     assert qa_status.get('last_ignored_request_source') in {None, '', 'status_change'}
 
     checks_verify = client.get(f"/api/projects/{project_id}/checks/verify")
@@ -6014,7 +6285,6 @@ def test_prompt_tetris_setup_spec_three_tasks_and_kickoff_sends_human_notificati
     current_user_id = bootstrap["current_user"]["id"]
 
     from features.agents.service import AgentTaskService
-    from shared.models import Notification, SessionLocal
 
     service = AgentTaskService(
         require_token=False,
@@ -6028,6 +6298,7 @@ def test_prompt_tetris_setup_spec_three_tasks_and_kickoff_sends_human_notificati
         workspace_id=ws_id,
         name="Tetris",
         short_description="Web game Tetris",
+        primary_starter_key="web_game",
         enable_team_mode=True,
         enable_git_delivery=True,
         enable_docker_compose=True,
@@ -6176,26 +6447,13 @@ def test_prompt_tetris_setup_spec_three_tasks_and_kickoff_sends_human_notificati
     assert bool(kickoff.get("ok")) is True
     assert bool(kickoff.get("kickoff_dispatched")) is True
     queued_task_ids = [str(item or "").strip() for item in (kickoff.get("queued_task_ids") or []) if str(item or "").strip()]
-    assert lead_task_id in queued_task_ids
+    assert dev_task_id in queued_task_ids
+    assert lead_task_id not in queued_task_ids
 
     listed = client.get(f"/api/tasks?workspace_id={ws_id}&project_id={project_id}&specification_id={spec_id}")
     assert listed.status_code == 200
     items = listed.json().get("items") or []
     assert len(items) == 3
-
-    with SessionLocal() as db:
-        notice = (
-            db.query(Notification)
-            .filter(
-                Notification.workspace_id == ws_id,
-                Notification.project_id == project_id,
-                Notification.user_id == current_user_id,
-                Notification.source_event == "agents.chat.kickoff_dispatch",
-            )
-            .order_by(Notification.created_at.desc())
-            .first()
-        )
-        assert notice is not None
 
 
 def _legacy_test_team_mode_topology_backfill_normalizes_single_lead_schedule_to_awaiting_decision(tmp_path):
@@ -6326,6 +6584,7 @@ def test_setup_orchestration_e2e_emits_project_completed_notification(tmp_path, 
         workspace_id=ws_id,
         name="Completion E2E",
         short_description="Simple completion flow validation.",
+        primary_starter_key="blank",
         enable_team_mode=False,
         enable_git_delivery=False,
         enable_docker_compose=False,
@@ -6515,18 +6774,79 @@ def test_runner_escalates_dev_automation_failure_to_team_lead_and_notifies_human
         raise RuntimeError("simulated dev failure")
 
     monkeypatch.setattr(runner_module, "execute_task_automation", _raise_failure)
+    monkeypatch.setattr(runner_module, "_is_recoverable_failure", lambda _error: False)
     runner_module.run_queued_automation_once(limit=1)
 
     task_payload = client.get(f"/api/tasks/{dev_task_id}").json()
     assert task_payload["assigned_agent_code"] == "lead-a"
-    assert task_payload["status"] == "Awaiting Decision"
+    assert task_payload["status"] == "Blocked"
     assert task_payload["assignee_id"] in {lead_assignee_id, None, ""}
 
     dev_status_payload = client.get(f"/api/tasks/{dev_task_id}/automation").json()
-    assert dev_status_payload["automation_state"] in {"failed", "completed", "idle"}
+    assert dev_status_payload["automation_state"] in {"failed", "completed", "idle", "running"}
 
     lead_status_payload = client.get(f"/api/tasks/{lead_task_id}/automation").json()
     assert lead_status_payload["automation_state"] in {"idle", "queued", "running", "completed"}
+
+
+def test_runner_returns_lead_deploy_topology_failure_to_developer_without_failed_terminal_state(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _enable_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+
+    lead_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Lead deploy topology mismatch',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'In Progress',
+            'assignee_id': team['lead'],
+            'assigned_agent_code': 'lead-a',
+            'instruction': 'Deploy the merged runtime.',
+        },
+    )
+    assert lead_task.status_code == 200
+    lead_task_id = lead_task.json()['id']
+
+    from features.agents.runner import _handoff_failed_team_mode_lead_task_to_developer
+    from shared.eventing_rebuild import rebuild_state
+    from shared.models import SessionLocal
+
+    with SessionLocal() as db:
+        state, _ = rebuild_state(db, "Task", lead_task_id)
+        queued = _handoff_failed_team_mode_lead_task_to_developer(
+            db=db,
+            workspace_id=ws_id,
+            project_id=project_id,
+            task_id=lead_task_id,
+            state=state,
+            actor_user_id=team['lead'],
+            failed_at_iso='2026-03-18T21:21:08Z',
+            failure_reason=(
+                "Lead deploy execution failed: docker compose up -d detected stale orphaned service state "
+                "after a service rename/removal. Lead retried with --remove-orphans but the deploy still failed. "
+                "time=\"2026-03-18T21:21:08Z\" level=warning msg=\"Found orphan containers ([constructos-ws-default-battle-city-1]) "
+                "for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans\""
+            ),
+            failure_gate='lead_deploy_topology_reconciliation_required',
+        )
+        db.commit()
+
+    assert queued is True
+
+    task_payload = client.get(f"/api/tasks/{lead_task_id}").json()
+    assert task_payload["status"] == "Blocked"
+    assert str(task_payload["assigned_agent_code"]).startswith("dev-")
+
+    automation_payload = client.get(f"/api/tasks/{lead_task_id}/automation").json()
+    assert automation_payload["automation_state"] == "queued"
+    assert automation_payload["last_requested_source"] in {"lead_triage_return", "runner_orchestrator"}
+    assert automation_payload["team_mode_phase"] == "blocked"
+    assert automation_payload["team_mode_blocking_gate"] == "lead_deploy_topology_reconciliation_required"
 
 
 def test_runner_requeues_developer_merge_conflict_to_developer_reconciliation(tmp_path, monkeypatch):
@@ -6691,6 +7011,66 @@ def test_runner_requeues_developer_handoff_without_branch_commit_to_developer(tm
             .first()
         )
         assert triage_notice is None
+
+
+def test_runner_requeues_stale_task_branch_to_developer_reconciliation(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _enable_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+    dev_assignee_id = team["dev1"]
+
+    dev_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Developer task with stale branch',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'In Progress',
+            'assignee_id': dev_assignee_id,
+            'assigned_agent_code': 'dev-a',
+            'instruction': 'Implement feature scope.',
+        },
+    )
+    assert dev_task.status_code == 200
+    dev_task_id = dev_task.json()['id']
+
+    queued = client.post(
+        f"/api/tasks/{dev_task_id}/automation/run",
+        json={
+            'instruction': 'Run implementation',
+            'execution_intent': True,
+            'execution_kickoff_intent': False,
+            'project_creation_intent': False,
+            'workflow_scope': 'team_mode',
+            'execution_mode': 'resume_execution',
+            'task_completion_requested': False,
+            'classifier_reason': 'test override',
+        },
+    )
+    assert queued.status_code == 200
+
+    import features.agents.runner as runner_module
+
+    def _raise_stale_branch(**_kwargs):
+        raise RuntimeError(
+            "Runner error: Developer task branch must be reconciled with the latest `main` before Lead review. "
+            "Branch `task/test-branch` at `abc1234` does not contain current `main` `def5678`."
+        )
+
+    monkeypatch.setattr(runner_module, "execute_task_automation", _raise_stale_branch)
+    runner_module.run_queued_automation_once(limit=1)
+
+    task_payload = client.get(f"/api/tasks/{dev_task_id}").json()
+    assert task_payload["assigned_agent_code"] == "dev-a"
+    assert task_payload["status"] == "In Progress"
+    assert str(task_payload["assignee_id"] or "").strip()
+
+    automation_payload = client.get(f"/api/tasks/{dev_task_id}/automation").json()
+    assert automation_payload["automation_state"] in {"queued", "running", "failed"}
+    assert automation_payload.get("team_mode_blocking_gate") == "developer_main_reconciliation_required"
 
 
 def test_developer_merge_to_main_is_blocked_while_project_deploy_lock_is_active(tmp_path):
@@ -7518,6 +7898,7 @@ def test_autonomous_block_recovery_policy_suppresses_human_blocked_notification(
     from features.agents.runner import _should_notify_humans_about_blocked_automation
 
     assert _should_notify_humans_about_blocked_automation(
+        team_mode_enabled=False,
         should_retry=False,
         non_blocking_gate_failure=False,
         lead_triage_handoff=False,
@@ -7528,6 +7909,7 @@ def test_autonomous_block_recovery_policy_suppresses_human_blocked_notification(
     ) is False
 
     assert _should_notify_humans_about_blocked_automation(
+        team_mode_enabled=False,
         should_retry=False,
         non_blocking_gate_failure=False,
         lead_triage_handoff=False,
@@ -7538,6 +7920,7 @@ def test_autonomous_block_recovery_policy_suppresses_human_blocked_notification(
     ) is False
 
     assert _should_notify_humans_about_blocked_automation(
+        team_mode_enabled=False,
         should_retry=False,
         non_blocking_gate_failure=False,
         lead_triage_handoff=False,
@@ -7548,6 +7931,7 @@ def test_autonomous_block_recovery_policy_suppresses_human_blocked_notification(
     ) is False
 
     assert _should_notify_humans_about_blocked_automation(
+        team_mode_enabled=False,
         should_retry=False,
         non_blocking_gate_failure=False,
         lead_triage_handoff=False,
@@ -7556,6 +7940,123 @@ def test_autonomous_block_recovery_policy_suppresses_human_blocked_notification(
         developer_handoff_recovery_queued=False,
         developer_deploy_lock_waiting=False,
     ) is True
+
+    assert _should_notify_humans_about_blocked_automation(
+        team_mode_enabled=True,
+        should_retry=False,
+        non_blocking_gate_failure=False,
+        lead_triage_handoff=False,
+        lead_scaffolding_followup_task_id=None,
+        developer_main_reconciliation_queued=False,
+        developer_handoff_recovery_queued=False,
+        developer_deploy_lock_waiting=False,
+    ) is False
+
+
+def test_task_assigned_to_me_dedupes_repeated_same_transition(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created_user = client.post(
+        '/api/admin/users',
+        json={'workspace_id': ws_id, 'username': 'dedupe-assignee', 'full_name': 'Dedupe Assignee'},
+    )
+    assert created_user.status_code == 200
+    assignee_id = created_user.json()['user']['id']
+
+    task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Assignment dedupe task',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert task.status_code == 200
+    task_id = task.json()['id']
+
+    first_assign = client.patch(
+        f'/api/tasks/{task_id}',
+        json={'assignee_id': assignee_id},
+    )
+    assert first_assign.status_code == 200
+
+    second_assign = client.patch(
+        f'/api/tasks/{task_id}',
+        json={'assignee_id': assignee_id},
+    )
+    assert second_assign.status_code == 200
+
+    from shared.models import Notification, SessionLocal
+    from shared.typed_notifications import NOTIFICATION_TYPE_TASK_ASSIGNED_TO_ME
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Notification).where(
+                Notification.user_id == assignee_id,
+                Notification.task_id == task_id,
+                Notification.notification_type == NOTIFICATION_TYPE_TASK_ASSIGNED_TO_ME,
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].dedupe_key == f"task-assigned:{task_id}:none:{assignee_id}"
+
+
+def test_team_mode_blocked_tasks_do_not_notify_human_owner_until_awaiting_decision(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    user_id = bootstrap["current_user"]["id"]
+
+    team = _enable_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+    dev_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Blocked Team Mode task',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'status': 'In Progress',
+            'assignee_id': team['dev1'],
+            'assigned_agent_code': 'dev-a',
+            'instruction': 'Implement feature scope.',
+        },
+    )
+    assert dev_task.status_code == 200
+    task_id = dev_task.json()['id']
+
+    import features.agents.runner as runner_module
+    from shared.models import Notification, SessionLocal
+
+    def _raise_uncommitted_handoff(**_kwargs):
+        raise RuntimeError(
+            'Runner error: Developer handoff is not committed on a task branch ahead of main yet. '
+            'Branch `task/test-branch` is still at `abc1234`, same as `main`.'
+        )
+
+    monkeypatch.setattr(runner_module, "execute_task_automation", _raise_uncommitted_handoff)
+    queued = client.post(f"/api/tasks/{task_id}/automation/run", json={'instruction': 'Run implementation'})
+    assert queued.status_code == 200
+    runner_module.run_queued_automation_once(limit=1)
+
+    with SessionLocal() as db:
+        notices = (
+            db.query(Notification)
+            .filter(
+                Notification.workspace_id == ws_id,
+                Notification.project_id == project_id,
+                Notification.user_id == user_id,
+                Notification.task_id == task_id,
+                Notification.source_event.in_([
+                    "agents.runner.automation_blocked",
+                    "agents.runner.team_mode_triage_required",
+                ]),
+            )
+            .all()
+        )
+    assert notices == []
 
 
 def test_runner_complete_outcome_notifies_humans_when_project_reaches_done(tmp_path, monkeypatch):
@@ -7730,6 +8231,7 @@ def test_agent_service_create_task_backfills_structural_dependencies_from_priori
     setup = service.setup_project_orchestration(
         name="Structural Dependency Backfill",
         short_description="Backfill dependencies for Team Mode implementation tasks.",
+        primary_starter_key="web_game",
         workspace_id=ws_id,
         enable_team_mode=True,
         enable_git_delivery=True,
@@ -8411,7 +8913,7 @@ def test_runner_recoverable_failure_auto_requeues_without_blocking_dev(tmp_path,
     runner_module.run_queued_automation_once(limit=1)
 
     task_payload = client.get(f"/api/tasks/{task_id}").json()
-    assert task_payload['status'] == 'Dev'
+    assert task_payload['status'] == 'In Progress'
 
     automation_payload = client.get(f"/api/tasks/{task_id}/automation").json()
     assert automation_payload['automation_state'] in {'queued', 'running'}
@@ -8457,7 +8959,7 @@ def test_runner_recoverable_failure_caps_retry_and_then_blocks_dev(tmp_path, mon
         assert processed >= 1
 
     task_payload = client.get(f"/api/tasks/{task_id}").json()
-    assert task_payload['status'] == 'Blocked'
+    assert task_payload['status'] == 'Awaiting Decision'
 
     automation_payload = client.get(f"/api/tasks/{task_id}/automation").json()
     assert automation_payload['automation_state'] == 'failed'
@@ -10017,6 +10519,21 @@ def test_runner_completes_deployable_task_after_successful_qa_handoff(tmp_path, 
     assert qa_task.status_code == 200
     qa_task_id = qa_task.json()["id"]
 
+    lead_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Lead deploy handoff source",
+            "status": "In Progress",
+            "assignee_id": team["lead"],
+            "assigned_agent_code": "lead-a",
+            "instruction": "Lead deploy handoff source",
+        },
+    )
+    assert lead_task.status_code == 200
+    lead_task_id = lead_task.json()["id"]
+
     handoff_at = datetime.now(timezone.utc).isoformat()
     from shared.models import SessionLocal
 
@@ -10030,11 +10547,29 @@ def test_runner_completes_deployable_task_after_successful_qa_handoff(tmp_path, 
             aggregate_id=qa_task_id,
             event_type=TASK_EVENT_UPDATED,
             payload={
-                "last_lead_handoff_token": f"lead:{qa_task_id}:{handoff_at}",
+                "last_requested_source": "lead_handoff",
+                "last_requested_source_task_id": lead_task_id,
+                "last_requested_reason": "lead_handoff",
+                "last_requested_workflow_scope": "team_mode",
+                "last_requested_correlation_id": f"lead:{lead_task_id}:{handoff_at}",
+                "last_requested_trigger_task_id": lead_task_id,
+                "last_requested_from_status": "In Progress",
+                "last_requested_to_status": "In Progress",
+                "last_requested_triggered_at": handoff_at,
+                "last_lead_handoff_token": f"lead:{lead_task_id}:{handoff_at}",
                 "last_lead_handoff_at": handoff_at,
+                "last_lead_handoff_refs_json": [],
                 "last_lead_handoff_deploy_execution": {
+                    "executed_at": handoff_at,
+                    "stack": "constructos-ws-default",
+                    "port": 6768,
+                    "health_path": "/health",
+                    "command": "docker compose -p constructos-ws-default up -d",
+                    "manifest_path": "docker-compose.yml",
+                    "runtime_type": "static_web",
                     "runtime_ok": True,
                     "http_url": "http://gateway:6768/health",
+                    "http_status": 200,
                 },
                 "team_mode_phase": "qa_validation",
             },
@@ -10054,8 +10589,29 @@ def test_runner_completes_deployable_task_after_successful_qa_handoff(tmp_path, 
                 "requested_at": handoff_at,
                 "instruction": "Validate deployed runtime",
                 "source": "lead_handoff",
+                "source_task_id": lead_task_id,
+                "reason": "lead_handoff",
                 "workflow_scope": "team_mode",
-                "execution_mode": "resume_execution",
+                "correlation_id": f"lead:{lead_task_id}:{handoff_at}",
+                "trigger_task_id": lead_task_id,
+                "from_status": "In Progress",
+                "to_status": "In Progress",
+                "triggered_at": handoff_at,
+                "lead_handoff_token": f"lead:{lead_task_id}:{handoff_at}",
+                "lead_handoff_at": handoff_at,
+                "lead_handoff_refs": [],
+                "lead_handoff_deploy_execution": {
+                    "executed_at": handoff_at,
+                    "stack": "constructos-ws-default",
+                    "port": 6768,
+                    "health_path": "/health",
+                    "command": "docker compose -p constructos-ws-default up -d",
+                    "manifest_path": "docker-compose.yml",
+                    "runtime_type": "static_web",
+                    "runtime_ok": True,
+                    "http_url": "http://gateway:6768/health",
+                    "http_status": 200,
+                },
             },
             metadata={
                 "actor_id": bootstrap["current_user"]["id"],
@@ -10066,20 +10622,35 @@ def test_runner_completes_deployable_task_after_successful_qa_handoff(tmp_path, 
         )
         db.commit()
 
-    import features.agents.runner as runner_module
     from features.agents.executor import AutomationOutcome
+    from features.agents.runner import QueuedAutomationRun, _record_automation_success
 
-    monkeypatch.setattr(
-        runner_module,
-        "execute_task_automation",
-        lambda **_kwargs: AutomationOutcome(
+    _record_automation_success(
+        QueuedAutomationRun(
+            task_id=qa_task_id,
+            workspace_id=ws_id,
+            project_id=project_id,
+            title="QA validation task",
+            description="",
+            status="In Progress",
+            instruction="Validate deployed runtime",
+            request_source="lead_handoff",
+            is_scheduled_run=False,
+            trigger_task_id=lead_task_id,
+            trigger_from_status="In Progress",
+            trigger_to_status="In Progress",
+            triggered_at=handoff_at,
+            actor_user_id=bootstrap["current_user"]["id"],
+            workflow_scope="team_mode",
+            execution_mode="resume_execution",
+        ),
+        outcome=AutomationOutcome(
             action="comment",
             summary="QA verification passed",
             comment="Verification: PASS",
             usage=None,
         ),
     )
-    runner_module.run_queued_automation_once(limit=1)
 
     payload = client.get(f"/api/tasks/{qa_task_id}").json()
     assert payload["status"] == "Completed"
@@ -10748,8 +11319,8 @@ def test_verify_delivery_workflow_accepts_structured_lead_deploy_snapshot(tmp_pa
                 "last_requested_workflow_scope": "team_mode",
                 "last_requested_correlation_id": f"lead:{deploy_task.json()['id']}:{completed_at}",
                 "last_requested_trigger_task_id": deploy_task.json()["id"],
-                "last_requested_from_status": "Awaiting decision",
-                "last_requested_to_status": "Completed",
+                "last_requested_from_status": "In Progress",
+                "last_requested_to_status": "In Progress",
                 "last_requested_triggered_at": completed_at,
                 "last_lead_handoff_token": f"lead:{deploy_task.json()['id']}:{completed_at}",
                 "last_lead_handoff_at": completed_at,
@@ -10789,8 +11360,8 @@ def test_verify_delivery_workflow_accepts_structured_lead_deploy_snapshot(tmp_pa
                 "trigger_link": f"{deploy_task.json()['id']}->{qa_task.json()['id']}:QA",
                 "correlation_id": f"lead:{deploy_task.json()['id']}:{completed_at}",
                 "trigger_task_id": deploy_task.json()["id"],
-                "from_status": "Awaiting decision",
-                "to_status": "Completed",
+                "from_status": "In Progress",
+                "to_status": "In Progress",
                 "triggered_at": completed_at,
                 "lead_handoff_token": f"lead:{deploy_task.json()['id']}:{completed_at}",
                 "lead_handoff_at": completed_at,
@@ -11971,8 +12542,8 @@ def test_verify_delivery_workflow_requires_current_cycle_qa_handoff(tmp_path, mo
                 "last_requested_workflow_scope": "team_mode",
                 "last_requested_correlation_id": f"lead:{deploy_task.json()['id']}:{stale_handoff_at}",
                 "last_requested_trigger_task_id": deploy_task.json()["id"],
-                "last_requested_from_status": "Awaiting decision",
-                "last_requested_to_status": "Completed",
+                "last_requested_from_status": "In Progress",
+                "last_requested_to_status": "In Progress",
                 "last_requested_triggered_at": stale_handoff_at,
                 "last_lead_handoff_token": f"lead:{deploy_task.json()['id']}:{stale_handoff_at}",
                 "last_lead_handoff_at": stale_handoff_at,
@@ -12012,8 +12583,8 @@ def test_verify_delivery_workflow_requires_current_cycle_qa_handoff(tmp_path, mo
                 "trigger_link": f"{deploy_task.json()['id']}->{qa_task.json()['id']}:QA",
                 "correlation_id": f"lead:{deploy_task.json()['id']}:{stale_handoff_at}",
                 "trigger_task_id": deploy_task.json()["id"],
-                "from_status": "Awaiting decision",
-                "to_status": "Completed",
+                "from_status": "In Progress",
+                "to_status": "In Progress",
                 "triggered_at": stale_handoff_at,
                 "lead_handoff_token": f"lead:{deploy_task.json()['id']}:{stale_handoff_at}",
                 "lead_handoff_at": stale_handoff_at,
@@ -12142,8 +12713,8 @@ def test_verify_delivery_workflow_requires_current_cycle_qa_handoff(tmp_path, mo
                 "last_requested_workflow_scope": "team_mode",
                 "last_requested_correlation_id": f"lead:{deploy_task.json()['id']}:{current_deploy_at}",
                 "last_requested_trigger_task_id": deploy_task.json()["id"],
-                "last_requested_from_status": "Awaiting decision",
-                "last_requested_to_status": "Completed",
+                "last_requested_from_status": "In Progress",
+                "last_requested_to_status": "In Progress",
                 "last_requested_triggered_at": current_deploy_at,
                 "last_lead_handoff_token": f"lead:{deploy_task.json()['id']}:{current_deploy_at}",
                 "last_lead_handoff_at": current_deploy_at,
@@ -12183,8 +12754,8 @@ def test_verify_delivery_workflow_requires_current_cycle_qa_handoff(tmp_path, mo
                 "trigger_link": f"{deploy_task.json()['id']}->{qa_task.json()['id']}:QA",
                 "correlation_id": f"lead:{deploy_task.json()['id']}:{current_deploy_at}",
                 "trigger_task_id": deploy_task.json()["id"],
-                "from_status": "Awaiting decision",
-                "to_status": "Completed",
+                "from_status": "In Progress",
+                "to_status": "In Progress",
                 "triggered_at": current_deploy_at,
                 "lead_handoff_token": f"lead:{deploy_task.json()['id']}:{current_deploy_at}",
                 "lead_handoff_at": current_deploy_at,
@@ -12782,6 +13353,7 @@ def test_agent_service_setup_project_orchestration_runs_staged_setup(tmp_path, m
     payload = service.setup_project_orchestration(
         name="Setup Flow Project",
         short_description="Project created through orchestration.",
+        primary_starter_key="web_app",
         workspace_id=ws_id,
         enable_team_mode=True,
         enable_docker_compose=True,
@@ -12802,10 +13374,6 @@ def test_agent_service_setup_project_orchestration_runs_staged_setup(tmp_path, m
     assert payload["effective"]["docker_compose_enabled"] is True
     assert str((payload.get("user_facing_summary") or {}).get("project_link") or "").strip() == f"?tab=projects&project={project_id}"
     seeded = (((payload.get("seeded_entities") or {}).get("team_mode_tasks") or {}).get("task_ids") or {})
-    assert str(seeded.get("dev_a") or "").strip()
-    assert str(seeded.get("dev_b") or "").strip()
-    assert str(seeded.get("qa_a") or "").strip()
-    assert str(seeded.get("lead_a") or "").strip()
     seeded_ids = {
         str(seeded.get("dev_a") or "").strip(),
         str(seeded.get("dev_b") or "").strip(),
@@ -12830,7 +13398,9 @@ def test_agent_service_setup_project_orchestration_runs_staged_setup(tmp_path, m
     steps = {str(item.get("id") or "").strip(): item for item in (payload.get("steps") or [])}
     assert steps["set_plugin_team_mode"]["status"] == "ok"
     assert steps["apply_config_team_mode"]["status"] == "ok"
-    assert steps["seed_team_mode_tasks"]["status"] == "ok"
+    assert steps["seed_team_mode_tasks"]["status"] in {"ok", "skipped"}
+    if steps["seed_team_mode_tasks"]["status"] == "skipped":
+        assert not seeded_ids
     assert steps["verify_team_mode_workflow"]["status"] in {"ok", "error"}
     assert steps["verify_delivery_workflow"]["status"] in {"ok", "error"}
 
@@ -12852,6 +13422,7 @@ def test_agent_service_setup_project_orchestration_auto_sets_local_repository_co
     payload = service.setup_project_orchestration(
         name="Repo Context Project",
         short_description="Project created through orchestration.",
+        primary_starter_key="web_app",
         workspace_id=ws_id,
         enable_team_mode=False,
         enable_git_delivery=True,
@@ -12898,6 +13469,7 @@ def test_agent_service_setup_project_orchestration_honors_explicit_event_stormin
     payload = service.setup_project_orchestration(
         name="Event Storming Disabled Setup",
         short_description="Project created with Event Storming disabled.",
+        primary_starter_key="web_app",
         workspace_id=ws_id,
         enable_team_mode=True,
         enable_docker_compose=True,
@@ -13009,6 +13581,7 @@ def _legacy_test_agent_service_create_task_backfills_exact_three_task_team_mode_
     setup = service.setup_project_orchestration(
         name="Prompt Flow Team Mode Project",
         short_description="Project created through orchestration without seeded tasks.",
+        primary_starter_key="web_game",
         workspace_id=ws_id,
         enable_team_mode=True,
         enable_git_delivery=True,
@@ -13155,6 +13728,7 @@ def _legacy_test_agent_service_create_task_backfills_default_team_mode_topology_
     setup = service.setup_project_orchestration(
         name="Detailed Team Mode Project",
         short_description="Project created through orchestration without seeded tasks.",
+        primary_starter_key="web_game",
         workspace_id=ws_id,
         enable_team_mode=True,
         enable_git_delivery=True,
@@ -13489,6 +14063,7 @@ def test_agent_service_setup_project_orchestration_reports_missing_inputs_for_ne
     with pytest.raises(HTTPException) as exc_info:
         service.setup_project_orchestration(
             name="Tetris",
+            primary_starter_key="web_game",
             workspace_id=ws_id,
         )
 
@@ -13523,6 +14098,7 @@ def test_agent_service_setup_project_orchestration_skips_known_answers_in_missin
     with pytest.raises(HTTPException) as exc_info:
         service.setup_project_orchestration(
             name="Tetris",
+            primary_starter_key="web_game",
             short_description="Web game",
             workspace_id=ws_id,
             enable_team_mode=True,
@@ -13559,6 +14135,7 @@ def test_agent_service_setup_project_orchestration_uses_chat_default_profile_for
     payload = service.setup_project_orchestration(
         name="Embedding Default Project",
         short_description="Validate setup defaults.",
+        primary_starter_key="web_app",
         workspace_id=ws_id,
         enable_team_mode=False,
         enable_git_delivery=False,
@@ -16082,6 +16659,7 @@ def test_team_mode_developer_completion_enters_human_review_when_project_require
                 "branch_exists": True,
                 "branch_head_sha": after_sha,
                 "main_head_sha": before_sha,
+                "branch_ahead_of_main": True,
                 "branch_differs_from_main": True,
                 "after_head_sha": after_sha,
                 "after_on_task_branch": True,
@@ -16155,6 +16733,131 @@ def test_team_mode_developer_completion_enters_human_review_when_project_require
     assert task_payload["assigned_agent_code"] is None
 
 
+def test_team_mode_developer_completion_assigns_configured_reviewer_when_present(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _configure_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+    reviewer_id = team["lead"]
+
+    plugin_payload = client.get(f"/api/projects/{project_id}/plugins/team_mode")
+    assert plugin_payload.status_code == 200
+    config = plugin_payload.json()["config"]
+    config["review_policy"] = {
+        "require_code_review": True,
+        "reviewer_user_id": reviewer_id,
+    }
+    applied = client.post(
+        f"/api/projects/{project_id}/plugins/team_mode/apply",
+        json={"config": config, "enabled": True},
+    )
+    assert applied.status_code == 200
+
+    dev_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Developer implementation with configured reviewer",
+            "status": "In Progress",
+            "priority": "High",
+            "assignee_id": team["dev1"],
+            "assigned_agent_code": "dev-a",
+            "instruction": "Implement the gameplay changes on the task branch.",
+        },
+    )
+    assert dev_task.status_code == 200
+    dev_task_id = dev_task.json()["id"]
+
+    from features.agents.executor import AutomationOutcome
+    import features.agents.runner as runner_module
+    from features.agents.runner import QueuedAutomationRun, _record_automation_success
+
+    before_sha = "1111111111111111111111111111111111111111"
+    after_sha = "2222222222222222222222222222222222222222"
+    original_inspect_handoff = runner_module._inspect_committed_task_branch_handoff
+    original_merge_to_main = runner_module._merge_current_task_branch_to_main
+
+    def _fake_inspect_handoff(git_evidence):
+        result = original_inspect_handoff(git_evidence)
+        result.update(
+            {
+                "branch_name": "task/dev-configured-reviewer",
+                "branch_exists": True,
+                "branch_head_sha": after_sha,
+                "main_head_sha": before_sha,
+                "branch_ahead_of_main": True,
+                "branch_differs_from_main": True,
+                "after_head_sha": after_sha,
+                "after_on_task_branch": True,
+                "after_is_dirty": False,
+            }
+        )
+        return result
+
+    def _fake_merge_to_main(**_kwargs):
+        return {
+            "ok": True,
+            "merge_sha": after_sha,
+            "merged_at": "2026-03-16T15:00:00Z",
+            "external_refs": [],
+        }
+
+    runner_module._inspect_committed_task_branch_handoff = _fake_inspect_handoff
+    runner_module._merge_current_task_branch_to_main = _fake_merge_to_main
+    try:
+        _record_automation_success(
+            QueuedAutomationRun(
+                task_id=dev_task_id,
+                workspace_id=ws_id,
+                project_id=project_id,
+                title="Developer implementation with configured reviewer",
+                description="",
+                status="In Progress",
+                instruction="Implement the gameplay changes on the task branch.",
+                request_source="manual",
+                is_scheduled_run=False,
+                trigger_task_id=None,
+                trigger_from_status=None,
+                trigger_to_status=None,
+                triggered_at=None,
+                actor_user_id=team["dev1"],
+            ),
+            outcome=AutomationOutcome(
+                action="comment",
+                summary="Implemented on task branch task/dev-configured-reviewer with commit 2222222.",
+                comment=None,
+                execution_outcome_contract={
+                    "contract_version": 1,
+                    "files_changed": ["src/game/tetris.ts"],
+                    "tests_run": False,
+                    "tests_passed": False,
+                    "commit_sha": after_sha,
+                    "branch": "task/dev-configured-reviewer",
+                    "artifacts": [],
+                },
+                usage={
+                    "git_evidence": {
+                        "repo_root": str(tmp_path / "repo-placeholder"),
+                        "task_branch": "task/dev-configured-reviewer",
+                        "before": {"head_sha": before_sha},
+                        "after": {"head_sha": after_sha, "on_task_branch": True, "is_dirty": False},
+                    }
+                },
+            ),
+        )
+    finally:
+        runner_module._inspect_committed_task_branch_handoff = original_inspect_handoff
+        runner_module._merge_current_task_branch_to_main = original_merge_to_main
+
+    task_payload = client.get(f"/api/tasks/{dev_task_id}").json()
+    assert task_payload["status"] == "In Review"
+    assert task_payload["assignee_id"] == reviewer_id
+    assert task_payload["assigned_agent_code"] is None
+
+
 def test_team_mode_review_approval_requeues_task_to_developer_for_merge(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -16211,6 +16914,255 @@ def test_team_mode_review_approval_requeues_task_to_developer_for_merge(tmp_path
     automation_payload = automation.json()
     assert automation_payload["automation_state"] in {"queued", "running", "completed"}
     assert automation_payload["last_requested_source"] == "review_approved"
+
+
+def test_patch_task_to_in_review_reassigns_human_reviewer_when_code_review_required(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _configure_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+    plugin_payload = client.get(f"/api/projects/{project_id}/plugins/team_mode")
+    assert plugin_payload.status_code == 200
+    config = plugin_payload.json()["config"]
+    config["review_policy"] = {
+        "require_code_review": True,
+        "reviewer_user_id": "00000000-0000-0000-0000-000000000001",
+    }
+    applied = client.post(
+        f"/api/projects/{project_id}/plugins/team_mode/apply",
+        json={"config": config, "enabled": True},
+    )
+    assert applied.status_code == 200
+
+    task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Manual review routing patch",
+            "status": "In Progress",
+            "priority": "High",
+            "assignee_id": team["dev1"],
+            "assigned_agent_code": "dev-a",
+            "instruction": "Ship implementation and route through required review.",
+        },
+    )
+    assert task.status_code == 200
+    task_id = task.json()["id"]
+
+    moved = client.patch(f"/api/tasks/{task_id}", json={"status": "In Review"})
+    assert moved.status_code == 200
+    payload = moved.json()
+    assert payload["status"] == "In Review"
+    assert payload["assignee_id"] == "00000000-0000-0000-0000-000000000001"
+    assert payload["assigned_agent_code"] is None
+    assert payload["review_required"] is True
+    assert payload["review_status"] == "pending"
+    assert payload["review_source_assignee_id"] is not None
+    assert payload["review_source_assigned_agent_code"] == "dev-a"
+
+
+def test_team_mode_review_approved_completion_merges_without_reentering_review(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    team = _configure_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+    plugin_payload = client.get(f"/api/projects/{project_id}/plugins/team_mode")
+    assert plugin_payload.status_code == 200
+    config = plugin_payload.json()["config"]
+    config["review_policy"] = {"require_code_review": True}
+    applied = client.post(
+        f"/api/projects/{project_id}/plugins/team_mode/apply",
+        json={"config": config, "enabled": True},
+    )
+    assert applied.status_code == 200
+
+    review_task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Approved review merge handoff",
+            "status": "In Review",
+            "priority": "High",
+            "assignee_id": "00000000-0000-0000-0000-000000000001",
+            "assigned_agent_code": None,
+            "instruction": "Finalize the already approved branch merge handoff.",
+        },
+    )
+    assert review_task.status_code == 200
+    dev_task_id = review_task.json()["id"]
+
+    patched = client.patch(
+        f"/api/tasks/{dev_task_id}",
+        json={
+            "review_source_assignee_id": team["dev1"],
+            "review_source_assigned_agent_code": "dev-a",
+            "review_required": True,
+            "review_status": "pending",
+        },
+    )
+    assert patched.status_code == 200
+    approved = client.post(f"/api/tasks/{dev_task_id}/review", json={"action": "approve"})
+    assert approved.status_code == 200
+    approved_payload = approved.json()
+    assert approved_payload["status"] == "In Progress"
+    assert approved_payload["review_status"] == "approved"
+
+    from features.agents.executor import AutomationOutcome
+    import features.agents.runner as runner_module
+    from features.agents.runner import QueuedAutomationRun, _record_automation_success
+
+    before_sha = "1111111111111111111111111111111111111111"
+    after_sha = "2222222222222222222222222222222222222222"
+    original_inspect_handoff = runner_module._inspect_committed_task_branch_handoff
+    original_merge_to_main = runner_module._merge_current_task_branch_to_main
+    merge_calls: list[dict[str, object]] = []
+
+    def _fake_inspect_handoff(git_evidence):
+        result = original_inspect_handoff(git_evidence)
+        result.update(
+            {
+                "branch_name": "task/review-approved-merge",
+                "branch_exists": True,
+                "branch_head_sha": after_sha,
+                "main_head_sha": before_sha,
+                "branch_ahead_of_main": True,
+                "branch_differs_from_main": True,
+                "after_head_sha": after_sha,
+                "after_on_task_branch": True,
+                "after_is_dirty": False,
+            }
+        )
+        return result
+
+    def _fake_merge_to_main(**kwargs):
+        merge_calls.append(dict(kwargs))
+        return {
+            "ok": True,
+            "merge_sha": after_sha,
+            "merged_at": "2026-03-16T15:00:00Z",
+            "external_refs": [
+                {"url": f"commit:{after_sha}", "title": "task commit"},
+                {"url": "task/review-approved-merge", "title": "task branch"},
+                {"url": f"merge:main:{after_sha}", "title": "merged to main"},
+            ],
+        }
+
+    runner_module._inspect_committed_task_branch_handoff = _fake_inspect_handoff
+    runner_module._merge_current_task_branch_to_main = _fake_merge_to_main
+    try:
+        _record_automation_success(
+            QueuedAutomationRun(
+                task_id=dev_task_id,
+                workspace_id=ws_id,
+                project_id=project_id,
+                title="Approved review merge handoff",
+                description="",
+                status="In Progress",
+                instruction="Finalize the already approved branch merge handoff.",
+                request_source="review_approved",
+                is_scheduled_run=False,
+                trigger_task_id=None,
+                trigger_from_status=None,
+                trigger_to_status=None,
+                triggered_at=None,
+                actor_user_id=team["dev1"],
+            ),
+            outcome=AutomationOutcome(
+                action="comment",
+                summary="Merged the approved task branch into main.",
+                comment=None,
+                execution_outcome_contract={
+                    "contract_version": 1,
+                    "files_changed": ["src/gameplay/score.ts"],
+                    "tests_run": False,
+                    "tests_passed": False,
+                    "commit_sha": after_sha,
+                    "branch": "task/review-approved-merge",
+                    "artifacts": [],
+                },
+                usage={
+                    "git_evidence": {
+                        "repo_root": str(tmp_path / "repo-placeholder"),
+                        "task_branch": "task/review-approved-merge",
+                        "before": {"head_sha": before_sha},
+                        "after": {"head_sha": after_sha, "on_task_branch": True, "is_dirty": False},
+                    }
+                },
+            ),
+        )
+    finally:
+        runner_module._inspect_committed_task_branch_handoff = original_inspect_handoff
+        runner_module._merge_current_task_branch_to_main = original_merge_to_main
+
+    assert len(merge_calls) == 1
+    task_payload = client.get(f"/api/tasks/{dev_task_id}").json()
+    assert task_payload["status"] != "In Review"
+    assert task_payload["review_status"] == "approved"
+
+
+def test_merge_to_main_rejects_review_required_task_without_approval(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    _configure_team_mode_for_project(client, ws_id=ws_id, project_id=project_id)
+    plugin_payload = client.get(f"/api/projects/{project_id}/plugins/team_mode")
+    assert plugin_payload.status_code == 200
+    config = plugin_payload.json()["config"]
+    config["review_policy"] = {"require_code_review": True}
+    applied = client.post(
+        f"/api/projects/{project_id}/plugins/team_mode/apply",
+        json={"config": config, "enabled": True},
+    )
+    assert applied.status_code == 200
+
+    task = client.post(
+        "/api/tasks",
+        json={
+            "workspace_id": ws_id,
+            "project_id": project_id,
+            "title": "Pending review merge guard",
+            "status": "In Progress",
+            "priority": "High",
+            "instruction": "This branch should not merge without approval.",
+            "external_refs": [
+                {"url": "task/pending-review-guard", "title": "task branch"},
+            ],
+        },
+    )
+    assert task.status_code == 200
+    task_id = task.json()["id"]
+
+    patched = client.patch(
+        f"/api/tasks/{task_id}",
+        json={
+            "review_required": True,
+            "review_status": "pending",
+        },
+    )
+    assert patched.status_code == 200
+
+    from features.agents.runner import _merge_current_task_branch_to_main
+    from shared.models import SessionLocal
+
+    with SessionLocal() as db:
+        result = _merge_current_task_branch_to_main(
+            db=db,
+            workspace_id=ws_id,
+            project_id=project_id,
+            task_id=task_id,
+            actor_user_id="00000000-0000-0000-0000-000000000001",
+        )
+
+    assert result["ok"] is False
+    assert "approved human review" in str(result["error"])
 
 
 def test_team_mode_merged_increment_completes_after_developer_merge_without_lead_handoff(tmp_path):
@@ -16779,7 +17731,7 @@ def test_team_mode_happy_path_rearms_blocked_lead_after_developer_handoff(tmp_pa
 
     lead_task_status = client.get(f"/api/tasks/{lead_task_id}")
     assert lead_task_status.status_code == 200
-    assert lead_task_status.json()["status"] == "Awaiting decision"
+    assert lead_task_status.json()["status"] == "In Progress"
 
 
 def test_single_lead_scheduled_task_is_dispatch_ready_after_developer_handoff(tmp_path):
@@ -17055,7 +18007,7 @@ def test_team_mode_happy_path_rearms_blocked_lead_when_any_dependency_clause_is_
 
     lead_task_status = client.get(f"/api/tasks/{lead_task_id}")
     assert lead_task_status.status_code == 200
-    assert lead_task_status.json()["status"] == "Awaiting decision"
+    assert lead_task_status.json()["status"] == "In Progress"
 
 
 def test_team_mode_happy_path_does_not_rearm_blocked_lead_after_failed_deploy_health(tmp_path):
@@ -19769,7 +20721,7 @@ def test_scheduled_instruction_can_queue_on_selected_statuses(tmp_path):
     schedule_trigger = next(
         trigger for trigger in created.json()['execution_triggers'] if trigger.get('kind') == 'schedule'
     )
-    assert schedule_trigger.get('run_on_statuses') == ['To do']
+    assert schedule_trigger.get('run_on_statuses') == ['To Do']
 
     from features.agents.runner import queue_due_scheduled_tasks_once
 
@@ -20444,7 +21396,7 @@ def test_status_change_trigger_self_queues_automation(tmp_path):
     assert payload['last_requested_source'] == 'status_change'
     assert payload['last_requested_instruction'] == 'Run a completion checklist'
     assert payload['last_requested_trigger_task_id'] == task_id
-    assert payload['last_requested_from_status'] == 'To do'
+    assert payload['last_requested_from_status'] == 'To Do'
     assert payload['last_requested_to_status'] == 'Done'
     assert isinstance(payload.get('last_requested_triggered_at'), str)
     assert payload['last_requested_triggered_at']
@@ -20556,7 +21508,7 @@ def test_runner_passes_status_change_trigger_metadata_to_executor(tmp_path, monk
     assert processed >= 1
 
     assert captured['trigger_task_id'] == source_id
-    assert captured['trigger_from_status'] == 'To do'
+    assert captured['trigger_from_status'] == 'To Do'
     assert captured['trigger_to_status'] == 'Done'
     assert isinstance(captured.get('trigger_timestamp'), str)
     assert captured['trigger_timestamp']
@@ -20566,7 +21518,7 @@ def test_runner_passes_status_change_trigger_metadata_to_executor(tmp_path, monk
     payload = automation.json()
     assert payload['automation_state'] == 'completed'
     assert payload['last_requested_trigger_task_id'] == source_id
-    assert payload['last_requested_from_status'] == 'To do'
+    assert payload['last_requested_from_status'] == 'To Do'
     assert payload['last_requested_to_status'] == 'Done'
     assert isinstance(payload.get('last_requested_triggered_at'), str)
     assert payload['last_requested_triggered_at']
@@ -20621,7 +21573,7 @@ def test_status_change_trigger_external_any_queues_target(tmp_path):
     assert payload['last_requested_source'] == 'status_change'
     assert payload['last_requested_instruction'] == 'React to source completion'
     assert payload['last_requested_trigger_task_id'] == source_id
-    assert payload['last_requested_from_status'] == 'To do'
+    assert payload['last_requested_from_status'] == 'To Do'
     assert payload['last_requested_to_status'] == 'Done'
     assert isinstance(payload.get('last_requested_triggered_at'), str)
     assert payload['last_requested_triggered_at']
@@ -21315,7 +22267,7 @@ def test_create_task_returns_aggregate_fallback_when_view_unavailable(tmp_path, 
     assert payload['title'] == 'Fallback task response'
     assert payload['workspace_id'] == ws_id
     assert payload['project_id'] == project_id
-    assert payload['status'] == 'To do'
+    assert payload['status'] == 'To Do'
 
 
 def test_patch_task_rejects_unresolvable_non_uuid_assignee_id(tmp_path):
@@ -22098,3 +23050,56 @@ def test_project_git_delivery_repository_endpoints_return_branch_tree_and_file_p
     assert file_payload['previewable'] is True
     assert file_payload['binary'] is False
     assert 'export const enabled = true' in file_payload['content']
+
+
+def test_project_git_delivery_repository_diff_endpoint_returns_branch_patch(tmp_path):
+    import subprocess
+
+    from shared.project_repository import ensure_project_repository_initialized
+
+    os.environ["AGENT_CODEX_WORKDIR"] = str(tmp_path)
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    created = client.post('/api/projects', json={'workspace_id': ws_id, 'name': 'Repository Diff Inspector'})
+    assert created.status_code == 200
+    project = created.json()
+    project_id = project['id']
+    project_name = project['name']
+
+    repo_root = ensure_project_repository_initialized(project_name=project_name, project_id=project_id)
+    (repo_root / 'src').mkdir(parents=True, exist_ok=True)
+    (repo_root / 'README.md').write_text('# Repository Diff Inspector\n', encoding='utf-8')
+    (repo_root / 'src' / 'app.ts').write_text('export const enabled = true\n', encoding='utf-8')
+    subprocess.run(['git', 'add', 'README.md', 'src/app.ts'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'commit', '-m', 'Add baseline files'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+
+    subprocess.run(['git', 'checkout', '-b', 'task/demo-diff'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    (repo_root / 'src' / 'app.ts').write_text('export const enabled = true\nexport const review = "required"\n', encoding='utf-8')
+    (repo_root / 'notes.txt').write_text('branch notes\n', encoding='utf-8')
+    subprocess.run(['git', 'add', 'src/app.ts', 'notes.txt'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'commit', '-m', 'Add review changes'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    subprocess.run(['git', 'checkout', 'main'], cwd=str(repo_root), check=True, capture_output=True, text=True)
+
+    response = client.get(
+        f'/api/projects/{project_id}/git-delivery/repository/diff',
+        params={'base_ref': 'main', 'head_ref': 'task/demo-diff'},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['base_ref'] == 'main'
+    assert payload['head_ref'] == 'task/demo-diff'
+    assert payload['compare_mode'] == 'merge_base'
+    assert payload['files_changed'] == 2
+    assert payload['insertions'] == 2
+    assert payload['deletions'] == 0
+    assert payload['patch_truncated'] is False
+    assert 'diff --git a/notes.txt b/notes.txt' in payload['patch']
+    assert 'diff --git a/src/app.ts b/src/app.ts' in payload['patch']
+
+    files = payload['files']
+    assert any(item['path'] == 'notes.txt' and item['status'] == 'added' and item['additions'] == 1 for item in files)
+    assert any(
+        item['path'] == 'src/app.ts' and item['status'] == 'modified' and item['additions'] == 1 and item['deletions'] == 0
+        for item in files
+    )

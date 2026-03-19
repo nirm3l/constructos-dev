@@ -86,9 +86,6 @@ from features.task_groups.domain import (
     EVENT_UPDATED as TASK_GROUP_EVENT_UPDATED,
     MUTATION_EVENTS as TASK_GROUP_MUTATION_EVENTS,
 )
-from features.project_templates.domain import (
-    EVENT_BOUND as PROJECT_TEMPLATE_EVENT_BOUND,
-)
 from features.chat.domain import (
     EVENT_ARCHIVED as CHAT_SESSION_EVENT_ARCHIVED,
     EVENT_ASSISTANT_MESSAGE_APPENDED as CHAT_SESSION_EVENT_ASSISTANT_MESSAGE_APPENDED,
@@ -122,8 +119,8 @@ from .models import (
     NoteGroup,
     Notification,
     Project,
-    ProjectTemplateBinding,
     ProjectMember,
+    ProjectSetupProfile,
     ProjectTagIndex,
     ProjectRule,
     SavedView,
@@ -157,6 +154,27 @@ from .event_upcasters import upcast_event, upcast_snapshot
 from .eventing_store import StreamState, get_kurrent_client, kurrent_read_stream, snapshot_stream_id, stream_id, NotFoundError, serialize_snapshot_event
 
 logger = logging.getLogger(__name__)
+# Legacy compatibility for older event streams that bound projects to templates
+# before project starters replaced that model.
+PROJECT_TEMPLATE_EVENT_BOUND = "ProjectTemplateBound"
+
+
+def _legacy_template_to_starter_key(template_key: str | None) -> str:
+    raw = str(template_key or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if raw in {"ddd", "ddd_product_build", "ddd_product"}:
+        return "ddd_system"
+    if raw in {"mobile_game", "browser_game", "mobile_browser_game", "mobile_browser_game_development"}:
+        return "web_game"
+    return raw or "blank"
+
+
+def _legacy_template_to_retrieval_hints(template_key: str | None) -> list[str]:
+    starter_key = _legacy_template_to_starter_key(template_key)
+    if starter_key == "ddd_system":
+        return ["bounded context", "aggregate", "command", "domain event", "read model", "policy"]
+    if starter_key == "web_game":
+        return ["gameplay", "touch controls", "asset pipeline", "performance budget", "docker compose"]
+    return ["project setup"]
 
 
 def _parse_tag_list(raw: str | None) -> list[str]:
@@ -1821,30 +1839,34 @@ def project_event(db: Session, ev: EventEnvelope):
     elif ev.event_type == PROJECT_TEMPLATE_EVENT_BOUND:
         project_id = p.get("project_id") or ev.aggregate_id
         if project_id:
-            binding = db.execute(
-                select(ProjectTemplateBinding).where(ProjectTemplateBinding.project_id == project_id)
+            profile = db.execute(
+                select(ProjectSetupProfile).where(ProjectSetupProfile.project_id == project_id)
             ).scalar_one_or_none()
-            if binding is None:
-                binding = ProjectTemplateBinding(
+            template_key = str(p.get("template_key") or "")
+            parameters_json = str(p.get("parameters_json") or "{}")
+            if profile is None:
+                profile = ProjectSetupProfile(
                     workspace_id=p.get("workspace_id") or m.get("workspace_id") or "",
                     project_id=project_id,
-                    template_key=str(p.get("template_key") or ""),
-                    template_version=str(p.get("template_version") or ""),
+                    primary_starter_key=_legacy_template_to_starter_key(template_key),
+                    facet_keys_json="[]",
+                    starter_version="1",
+                    resolved_inputs_json=parameters_json,
+                    retrieval_hints_json=json.dumps(_legacy_template_to_retrieval_hints(template_key)),
                     applied_by=str(p.get("applied_by") or m.get("actor_id") or ""),
-                    parameters_json=str(p.get("parameters_json") or "{}"),
                 )
-                db.add(binding)
+                db.add(profile)
             else:
                 if p.get("workspace_id"):
-                    binding.workspace_id = p["workspace_id"]
-                if p.get("template_key"):
-                    binding.template_key = p["template_key"]
+                    profile.workspace_id = p["workspace_id"]
+                profile.primary_starter_key = _legacy_template_to_starter_key(template_key)
                 if p.get("template_version"):
-                    binding.template_version = p["template_version"]
+                    profile.starter_version = "1"
                 if p.get("applied_by"):
-                    binding.applied_by = p["applied_by"]
+                    profile.applied_by = p["applied_by"]
                 if p.get("parameters_json") is not None:
-                    binding.parameters_json = str(p.get("parameters_json") or "{}")
+                    profile.resolved_inputs_json = parameters_json
+                profile.retrieval_hints_json = json.dumps(_legacy_template_to_retrieval_hints(template_key))
     elif ev.event_type == USER_EVENT_CREATED:
         user = db.get(User, ev.aggregate_id)
         if user is None:
