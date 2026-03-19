@@ -1,0 +1,95 @@
+{
+  "key": "ddd_system",
+  "label": "DDD System",
+  "description": "For bounded contexts, aggregates, commands, events, and event-storming-oriented delivery.",
+  "positioning_text": "Best when the project is organized around domain boundaries and explicit write/read models.",
+  "recommended_use_cases": ["bounded contexts", "aggregates", "commands", "events", "projections"],
+  "default_custom_statuses": ["To Do", "In Progress", "In Review", "Completed"],
+  "retrieval_hints": ["bounded context", "aggregate", "command", "domain event", "read model", "policy"],
+  "question_set": [
+    "What is the core domain or bounded context?",
+    "Do you expect commands and domain events?",
+    "Do you want Event Storming enabled?"
+  ],
+  "setup_tags": ["ddd", "event_storming", "domain_model"],
+  "specifications": [
+    {
+      "title": "Bounded Context and Ubiquitous Language",
+      "body": "Define bounded contexts, context map, ownership boundaries, and a shared ubiquitous language glossary for core terms."
+    },
+    {
+      "title": "Aggregate Contracts and Invariants",
+      "body": "Design aggregate roots, entities, value objects, and write-side invariant rules with failure modes."
+    },
+    {
+      "title": "Command and Domain Event Catalog",
+      "body": "Define command contracts, event payload schemas, versioning rules, and compatibility constraints."
+    },
+    {
+      "title": "Projection and Read Model Design",
+      "body": "Specify read models, projection lag tolerances, and reporting queries used by UI and automation workers."
+    },
+    {
+      "title": "Integration Boundaries and ACL",
+      "body": "Document external integration contracts, anti-corruption layers, and translation rules at boundaries."
+    }
+  ],
+  "tasks": [
+    {
+      "title": "Create context map and glossary draft",
+      "description": "Produce first-pass context map and shared language document.",
+      "priority": "High",
+      "labels": ["ddd", "discovery"],
+      "specification_title": "Bounded Context and Ubiquitous Language"
+    },
+    {
+      "title": "Review aggregate invariants with domain stakeholders",
+      "description": "Validate business invariants and reject invalid transitions.",
+      "priority": "High",
+      "labels": ["ddd", "aggregate"],
+      "specification_title": "Aggregate Contracts and Invariants"
+    },
+    {
+      "title": "Define command payload contracts",
+      "description": "Write command schemas with validation and expected errors.",
+      "priority": "High",
+      "labels": ["ddd", "commands"],
+      "specification_title": "Command and Domain Event Catalog"
+    },
+    {
+      "title": "Define domain event schemas and upcasting strategy",
+      "description": "Capture event evolution strategy and upcaster constraints.",
+      "priority": "High",
+      "labels": ["ddd", "events", "schema"],
+      "specification_title": "Command and Domain Event Catalog"
+    },
+    {
+      "title": "Design SQL read models and projection checkpoints",
+      "description": "Specify read-side tables and checkpointing behavior.",
+      "priority": "Med",
+      "labels": ["projection", "read-model"],
+      "specification_title": "Projection and Read Model Design"
+    },
+    {
+      "title": "Document external integration ACL contracts",
+      "description": "Define ACL translation contracts for external systems.",
+      "priority": "Med",
+      "labels": ["integration", "acl"],
+      "specification_title": "Integration Boundaries and ACL"
+    }
+  ],
+  "rules": [
+    {
+      "title": "All write-side changes must flow through commands and events",
+      "body": "No direct state mutation without explicit command and emitted domain event."
+    },
+    {
+      "title": "Aggregate invariants are enforced inside aggregate boundaries",
+      "body": "Validation rules must not be spread across unrelated modules."
+    },
+    {
+      "title": "Every domain event must have an owning aggregate and consumer map",
+      "body": "Event producers and projection consumers must be traceable."
+    }
+  ]
+}

@@ -734,7 +734,6 @@ def test_codex_prompt_includes_interactive_project_creation_guidance():
     assert "ask only the `next_question`" in prompt
     assert "present a user-friendly completion summary" in prompt
     assert "To do, In Progress, In Review, Awaiting decision, Blocked, Completed" in prompt
-    assert "at least one recurring scheduled Team Lead oversight task" in prompt
     assert "If Team Mode is requested, prefer this setup flow" in prompt
     assert "If the user requests an exact task count, keep that exact count" in prompt
 
@@ -755,9 +754,8 @@ def test_mcp_tool_descriptions_include_operation_specific_guidance():
     assert "plans/specs/design docs" in mcp_server.CREATE_NOTE_TOOL_DESCRIPTION
     assert "manual/custom setup" in mcp_server.CREATE_PROJECT_TOOL_DESCRIPTION
     assert "chat default profile" in mcp_server.CREATE_PROJECT_TOOL_DESCRIPTION.lower()
-    assert "chat default profile" in mcp_server.PREVIEW_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION.lower()
-    assert "chat default profile" in mcp_server.CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION.lower()
-    assert "preview_project_from_template" in mcp_server.CREATE_PROJECT_FROM_TEMPLATE_TOOL_DESCRIPTION
+    assert "project starters" in mcp_server.LIST_PROJECT_STARTERS_TOOL_DESCRIPTION.lower()
+    assert "setup profile" in mcp_server.GET_PROJECT_SETUP_PROFILE_TOOL_DESCRIPTION.lower()
     assert "in-app notification" in mcp_server.SEND_IN_APP_NOTIFICATION_TOOL_DESCRIPTION.lower()
     assert "staged project setup in one call" in mcp_server.SETUP_PROJECT_ORCHESTRATION_TOOL_DESCRIPTION
     assert "missing_inputs" in mcp_server.SETUP_PROJECT_ORCHESTRATION_TOOL_DESCRIPTION
@@ -767,9 +765,8 @@ def test_mcp_tool_descriptions_include_operation_specific_guidance():
     assert "embedding_enabled: bool = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED" in source
     assert "chat_index_mode: str = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE" in source
     assert "chat_attachment_ingestion_mode: str = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE" in source
-    assert "embedding_enabled: bool | None = MCP_DEFAULT_PROJECT_EMBEDDING_ENABLED" in source
-    assert "chat_index_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_INDEX_MODE" in source
-    assert "chat_attachment_ingestion_mode: str | None = MCP_DEFAULT_PROJECT_CHAT_ATTACHMENT_INGESTION_MODE" in source
+    assert "primary_starter_key: str | None = None" in source
+    assert "facet_keys: list[str] | None = None" in source
     assert "def send_in_app_notification(" in source
 
 
@@ -870,6 +867,7 @@ def test_create_mcp_setup_project_orchestration_tool_runs_real_service_flow(tmp_
     payload = fn(
         name="MCP Integration Project",
         short_description="Setup via MCP tool layer.",
+        primary_starter_key="web_app",
         workspace_id=workspace_id,
         enable_team_mode=True,
         enable_git_delivery=True,
@@ -933,6 +931,7 @@ def test_create_mcp_setup_project_orchestration_tool_supports_kickoff_after_setu
     payload = fn(
         name="MCP Integration Project Kickoff",
         short_description="Setup via MCP tool layer with kickoff.",
+        primary_starter_key="web_app",
         workspace_id=workspace_id,
         enable_team_mode=True,
         enable_git_delivery=True,

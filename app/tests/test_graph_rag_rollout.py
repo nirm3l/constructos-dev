@@ -183,7 +183,7 @@ def test_search_project_knowledge_boosts_snippets_with_query_overlap(monkeypatch
         "resolve_project_embedding_runtime",
         lambda db, project_id: SimpleNamespace(enabled=True),
     )
-    monkeypatch.setattr(knowledge_graph, "_load_project_template_binding", lambda project_id: None)
+    monkeypatch.setattr(knowledge_graph, "_load_project_setup_profile", lambda project_id: None)
     monkeypatch.setattr(
         knowledge_graph,
         "search_project_chunks",

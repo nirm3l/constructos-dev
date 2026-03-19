@@ -1275,11 +1275,15 @@ body.md-fullscreen-open {
 }
 
 .notif-message-md .markdown {
+  --md-font-body: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
+  --md-font-heading: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
   padding: 10px;
   max-height: none;
   overflow: visible;
   pointer-events: none;
   user-select: none;
+  font-size: 0.84rem;
+  line-height: 1.45;
 }
 
 .notif-message-md .markdown p {
@@ -1563,6 +1567,17 @@ body.md-fullscreen-open {
   margin-bottom: 2px;
 }
 
+.project-create-name-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.project-create-name-row .project-create-name-field {
+  min-width: 0;
+}
+
 .project-create-sections {
   display: grid;
   gap: 10px;
@@ -1812,26 +1827,6 @@ body.md-fullscreen-open {
   justify-content: center;
 }
 
-.project-create-actions-bar {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 8px;
-}
-
-.project-create-actions-bar-top {
-  position: sticky;
-  top: 8px;
-  z-index: 12;
-  margin-bottom: 2px;
-  padding: 8px;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 18%);
-  background: color-mix(in srgb, var(--surface), var(--surface-alt) 16%);
-  box-shadow: 0 8px 22px color-mix(in srgb, var(--brand), transparent 88%);
-}
-
 .project-create-submit-btn {
   display: inline-flex;
   align-items: center;
@@ -1841,7 +1836,6 @@ body.md-fullscreen-open {
   padding: 0 14px;
   border-radius: 10px;
   font-weight: 700;
-  margin-left: auto;
 }
 
 .project-create-submit-btn .icon {
@@ -3360,32 +3354,201 @@ textarea:disabled {
 }
 
 .markdown {
+  --md-font-body: "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --md-font-heading: "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --md-font-code: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --md-text: color-mix(in srgb, var(--text), #173321 14%);
+  --md-heading: color-mix(in srgb, var(--text), var(--brand-strong) 18%);
+  --md-muted: color-mix(in srgb, var(--muted), var(--text) 18%);
+  --md-rule: color-mix(in srgb, var(--line), var(--brand) 12%);
+  --md-quote-bg: color-mix(in srgb, var(--surface-alt), white 52%);
+  --md-inline-code-bg: color-mix(in srgb, var(--surface-alt), white 54%);
+  --md-table-stripe: color-mix(in srgb, var(--surface-alt), white 56%);
   border: 1px solid var(--line);
   border-radius: 14px;
-  padding: 12px;
+  padding: 16px 18px;
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 22%);
   overflow: auto;
   max-height: 520px;
+  color: var(--md-text);
+  font-family: var(--md-font-body);
+  font-size: 1rem;
+  line-height: 1.66;
+  letter-spacing: 0.003em;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
 }
 
-.markdown h1, .markdown h2, .markdown h3 {
-  margin: 0.6em 0 0.35em;
+.markdown > :first-child {
+  margin-top: 0;
 }
 
-.markdown p {
-  margin: 0.55em 0;
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown :where(h1, h2, h3, h4, h5, h6) {
+  margin: 1.45em 0 0.5em;
+  color: var(--md-heading);
+  font-family: var(--md-font-heading);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
+.markdown h1 {
+  font-size: clamp(1.85rem, 1.3rem + 1.1vw, 2.4rem);
+}
+
+.markdown h2 {
+  font-size: clamp(1.45rem, 1.12rem + 0.72vw, 1.85rem);
+}
+
+.markdown h3 {
+  font-size: clamp(1.2rem, 1.04rem + 0.45vw, 1.45rem);
+}
+
+.markdown h4 {
+  font-size: 1.08rem;
+  font-weight: 650;
+}
+
+.markdown h5,
+.markdown h6 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.markdown p,
+.markdown ul,
+.markdown ol,
+.markdown blockquote,
+.markdown pre,
+.markdown table,
+.markdown hr {
+  margin: 0.95em 0;
+}
+
+.markdown ul,
+.markdown ol {
+  padding-left: 1.5em;
+}
+
+.markdown li + li {
+  margin-top: 0.34em;
+}
+
+.markdown li > :first-child {
+  margin-top: 0;
+}
+
+.markdown li > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown ul li::marker {
+  color: var(--brand-strong);
+}
+
+.markdown ol li::marker {
+  color: var(--md-muted);
+  font-family: var(--md-font-heading);
+  font-weight: 700;
+}
+
+.markdown blockquote {
+  padding: 0.9em 1.1em;
+  border-left: 4px solid color-mix(in srgb, var(--brand), white 18%);
+  border-radius: 0 14px 14px 0;
+  background: linear-gradient(180deg, var(--md-quote-bg), color-mix(in srgb, var(--md-quote-bg), transparent 12%));
+  color: var(--md-muted);
+}
+
+.markdown blockquote > :first-child {
+  margin-top: 0;
+}
+
+.markdown blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown hr {
+  border: 0;
+  border-top: 1px solid var(--md-rule);
+}
+
+.markdown strong {
+  color: var(--md-heading);
+  font-weight: 700;
+}
+
+.markdown em {
+  color: color-mix(in srgb, var(--md-text), var(--brand-strong) 12%);
+}
+
+.markdown a {
+  font-weight: 600;
+}
+
+.markdown img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1.1em auto;
+  border-radius: 12px;
+  border: 1px solid var(--md-rule);
+}
+
+.markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.96em;
+  line-height: 1.5;
+  background: color-mix(in srgb, var(--surface), white 36%);
+  border: 1px solid var(--md-rule);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.markdown thead {
+  background: color-mix(in srgb, var(--surface-alt), white 36%);
+}
+
+.markdown tbody tr:nth-child(even) {
+  background: var(--md-table-stripe);
+}
+
+.markdown th,
+.markdown td {
+  padding: 0.72em 0.82em;
+  border: 1px solid var(--md-rule);
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown th {
+  font-family: var(--md-font-code);
+  font-size: 0.79em;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .markdown code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  font-size: 0.95em;
+  font-family: var(--md-font-code);
+  font-size: 0.9em;
+  font-variant-ligatures: none;
 }
 
 .markdown :not(pre) > code {
-  background: color-mix(in srgb, var(--surface-alt), white 50%);
-  border: 1px solid var(--line);
-  padding: 1px 6px;
+  background: var(--md-inline-code-bg);
+  border: 1px solid var(--md-rule);
+  padding: 0.14em 0.44em;
   border-radius: 8px;
+  color: color-mix(in srgb, var(--md-heading), var(--brand-strong) 12%);
 }
 
 [data-theme="dark"] .markdown :not(pre) > code {
@@ -3396,10 +3559,35 @@ textarea:disabled {
 .markdown pre {
   background: #0f1d15;
   color: #e5e7eb;
-  padding: 12px;
+  padding: 14px 16px;
   border-radius: 14px;
   overflow: auto;
   border: 1px solid rgba(255,255,255,0.08);
+  line-height: 1.55;
+  tab-size: 2;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+.markdown pre code {
+  display: block;
+  font-size: 0.88rem;
+}
+
+@media (max-width: 640px) {
+  .markdown {
+    padding: 14px;
+    font-size: 0.96rem;
+    line-height: 1.6;
+  }
+
+  .markdown table {
+    font-size: 0.92em;
+  }
+
+  .markdown th,
+  .markdown td {
+    padding: 0.62em 0.68em;
+  }
 }
 
 .markdown-json-block {
@@ -3481,6 +3669,13 @@ textarea:disabled {
 }
 
 [data-theme="dark"] .markdown {
+  --md-text: color-mix(in srgb, #e6fff0, var(--text) 20%);
+  --md-heading: #c5ffd9;
+  --md-muted: color-mix(in srgb, #b7e6c7, var(--muted) 44%);
+  --md-rule: color-mix(in srgb, #29573d, white 8%);
+  --md-quote-bg: color-mix(in srgb, #122117, var(--surface-alt) 72%);
+  --md-inline-code-bg: #102115;
+  --md-table-stripe: color-mix(in srgb, #122117, var(--surface-alt) 62%);
   background: color-mix(in srgb, var(--surface), var(--surface-alt) 22%);
 }
 
@@ -3529,10 +3724,14 @@ textarea:disabled {
 }
 
 .comment-item .markdown {
+  --md-font-body: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
+  --md-font-heading: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
   border: none;
   padding: 0;
   background: transparent;
   max-height: none;
+  font-size: 0.96rem;
+  line-height: 1.62;
 }
 
 .comment-body {
@@ -4126,7 +4325,7 @@ textarea:disabled {
 
 .project-item .task-main {
   padding-left: 12px;
-  padding-right: 88px;
+  padding-right: 44px;
 }
 
 .project-item .task-main > * {
@@ -6985,6 +7184,38 @@ textarea:disabled {
   line-height: 1.4;
 }
 
+:root {
+  --kg-node-task-bg: #dbeafe;
+  --kg-node-task-text: #1e3a8a;
+  --kg-node-task-border: #2563eb;
+  --kg-node-specification-bg: #ccfbf1;
+  --kg-node-specification-text: #134e4a;
+  --kg-node-specification-border: #0d9488;
+  --kg-node-note-bg: #f3e8ff;
+  --kg-node-note-text: #581c87;
+  --kg-node-note-border: #9333ea;
+  --kg-node-comment-bg: #dcfce7;
+  --kg-node-comment-text: #14532d;
+  --kg-node-comment-border: #16a34a;
+  --kg-node-projectrule-bg: #ffedd5;
+  --kg-node-projectrule-text: #9a3412;
+  --kg-node-projectrule-border: #ea580c;
+  --kg-node-tag-bg: #fef3c7;
+  --kg-node-tag-text: #78350f;
+  --kg-node-tag-border: #ca8a04;
+  --kg-node-user-bg: #e0e7ff;
+  --kg-node-user-text: #312e81;
+  --kg-node-user-border: #4f46e5;
+  --kg-node-workspace-bg: #e5e7eb;
+  --kg-node-workspace-text: #111827;
+  --kg-node-workspace-border: #6b7280;
+  --kg-node-default-bg: #e2e8f0;
+  --kg-node-default-text: #0f172a;
+  --kg-node-default-border: #64748b;
+  --kg-edge-label-text: #334155;
+  --kg-edge-label-bg: rgba(248, 250, 252, 0.9);
+}
+
 .graph-viz-block {
   margin-top: 10px;
 }
@@ -7172,7 +7403,7 @@ textarea:disabled {
   font-size: 12px;
   font-weight: 800;
   line-height: 1.32;
-  color: color-mix(in srgb, var(--text), var(--brand-strong) 6%);
+  color: inherit;
   word-break: break-word;
 }
 
@@ -7187,7 +7418,8 @@ textarea:disabled {
 .kg-alt-node-submeta {
   font-size: 11px;
   line-height: 1.3;
-  color: color-mix(in srgb, var(--text-muted), var(--text) 16%);
+  color: inherit;
+  opacity: 0.82;
   text-align: center;
 }
 
@@ -7206,7 +7438,7 @@ textarea:disabled {
   font-size: 12px;
   font-weight: 800;
   line-height: 1.3;
-  color: color-mix(in srgb, var(--text), var(--brand-strong) 6%);
+  color: inherit;
   word-break: break-word;
 }
 
@@ -7214,8 +7446,15 @@ textarea:disabled {
   width: 8px;
   height: 8px;
   border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--line), #0f172a 12%);
-  background: color-mix(in srgb, var(--surface), #94a3b8 24%);
+  border: 1px solid color-mix(in srgb, currentColor 42%, transparent);
+  background: color-mix(in srgb, currentColor 22%, white 78%);
+}
+
+.kg-alt-node-card .status-chip,
+.event-storming-node-card .status-chip {
+  border: 1px solid color-mix(in srgb, currentColor 28%, transparent);
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  color: inherit;
 }
 
 .graph-alt-link-button {
@@ -7926,12 +8165,102 @@ textarea:disabled {
 }
 
 .graph-markdown-preview .markdown {
+  --md-font-body: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
+  --md-font-heading: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
   border: none;
   border-radius: 0;
   padding: 0;
   background: transparent;
   overflow: visible;
   max-height: none;
+}
+
+.graph-pack-markdown-preview {
+  padding: 14px 16px;
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface), white 18%) 0%, color-mix(in srgb, var(--surface), var(--surface-alt) 30%) 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.graph-pack-markdown-preview .markdown {
+  font-size: 0.96rem;
+  line-height: 1.62;
+  color: color-mix(in srgb, var(--text), #173222 18%);
+}
+
+.graph-pack-markdown-preview .markdown :where(h1, h2, h3, h4, h5, h6) {
+  margin: 1.1em 0 0.45em;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.graph-pack-markdown-preview .markdown h1 {
+  font-size: clamp(1.18rem, 1.02rem + 0.38vw, 1.42rem);
+}
+
+.graph-pack-markdown-preview .markdown h2 {
+  font-size: clamp(1.04rem, 0.96rem + 0.24vw, 1.18rem);
+}
+
+.graph-pack-markdown-preview .markdown h3 {
+  font-size: 0.98rem;
+}
+
+.graph-pack-markdown-preview .markdown h4,
+.graph-pack-markdown-preview .markdown h5,
+.graph-pack-markdown-preview .markdown h6 {
+  font-size: 0.9rem;
+}
+
+.graph-pack-markdown-preview .markdown p,
+.graph-pack-markdown-preview .markdown ul,
+.graph-pack-markdown-preview .markdown ol,
+.graph-pack-markdown-preview .markdown blockquote,
+.graph-pack-markdown-preview .markdown pre,
+.graph-pack-markdown-preview .markdown table,
+.graph-pack-markdown-preview .markdown hr {
+  margin: 0.72em 0;
+}
+
+.graph-pack-markdown-preview .markdown ul,
+.graph-pack-markdown-preview .markdown ol {
+  padding-left: 1.2em;
+}
+
+.graph-pack-markdown-preview .markdown li + li {
+  margin-top: 0.22em;
+}
+
+.graph-pack-markdown-preview .markdown blockquote {
+  padding: 0.72em 0.9em;
+  border-left-width: 3px;
+  border-radius: 0 12px 12px 0;
+}
+
+.graph-pack-markdown-preview .markdown :not(pre) > code {
+  border-radius: 7px;
+  padding: 0.12em 0.4em;
+  font-size: 0.84em;
+}
+
+.graph-pack-markdown-preview .markdown pre {
+  padding: 12px 14px;
+  border-radius: 12px;
+  line-height: 1.48;
+}
+
+.graph-pack-markdown-preview .markdown pre code {
+  font-size: 0.82rem;
+}
+
+.graph-pack-markdown-preview .markdown table {
+  font-size: 0.9em;
+}
+
+.graph-pack-markdown-preview .markdown th,
+.graph-pack-markdown-preview .markdown td {
+  padding: 0.58em 0.7em;
 }
 
 .badge {
@@ -8277,6 +8606,170 @@ textarea:disabled {
   margin-top: 8px;
 }
 
+.codex-chat-project-setup-entry {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.codex-chat-project-setup-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.codex-chat-project-setup-copy {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.codex-chat-project-starter-panel {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-alt), white 30%) 0%, color-mix(in srgb, var(--surface), white 10%) 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.codex-chat-project-starter-compact {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--surface-alt), white 18%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.codex-chat-project-starter-compact-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.codex-chat-project-starter-compact-copy {
+  color: color-mix(in srgb, var(--muted), var(--text) 24%);
+}
+
+.codex-chat-project-starter-compact-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.codex-chat-project-starter-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.codex-chat-project-starter-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.codex-chat-project-starter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.codex-chat-project-starter-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--surface), white 12%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+}
+
+.codex-chat-project-starter-card:hover {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 42%);
+  transform: translateY(-1px);
+}
+
+.codex-chat-project-starter-card.is-selected {
+  border-color: color-mix(in srgb, var(--brand), var(--line) 24%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand), transparent 52%);
+}
+
+.codex-chat-project-starter-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.codex-chat-project-starter-card-title {
+  font-weight: 700;
+}
+
+.codex-chat-project-starter-card-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.codex-chat-project-starter-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.codex-chat-project-starter-hints {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.codex-chat-project-starter-popover {
+  width: min(320px, calc(100vw - 24px));
+  max-width: min(360px, calc(100vw - 32px));
+  border: 1px solid color-mix(in srgb, var(--line), var(--brand) 22%);
+  border-radius: 12px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 10%);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 1510;
+}
+
+.codex-chat-project-starter-popover-title {
+  font-weight: 700;
+}
+
+.codex-chat-project-starter-popover-copy {
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.codex-chat-project-starter-popover-arrow {
+  fill: color-mix(in srgb, var(--surface), var(--surface-alt) 10%);
+}
+
 .codex-chat-auth-banner {
   margin: 0 0 8px;
   display: flex;
@@ -8320,12 +8813,16 @@ textarea:disabled {
 }
 
 .codex-chat-bubble .markdown {
+  --md-font-body: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
+  --md-font-heading: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
   border: none;
   border-radius: 0;
   padding: 0;
   background: transparent;
   overflow: visible;
   max-height: none;
+  font-size: 0.95rem;
+  line-height: 1.6;
 }
 
 .codex-chat-bubble .markdown pre {
@@ -10658,6 +11155,38 @@ textarea:disabled {
   background: #11251b;
 }
 
+[data-theme="dark"] {
+  --kg-node-task-bg: #18375a;
+  --kg-node-task-text: #eff6ff;
+  --kg-node-task-border: #60a5fa;
+  --kg-node-specification-bg: #113c39;
+  --kg-node-specification-text: #ecfffb;
+  --kg-node-specification-border: #2dd4bf;
+  --kg-node-note-bg: #43235c;
+  --kg-node-note-text: #faf1ff;
+  --kg-node-note-border: #c084fc;
+  --kg-node-comment-bg: #173726;
+  --kg-node-comment-text: #ecfff3;
+  --kg-node-comment-border: #4ade80;
+  --kg-node-projectrule-bg: #4b2616;
+  --kg-node-projectrule-text: #fff4ec;
+  --kg-node-projectrule-border: #fb923c;
+  --kg-node-tag-bg: #4e3914;
+  --kg-node-tag-text: #fff8df;
+  --kg-node-tag-border: #fbbf24;
+  --kg-node-user-bg: #262f63;
+  --kg-node-user-text: #f3f0ff;
+  --kg-node-user-border: #818cf8;
+  --kg-node-workspace-bg: #28333d;
+  --kg-node-workspace-text: #f8fafc;
+  --kg-node-workspace-border: #94a3b8;
+  --kg-node-default-bg: #25303d;
+  --kg-node-default-text: #f8fafc;
+  --kg-node-default-border: #94a3b8;
+  --kg-edge-label-text: #e2e8f0;
+  --kg-edge-label-bg: rgba(15, 23, 42, 0.92);
+}
+
 [data-theme="dark"] .graph-context-snapshot {
   border-color: #28543b;
   background:
@@ -10691,6 +11220,18 @@ textarea:disabled {
   box-shadow:
     inset 0 1px 0 rgba(187, 255, 209, 0.2),
     inset 0 -1px 0 rgba(2, 8, 20, 0.55);
+}
+
+[data-theme="dark"] .graph-pack-markdown-preview {
+  background:
+    linear-gradient(180deg, #102218 0%, #0b1711 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(170, 255, 202, 0.08),
+    0 10px 24px rgba(2, 10, 6, 0.22);
+}
+
+[data-theme="dark"] .graph-pack-markdown-preview .markdown {
+  color: #d9f6e5;
 }
 
 [data-theme="dark"] .graph-context-cube-grid-dense .graph-context-cube {
@@ -12089,23 +12630,15 @@ textarea {
     width: min(340px, calc(100vw - 14px));
   }
 
-  .project-create-actions-bar {
-    justify-content: flex-end;
-    gap: 6px;
-  }
-
-  .project-create-actions-bar-top {
-    top: 6px;
-    padding: 6px;
-  }
-
-  .project-create-actions-bar > * {
-    flex: 0 0 auto;
+  .project-create-name-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    gap: 8px;
   }
 
   .project-create-submit-btn {
-    min-width: 156px;
-    margin-left: 0;
+    width: 100%;
+    min-width: 0;
   }
 
   .project-chat-policy-inline {
@@ -13500,6 +14033,18 @@ textarea {
   overflow-x: hidden;
 }
 
+.git-repository-dialog .docker-runtime-summary-card {
+  min-width: 0;
+}
+
+.git-repository-summary-value {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .git-repository-desktop-layout {
   min-height: 0;
   overflow: visible;
@@ -13745,6 +14290,8 @@ textarea {
 }
 
 .git-repository-preview .markdown {
+  --md-font-body: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
+  --md-font-heading: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
   margin: 0;
 }
 
@@ -13845,6 +14392,14 @@ textarea {
 }
 
 @media (max-width: 640px) and (orientation: portrait) {
+  .codex-chat-project-setup-row {
+    flex-wrap: nowrap;
+  }
+
+  .codex-chat-project-setup-copy {
+    font-size: 11px;
+  }
+
   .docker-runtime-dialog {
     width: calc(100vw - 12px);
     max-width: calc(100vw - 12px);
@@ -14578,6 +15133,13 @@ textarea {
 .task-flow-event-markdown .markdown blockquote {
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.task-flow-event-markdown .markdown {
+  --md-font-body: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
+  --md-font-heading: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
+  font-size: 0.95rem;
+  line-height: 1.58;
 }
 
 .task-flow-event-markdown .markdown pre,

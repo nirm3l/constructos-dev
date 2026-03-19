@@ -81,7 +81,9 @@ export function AppPrimaryPanels({ state }: { state: any }) {
           boardData={state.tab === 'inbox' ? undefined : state.board.data}
           actorNames={state.actorNames}
           taskTeamAgentLabelsByProjectId={state.taskTeamAgentLabelsByProjectId}
-          onOpenTaskEditor={state.openTaskEditor}
+          onOpenTaskEditor={(taskId) => {
+            void state.openTask(taskId, state.selectedProjectId || null)
+          }}
           onOpenSpecification={state.openSpecification}
           specificationNames={state.specificationNameMap}
           onMoveTaskStatus={state.moveTaskToStatus}
@@ -117,9 +119,6 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             setShowProjectCreateForm: state.setShowProjectCreateForm,
             projectName: state.projectName,
             setProjectName: state.setProjectName,
-            projectTemplateKey: state.projectTemplateKey,
-            setProjectTemplateKey: state.setProjectTemplateKey,
-            previewProjectFromTemplateMutation: state.previewProjectFromTemplateMutation,
             createProjectMutation: state.createProjectMutation,
             projectCustomStatusesText: state.projectCustomStatusesText,
             setProjectCustomStatusesText: state.setProjectCustomStatusesText,
@@ -160,8 +159,6 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             vectorStoreEnabled: state.vectorStoreEnabled,
             contextPackEvidenceTopKDefault: state.contextPackEvidenceTopKDefault,
             contextLimitTokensDefault: state.contextLimitTokensDefault,
-            projectTemplateParametersText: state.projectTemplateParametersText,
-            setProjectTemplateParametersText: state.setProjectTemplateParametersText,
             workspaceUsers: state.workspaceUsers,
             createProjectMemberIds: state.createProjectMemberIds,
             createProjectWorkspaceSkillIds: state.createProjectWorkspaceSkillIds,
@@ -192,7 +189,6 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             projectRules: state.projectRules,
             projectSkills: state.projectSkills,
             workspaceSkills: state.workspaceSkills,
-            projectTemplates: state.projectTemplates,
             projectGraphOverview: state.projectGraphOverview,
             projectGraphContextPack: state.projectGraphContextPack,
             projectGraphSubgraph: state.projectGraphSubgraph,
@@ -498,6 +494,15 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             workspaceName={String(currentWorkspace?.name || '').trim()}
             workspaceRole={String(currentWorkspaceRole || '').trim()}
             canManageUsers={state.canManageUsers}
+            doctorStatus={state.workspaceDoctorQuery.data ?? null}
+            doctorLoading={Boolean(state.workspaceDoctorQuery.isLoading || state.workspaceDoctorQuery.isFetching)}
+            doctorError={state.workspaceDoctorQuery.isError ? 'Unable to load ConstructOS Doctor status.' : null}
+            onSeedDoctor={() => state.seedWorkspaceDoctorMutation.mutateAsync()}
+            seedDoctorPending={state.seedWorkspaceDoctorMutation.isPending}
+            onRunDoctor={() => state.runWorkspaceDoctorMutation.mutateAsync()}
+            runDoctorPending={state.runWorkspaceDoctorMutation.isPending}
+            onResetDoctor={() => state.resetWorkspaceDoctorMutation.mutateAsync()}
+            resetDoctorPending={state.resetWorkspaceDoctorMutation.isPending}
             workspaceUsersCount={state.adminUsers.length}
             workspaceSkillsCount={state.workspaceSkills.data?.total ?? state.workspaceSkills.data?.items?.length ?? 0}
             workspaceUsersContent={state.canManageUsers ? (

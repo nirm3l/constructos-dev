@@ -1,0 +1,12 @@
+{
+  "key": "api_service",
+  "label": "API Service",
+  "description": "For APIs, backend services, workers, and integration-heavy systems.",
+  "positioning_text": "Best when the primary product is a service boundary, not a browser UI.",
+  "recommended_use_cases": ["API", "worker", "integration service", "platform service"],
+  "default_custom_statuses": ["To Do", "In Progress", "In Review", "Completed"],
+  "retrieval_hints": ["api", "worker", "integration", "runtime", "deploy"],
+  "question_set": ["What is the service purpose?", "Which external integrations matter?", "Do you need workers?"],
+  "setup_tags": ["backend", "service", "api"],
+  "facet_defaults": ["api_backend"]
+}

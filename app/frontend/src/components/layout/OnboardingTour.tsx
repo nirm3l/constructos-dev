@@ -36,6 +36,13 @@ function skipStepIfTargetMissing(instance: Driver, selector: string): void {
   }, 220)
 }
 
+function clickTargetWhenAvailable(selector: string): void {
+  window.setTimeout(() => {
+    const element = document.querySelector<HTMLElement>(selector)
+    element?.click()
+  }, 80)
+}
+
 function quickTourSteps(
   setTab: (tab: Tab) => void,
   setShowQuickAdd: React.Dispatch<React.SetStateAction<boolean>>,
@@ -46,7 +53,7 @@ function quickTourSteps(
       element: '[data-tour-id="header-project-select"]',
       popover: {
         title: 'Project Scope',
-        description: 'Pick the active project first. Most lists and actions are scoped to this selection.',
+        description: 'Pick the active project first. Tasks, notes, specifications, graph views, and search all follow this selection.',
         side: 'bottom',
         align: 'start',
       },
@@ -58,45 +65,48 @@ function quickTourSteps(
       },
     },
     {
-      element: '[data-tour-id="fab-new-task"]',
-      popover: {
-        title: 'Quick Task',
-        description: 'Use this floating action button to create a task from anywhere in the app.',
-        side: 'left',
-        align: 'center',
-      },
-      onHighlightStarted: (_element, _step, opts) => {
-        setTab('tasks')
-        setShowQuickAdd(false)
-        skipStepIfTargetMissing(opts.driver, '[data-tour-id="fab-new-task"]')
-      },
-    },
-    {
-      element: '[data-tour-id="quickadd-create-task"]',
-      popover: {
-        title: 'Quick Add Drawer',
-        description: 'Set the title, project, due date, and create the task in one step.',
-        side: 'top',
-        align: 'end',
-      },
-      onHighlightStarted: (_element, _step, opts) => {
-        setTab('tasks')
-        setShowQuickAdd(true)
-        skipStepIfTargetMissing(opts.driver, '[data-tour-id="quickadd-create-task"]')
-      },
-    },
-    {
       element: '[data-tour-id="tasks-panel"]',
       popover: {
-        title: 'Tasks Workspace',
-        description: 'Manage tasks in board or list view, filter by tags, and open any task for full details.',
+        title: 'Task Workspace',
+        description: 'Start here for daily work. Switch between board and list views, filter by tags, and open tasks for full execution details.',
         side: 'top',
         align: 'start',
       },
       onHighlightStarted: (_element, _step, opts) => {
         setTab('tasks')
         setShowQuickAdd(false)
+        setShowCodexChat(false)
         skipStepIfTargetMissing(opts.driver, '[data-tour-id="tasks-panel"]')
+      },
+    },
+    {
+      element: '[data-tour-id="tasks-new-task"]',
+      popover: {
+        title: 'New Task',
+        description: 'Create either a manual task or a scheduled task from the task workspace.',
+        side: 'bottom',
+        align: 'end',
+      },
+      onHighlightStarted: (_element, _step, opts) => {
+        setTab('tasks')
+        setShowQuickAdd(false)
+        setShowCodexChat(false)
+        skipStepIfTargetMissing(opts.driver, '[data-tour-id="tasks-new-task"]')
+      },
+    },
+    {
+      element: '[data-tour-id="quickadd-create-task"]',
+      popover: {
+        title: 'Quick Add Drawer',
+        description: 'Create the task inline with project, priority, due date, assignee, tags, or a scheduled run.',
+        side: 'top',
+        align: 'end',
+      },
+      onHighlightStarted: (_element, _step, opts) => {
+        setTab('tasks')
+        setShowQuickAdd(true)
+        setShowCodexChat(false)
+        skipStepIfTargetMissing(opts.driver, '[data-tour-id="quickadd-create-task"]')
       },
     },
     {
@@ -117,7 +127,7 @@ function quickTourSteps(
       element: '[data-tour-id="codex-chat-composer"]',
       popover: {
         title: 'Chat Composer',
-        description: 'Describe what you need. If no project is selected, chat can guide you through project creation.',
+        description: 'Use chat for planning, implementation help, debugging, or guided setup in the current workspace context.',
         side: 'top',
         align: 'center',
       },
@@ -130,7 +140,7 @@ function quickTourSteps(
       element: '[data-tour-id="header-search"]',
       popover: {
         title: 'Global Search',
-        description: 'Search tasks, notes, and specifications from one input.',
+        description: 'Jump straight to tasks, notes, and specifications from one query. It opens the dedicated Search workspace when you start typing.',
         side: 'bottom',
         align: 'start',
       },
@@ -140,10 +150,23 @@ function quickTourSteps(
       },
     },
     {
+      element: '[data-tour-id="header-knowledge-graph"]',
+      popover: {
+        title: 'Knowledge Graph',
+        description: 'Open graph and context views when you need linked project memory, dependencies, and grounded search support.',
+        side: 'bottom',
+        align: 'end',
+      },
+      onHighlightStarted: (_element, _step, opts) => {
+        setShowCodexChat(false)
+        skipStepIfTargetMissing(opts.driver, '[data-tour-id="header-knowledge-graph"]')
+      },
+    },
+    {
       element: '[data-tour-id="header-notifications"]',
       popover: {
         title: 'Notifications',
-        description: 'Track assignment and execution updates here.',
+        description: 'Track assignments, automation outcomes, and status changes here.',
         side: 'bottom',
         align: 'end',
       },
@@ -152,16 +175,17 @@ function quickTourSteps(
       },
     },
     {
-      element: '[data-tour-id="header-knowledge-graph"]',
+      element: '[data-tour-id="header-settings-menu"]',
       popover: {
-        title: 'Knowledge Graph',
-        description: 'Explore project context, linked entities, and graph-assisted insights.',
+        title: 'Settings And Tours',
+        description: 'Open workspace settings, jump to projects, graph, or search, and relaunch these tours any time.',
         side: 'bottom',
         align: 'end',
       },
       onHighlightStarted: (_element, _step, opts) => {
+        setShowQuickAdd(false)
         setShowCodexChat(false)
-        skipStepIfTargetMissing(opts.driver, '[data-tour-id="header-knowledge-graph"]')
+        skipStepIfTargetMissing(opts.driver, '[data-tour-id="header-settings-menu"]')
       },
     },
   ]
@@ -177,7 +201,7 @@ function advancedTourSteps(
       element: '[data-tour-id="projects-panel"]',
       popover: {
         title: 'Projects',
-        description: 'Projects define your working scope, statuses, rules, and team setup.',
+        description: 'Projects define statuses, rules, plugins, members, and the scope used across the rest of the app.',
         side: 'top',
         align: 'start',
       },
@@ -192,7 +216,7 @@ function advancedTourSteps(
       element: '[data-tour-id="project-new-project"]',
       popover: {
         title: 'Create Project',
-        description: 'Use this action to create a new project manually or from a template.',
+        description: 'Create a project manually, then configure its statuses, rules, skills, and supported plugins from the inline editor.',
         side: 'bottom',
         align: 'end',
       },
@@ -205,7 +229,7 @@ function advancedTourSteps(
       element: '[data-tour-id="specifications-panel"]',
       popover: {
         title: 'Specifications',
-        description: 'Capture implementation scope and link tasks and notes to a concrete spec.',
+        description: 'Capture implementation scope and link tasks and notes back to a concrete specification for traceability.',
         side: 'top',
         align: 'start',
       },
@@ -218,7 +242,7 @@ function advancedTourSteps(
       element: '[data-tour-id="spec-new"]',
       popover: {
         title: 'New Specification',
-        description: 'Start with a draft spec, then attach tasks and notes for execution traceability.',
+        description: 'Create a draft spec, then connect tasks and notes to keep planning and execution tied together.',
         side: 'bottom',
         align: 'end',
       },
@@ -231,7 +255,7 @@ function advancedTourSteps(
       element: '[data-tour-id="notes-panel"]',
       popover: {
         title: 'Notes',
-        description: 'Store decisions, research, and operational context as long-lived project memory.',
+        description: 'Store research, decisions, and operational context, then link notes to tasks or specifications when they matter.',
         side: 'top',
         align: 'start',
       },
@@ -244,7 +268,7 @@ function advancedTourSteps(
       element: '[data-tour-id="header-knowledge-graph"]',
       popover: {
         title: 'Knowledge Graph',
-        description: 'Move here when you need dependency-aware context and graph exploration tools.',
+        description: 'Use graph views for dependency-aware context, linked entities, grounded summaries, and project knowledge exploration.',
         side: 'bottom',
         align: 'end',
       },
@@ -252,6 +276,67 @@ function advancedTourSteps(
         setShowQuickAdd(false)
         setShowCodexChat(false)
         skipStepIfTargetMissing(opts.driver, '[data-tour-id="header-knowledge-graph"]')
+      },
+    },
+    {
+      element: '[data-tour-id="search-panel"]',
+      popover: {
+        title: 'Search Workspace',
+        description: 'Use the dedicated Search workspace for combined lexical and semantic results across tasks, notes, and specifications.',
+        side: 'top',
+        align: 'start',
+      },
+      onHighlightStarted: (_element, _step, opts) => {
+        setTab('search')
+        setShowQuickAdd(false)
+        setShowCodexChat(false)
+        skipStepIfTargetMissing(opts.driver, '[data-tour-id="search-panel"]')
+      },
+    },
+    {
+      element: '[data-tour-id="header-settings-menu"]',
+      popover: {
+        title: 'Workspace Settings',
+        description: 'Use Settings for shared connections, runtime configuration, user administration, skills, licensing, and Doctor.',
+        side: 'bottom',
+        align: 'end',
+      },
+      onHighlightStarted: (_element, _step, opts) => {
+        setShowQuickAdd(false)
+        setShowCodexChat(false)
+        skipStepIfTargetMissing(opts.driver, '[data-tour-id="header-settings-menu"]')
+      },
+    },
+    {
+      element: '[data-tour-id="workspace-tab-doctor"]',
+      popover: {
+        title: 'Doctor Tab',
+        description: 'Open the Doctor tab in Workspace Settings to seed, run, reset, and inspect the validation fixture for the workspace.',
+        side: 'bottom',
+        align: 'center',
+      },
+      onHighlightStarted: (_element, _step, opts) => {
+        setTab('settings')
+        setShowQuickAdd(false)
+        setShowCodexChat(false)
+        clickTargetWhenAvailable('[data-tour-id="workspace-tab-doctor"]')
+        skipStepIfTargetMissing(opts.driver, '[data-tour-id="workspace-tab-doctor"]')
+      },
+    },
+    {
+      element: '[data-tour-id="workspace-doctor-card"]',
+      popover: {
+        title: 'ConstructOS Doctor',
+        description: 'Doctor seeds a dedicated validation project, runs checks, and shows recent runs so you can verify core workspace functionality.',
+        side: 'top',
+        align: 'start',
+      },
+      onHighlightStarted: (_element, _step, opts) => {
+        setTab('settings')
+        setShowQuickAdd(false)
+        setShowCodexChat(false)
+        clickTargetWhenAvailable('[data-tour-id="workspace-tab-doctor"]')
+        skipStepIfTargetMissing(opts.driver, '[data-tour-id="workspace-doctor-card"]')
       },
     },
   ]

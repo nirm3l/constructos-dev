@@ -1531,7 +1531,7 @@ def _team_mode_task_dependency_ready(
     task_relationships = normalize_task_relationships(state.get("task_relationships"))
     if not task_relationships:
         return True, None
-    dependency_reasons: list[str] = []
+    dependency_clauses: list[tuple[bool, str]] = []
     for relationship in task_relationships:
         if str(relationship.get("kind") or "").strip().lower() != "depends_on":
             continue
@@ -1563,14 +1563,22 @@ def _team_mode_task_dependency_ready(
             continue
         if match_mode == STATUS_MATCH_ALL:
             if matched_sources == total_sources:
+                dependency_clauses.append((True, "relationship dependency satisfied"))
                 continue
         elif matched_sources > 0:
+            dependency_clauses.append((True, "relationship dependency satisfied"))
             continue
-        dependency_reasons.append(
-            f"waiting for dependency: {matched_sources}/{total_sources} source tasks reached {sorted(statuses)}"
+        dependency_clauses.append(
+            (
+                False,
+                f"waiting for dependency: {matched_sources}/{total_sources} source tasks reached {sorted(statuses)}",
+            )
         )
-    if dependency_reasons:
-        return False, dependency_reasons[0]
+    if dependency_clauses:
+        for satisfied, _reason in dependency_clauses:
+            if satisfied:
+                return True, None
+        return False, dependency_clauses[0][1]
     return True, None
 
 

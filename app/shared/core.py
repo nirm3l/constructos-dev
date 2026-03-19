@@ -77,6 +77,7 @@ from .models import (
     Project,
     ProjectMember,
     ProjectPluginConfig,
+    ProjectSetupProfile,
     ProjectSkill,
     WorkspaceSkill,
     ProjectionCheckpoint,

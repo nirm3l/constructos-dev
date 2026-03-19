@@ -413,7 +413,6 @@ export function SpecificationsPanel({ state }: { state: any }) {
                           <DropdownMenu.Item
                             className="task-group-menu-item"
                             onSelect={(event) => {
-                              event.preventDefault()
                               event.stopPropagation()
                               openSpecificationPreviewDialog(specification)
                             }}

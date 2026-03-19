@@ -4,7 +4,7 @@ import * as Accordion from '@radix-ui/react-accordion'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as ToggleGroup from '@radix-ui/react-toggle-group'
 import type { ProjectBoard, Task, TaskGroup } from '../../types'
-import { priorityTone, tagHue } from '../../utils/ui'
+import { orderProjectStatuses, priorityTone, tagHue } from '../../utils/ui'
 import { Icon } from '../shared/uiHelpers'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
 import { ChipTooltip, taskDescriptionPreview, TaskListItem } from './taskViews'
@@ -624,23 +624,9 @@ export function TasksPanel({
 
   const visibleBoardStatuses = React.useMemo(() => {
     if (!boardData || !boardLanes) return []
-    const statuses: string[] = []
-    const seen = new Set<string>()
-
-    const pushStatus = (raw: string) => {
-      const status = String(raw || '').trim()
-      if (!status) return
-      const key = status.toLowerCase()
-      if (seen.has(key)) return
-      seen.add(key)
-      statuses.push(status)
-    }
-
-    for (const status of boardData.statuses) pushStatus(status)
-    for (const status of Object.keys(boardLanes)) pushStatus(status)
-
-    if (hasGroups) return statuses
-    return statuses.filter((status) => (boardLanes[status] ?? []).length > 0)
+    const orderedStatuses = orderProjectStatuses([...boardData.statuses, ...Object.keys(boardLanes)])
+    if (hasGroups) return orderedStatuses
+    return orderedStatuses.filter((status) => (boardLanes[status] ?? []).length > 0)
   }, [boardData, boardLanes, hasGroups])
 
   const onProjectsModeChange = React.useCallback((value: string) => {
@@ -781,7 +767,7 @@ export function TasksPanel({
                                 key={task.id}
                                 task={task}
                                 status={status}
-                                statuses={boardData.statuses}
+                                statuses={visibleBoardStatuses}
                                 targetGroupId={null}
                                 assigneeLabel={getAssigneeLabel(task)}
                                 onTagClick={toggleSearchTag}
@@ -879,7 +865,7 @@ export function TasksPanel({
                                       key={task.id}
                                       task={task}
                                       status={status}
-                                      statuses={boardData.statuses}
+                                      statuses={visibleBoardStatuses}
                                       targetGroupId={group.groupId}
                                       assigneeLabel={getAssigneeLabel(task)}
                                       onTagClick={toggleSearchTag}
@@ -933,7 +919,7 @@ export function TasksPanel({
                               key={task.id}
                               task={task}
                               status={status}
-                              statuses={boardData.statuses}
+                              statuses={visibleBoardStatuses}
                               targetGroupId={null}
                               assigneeLabel={getAssigneeLabel(task)}
                               onTagClick={toggleSearchTag}

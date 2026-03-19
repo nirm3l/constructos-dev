@@ -3,7 +3,6 @@ import {
   applyProjectSkill,
   attachWorkspaceSkillToProject,
   createProject,
-  createProjectFromTemplate,
   createProjectRule,
   deleteProject,
   deleteProjectRule,
@@ -17,13 +16,11 @@ import {
   patchProjectRule,
   patchProjectSkill,
   patchWorkspaceSkill,
-  previewProjectFromTemplate,
 } from '../../api'
 import {
   parseProjectAutomationMaxParallelInput,
   parseProjectEvidenceTopKInput,
   parseProjectStatusesText,
-  parseTemplateParametersInput,
   toErrorMessage,
 } from '../../utils/ui'
 
@@ -56,42 +53,6 @@ export function useProjectMutations(c: any) {
     onError: (err) => c.setUiError(toErrorMessage(err, 'Project save failed')),
   })
 
-  const previewProjectFromTemplateMutation = useMutation({
-    mutationFn: () => {
-      const normalizedTemplateKey = String(c.projectTemplateKey || '').trim()
-      if (!normalizedTemplateKey) {
-        throw new Error('Select a project template to preview')
-      }
-      const embeddingEnabled = Boolean(c.projectEmbeddingEnabled)
-      const chatPolicy = resolveProjectChatPolicy(
-        embeddingEnabled,
-        c.projectChatIndexMode,
-        c.projectChatAttachmentIngestionMode
-      )
-      const contextPackEvidenceTopK = parseProjectEvidenceTopKInput(c.projectContextPackEvidenceTopKText)
-      const hasCustomStatuses = Boolean(String(c.projectCustomStatusesText || '').trim())
-      const customStatuses = hasCustomStatuses ? parseProjectStatusesText(c.projectCustomStatusesText) : undefined
-      const parameters = parseTemplateParametersInput(c.projectTemplateParametersText)
-      return previewProjectFromTemplate(c.userId, {
-        workspace_id: c.workspaceId,
-        template_key: normalizedTemplateKey,
-        name: c.projectName.trim(),
-        description: c.projectDescription,
-        custom_statuses: customStatuses,
-        member_user_ids: Array.from(new Set(c.createProjectMemberIds)),
-        embedding_enabled: embeddingEnabled,
-        embedding_model: String(c.projectEmbeddingModel || '').trim() || null,
-        context_pack_evidence_top_k: contextPackEvidenceTopK,
-        ...chatPolicy,
-        parameters,
-      })
-    },
-    onSuccess: () => {
-      c.setUiError(null)
-    },
-    onError: (err) => c.setUiError(toErrorMessage(err, 'Template preview failed'))
-  })
-
   const createProjectMutation = useMutation({
     mutationFn: () => {
       const embeddingEnabled = Boolean(c.projectEmbeddingEnabled)
@@ -102,25 +63,8 @@ export function useProjectMutations(c: any) {
       )
       const contextPackEvidenceTopK = parseProjectEvidenceTopKInput(c.projectContextPackEvidenceTopKText)
       const automationMaxParallelTasks = parseProjectAutomationMaxParallelInput(c.projectAutomationMaxParallelTasksText)
-      const normalizedTemplateKey = String(c.projectTemplateKey || '').trim()
       const hasCustomStatuses = Boolean(String(c.projectCustomStatusesText || '').trim())
       const customStatuses = hasCustomStatuses ? parseProjectStatusesText(c.projectCustomStatusesText) : undefined
-      const parameters = parseTemplateParametersInput(c.projectTemplateParametersText)
-      if (normalizedTemplateKey) {
-        return createProjectFromTemplate(c.userId, {
-          workspace_id: c.workspaceId,
-          template_key: normalizedTemplateKey,
-          name: c.projectName.trim(),
-          description: c.projectDescription,
-          custom_statuses: customStatuses,
-          member_user_ids: Array.from(new Set(c.createProjectMemberIds)),
-          embedding_enabled: embeddingEnabled,
-          embedding_model: String(c.projectEmbeddingModel || '').trim() || null,
-          context_pack_evidence_top_k: contextPackEvidenceTopK,
-          ...chatPolicy,
-          parameters,
-        })
-      }
       return createProject(c.userId, {
         workspace_id: c.workspaceId,
         name: c.projectName.trim(),
@@ -139,21 +83,18 @@ export function useProjectMutations(c: any) {
     },
     onSuccess: async (createdPayload: any) => {
       const createdProject = createdPayload?.project ?? createdPayload
-      const createdFromTemplate = Boolean(createdPayload?.template?.key)
       c.setUiError(null)
-      if (createdFromTemplate) {
-        try {
-          const externalRefs = c.parseExternalRefsText(c.projectExternalRefsText)
-          const attachmentRefs = c.parseAttachmentRefsText(c.projectAttachmentRefsText)
-          if (externalRefs.length > 0 || attachmentRefs.length > 0) {
-            await patchProject(c.userId, createdProject.id, {
-              external_refs: externalRefs,
-              attachment_refs: attachmentRefs,
-            })
-          }
-        } catch (err) {
-          c.setUiError(toErrorMessage(err, 'Project created, but external links could not be saved'))
+      try {
+        const externalRefs = c.parseExternalRefsText(c.projectExternalRefsText)
+        const attachmentRefs = c.parseAttachmentRefsText(c.projectAttachmentRefsText)
+        if (externalRefs.length > 0 || attachmentRefs.length > 0) {
+          await patchProject(c.userId, createdProject.id, {
+            external_refs: externalRefs,
+            attachment_refs: attachmentRefs,
+          })
         }
+      } catch (err) {
+        c.setUiError(toErrorMessage(err, 'Project created, but external links could not be saved'))
       }
       if (c.draftProjectRules.length > 0) {
         const creations = c.draftProjectRules.map((rule: any) =>
@@ -223,7 +164,6 @@ export function useProjectMutations(c: any) {
         }
       }
       c.setProjectName('')
-      c.setProjectTemplateKey('')
       c.setProjectDescription('')
       c.setProjectCustomStatusesText('')
       c.setProjectExternalRefsText('')
@@ -234,7 +174,6 @@ export function useProjectMutations(c: any) {
       c.setProjectChatIndexMode('KG_AND_VECTOR')
       c.setProjectChatAttachmentIngestionMode('METADATA_ONLY')
       c.setProjectEventStormingEnabled(true)
-      c.setProjectTemplateParametersText('')
       c.setProjectDescriptionView('write')
       c.setCreateProjectMemberIds([])
       c.setCreateProjectWorkspaceSkillIds([])
@@ -244,7 +183,6 @@ export function useProjectMutations(c: any) {
       c.setDraftProjectRuleBody('')
       c.setDraftProjectRuleView('write')
       c.setShowProjectCreateForm(false)
-      previewProjectFromTemplateMutation.reset()
       await c.invalidateAll()
     },
     onError: (err) => c.setUiError(err instanceof Error ? err.message : 'Project create failed')
@@ -481,7 +419,6 @@ export function useProjectMutations(c: any) {
 
   return {
     saveProjectMutation,
-    previewProjectFromTemplateMutation,
     createProjectMutation,
     deleteProjectMutation,
     createProjectRuleMutation,

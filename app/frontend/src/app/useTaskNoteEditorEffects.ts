@@ -29,6 +29,12 @@ export function useTaskNoteEditorEffects(c: any) {
       }
       return
     }
+    const selectedTaskId = String(c.selectedTask.id || '').trim()
+    const hydratedTaskId = String(c.taskEditorHydratedTaskId || '').trim()
+    const isRefreshingSameTask = Boolean(selectedTaskId && hydratedTaskId && selectedTaskId === hydratedTaskId)
+    if (isRefreshingSameTask && c.taskEditorTouched) {
+      return
+    }
     c.setTaskEditorHydratedTaskId(null)
     c.setEditTitle(c.selectedTask.title ?? '')
     c.setEditStatus(c.selectedTask.status ?? 'To Do')
@@ -77,7 +83,18 @@ export function useTaskNoteEditorEffects(c: any) {
     c.setTaskEditorBaselineTask(JSON.parse(JSON.stringify(c.selectedTask)))
     c.setTaskEditorTouched(false)
     c.setTaskEditorHydratedTaskId(c.selectedTask.id ?? null)
-  }, [c.selectedTask?.id, c.selectedTask?.updated_at, c.currentUserTimezone])
+  }, [
+    c.selectedTask?.id,
+    c.selectedTask?.updated_at,
+    c.selectedTask?.status,
+    c.selectedTask?.assignee_id,
+    c.selectedTask?.assigned_agent_code,
+    c.selectedTask?.review_required,
+    c.selectedTask?.review_status,
+    c.taskEditorHydratedTaskId,
+    c.taskEditorTouched,
+    c.currentUserTimezone,
+  ])
 
   React.useEffect(() => {
     if (!c.taskEditorError) return

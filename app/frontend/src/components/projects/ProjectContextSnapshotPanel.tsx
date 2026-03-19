@@ -51,6 +51,13 @@ type SnapshotCompositionSegment = {
   groupLabel: string
 }
 
+type OverviewEntityCountItem = {
+  key: string
+  label: string
+  color: string
+  count: number
+}
+
 type ChatTurnLike = {
   role?: unknown
   content?: unknown
@@ -184,10 +191,83 @@ function countLines(value: string): number {
   return value.split(/\r?\n/).length
 }
 
+function normalizeGraphEntityTypeKey(entityType: unknown): string {
+  return String(entityType || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '')
+}
+
 function normalizeEntityTypeLabel(entityType: string | null | undefined): string {
   const normalized = String(entityType || '').trim()
   if (!normalized) return 'Entity'
   return normalized
+}
+
+function graphEntityTypeDisplayLabel(entityType: unknown): string {
+  const key = normalizeGraphEntityTypeKey(entityType)
+  if (key === 'task') return 'Tasks'
+  if (key === 'note') return 'Notes'
+  if (key === 'specification') return 'Specifications'
+  if (key === 'projectrule') return 'Rules'
+  if (key === 'chatmessage') return 'Chat messages'
+  if (key === 'chatattachment') return 'Chat attachments'
+  if (key === 'chatsession') return 'Chat sessions'
+  if (key === 'boundedcontext') return 'Bounded contexts'
+  if (key === 'aggregate') return 'Aggregates'
+  if (key === 'command') return 'Commands'
+  if (key === 'domainevent') return 'Domain events'
+  if (key === 'policy') return 'Policies'
+  if (key === 'readmodel') return 'Read models'
+  if (key === 'comment') return 'Comments'
+  if (key === 'tag') return 'Tags'
+  if (key === 'user') return 'Users'
+  if (key === 'workspace') return 'Workspaces'
+  if (!key) return 'Entities'
+  return String(entityType || 'Entity')
+}
+
+function graphEntityTypeColor(entityType: unknown): string {
+  const key = normalizeGraphEntityTypeKey(entityType)
+  if (key === 'task') return '#0284c7'
+  if (key === 'note') return '#9333ea'
+  if (key === 'specification') return '#0d9488'
+  if (key === 'projectrule') return '#ea580c'
+  if (key === 'chatmessage') return '#16a34a'
+  if (key === 'chatattachment') return '#65a30d'
+  if (key === 'chatsession') return '#22c55e'
+  if (key === 'boundedcontext') return '#14b8a6'
+  if (key === 'aggregate') return '#f59e0b'
+  if (key === 'command') return '#2563eb'
+  if (key === 'domainevent') return '#ea580c'
+  if (key === 'policy') return '#7c3aed'
+  if (key === 'readmodel') return '#16a34a'
+  if (key === 'comment') return '#16a34a'
+  if (key === 'tag') return '#ca8a04'
+  if (key === 'user') return '#4f46e5'
+  if (key === 'workspace') return '#6b7280'
+  return '#64748b'
+}
+
+function buildOverviewEntityCountItems(overview?: GraphProjectOverview): OverviewEntityCountItem[] {
+  const entityTypeCounts = Array.isArray(overview?.entity_type_counts) ? overview?.entity_type_counts : []
+  if (entityTypeCounts.length > 0) {
+    return entityTypeCounts
+      .map((item) => ({
+        key: normalizeGraphEntityTypeKey(item?.entity_type),
+        label: graphEntityTypeDisplayLabel(item?.entity_type),
+        color: graphEntityTypeColor(item?.entity_type),
+        count: Math.max(0, Number(item?.count || 0)),
+      }))
+      .filter((item) => item.key && item.count > 0)
+  }
+  const counts = overview?.counts
+  return [
+    { key: 'task', label: 'Tasks', color: graphEntityTypeColor('task'), count: Math.max(0, Number(counts?.tasks || 0)) },
+    { key: 'note', label: 'Notes', color: graphEntityTypeColor('note'), count: Math.max(0, Number(counts?.notes || 0)) },
+    { key: 'specification', label: 'Specifications', color: graphEntityTypeColor('specification'), count: Math.max(0, Number(counts?.specifications || 0)) },
+    { key: 'projectrule', label: 'Rules', color: graphEntityTypeColor('projectrule'), count: Math.max(0, Number(counts?.project_rules || 0)) },
+  ].filter((item) => item.count > 0)
 }
 
 function normalizeChatIndexMode(mode: unknown): 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' {
@@ -524,6 +604,12 @@ export function ProjectContextSnapshotPanel({
     project_rules: 0,
     comments: 0,
   }
+  const overviewEntityCounts = React.useMemo(() => buildOverviewEntityCountItems(overview), [overview])
+  const indexedEntityCount = React.useMemo(() => {
+    const total = Number(overview?.total_entities || 0)
+    if (Number.isFinite(total) && total > 0) return Math.floor(total)
+    return overviewEntityCounts.reduce((sum, item) => sum + item.count, 0)
+  }, [overview?.total_entities, overviewEntityCounts])
   const evidenceItems = contextPack?.evidence ?? []
   const normalizedChatIndexMode = normalizeChatIndexMode(projectChatIndexMode)
   const normalizedChatAttachmentMode = normalizeChatAttachmentIngestionMode(projectChatAttachmentIngestionMode)
@@ -793,16 +879,10 @@ export function ProjectContextSnapshotPanel({
       })),
     ]
 
-    const scopeTotal =
-      Number(counts.tasks || 0) +
-      Number(counts.notes || 0) +
-      Number(counts.specifications || 0) +
-      Number(counts.project_rules || 0) +
-      Number(counts.comments || 0)
     const distinctEvidenceEntities = new Set(
       evidenceItems.map((item) => `${normalizeEntityTypeLabel(item.entity_type)}:${String(item.entity_id || '').trim()}`)
     ).size
-    const contextCoveragePct = scopeTotal > 0 ? Math.min(100, Math.round((distinctEvidenceEntities / scopeTotal) * 100)) : 0
+    const contextCoveragePct = indexedEntityCount > 0 ? Math.min(100, Math.round((distinctEvidenceEntities / indexedEntityCount) * 100)) : 0
     const averageEvidenceScore =
       evidenceItems.length > 0
         ? evidenceItems.reduce((sum, item) => sum + Number(item.final_score || 0), 0) / evidenceItems.length
@@ -847,6 +927,8 @@ export function ProjectContextSnapshotPanel({
       observedOutputTokens,
       sources: visibleSources,
       sourceTiles: sourceTilesWithEmpty,
+      indexedEntityCount,
+      commentActivityCount: Number(counts.comments || 0),
       evidenceCount: evidenceItems.length,
       distinctEvidenceEntities,
       contextCoveragePct,
@@ -866,10 +948,6 @@ export function ProjectContextSnapshotPanel({
     contextPack?.focus?.entity_type,
     contextPack?.mode,
     counts.comments,
-    counts.notes,
-    counts.project_rules,
-    counts.specifications,
-    counts.tasks,
     evidenceItems,
     pluginPolicyContext.pluginPolicy,
     pluginPolicyContext.pluginRequiredChecks,
@@ -885,6 +963,7 @@ export function ProjectContextSnapshotPanel({
     observedContextLimitTokens,
     observedInputTokens,
     observedOutputTokens,
+    indexedEntityCount,
     projectName,
     resumeFreshMemorySnapshot,
     rulesMarkdown,
@@ -968,7 +1047,7 @@ export function ProjectContextSnapshotPanel({
           <span className="status-chip">{`Prompt mode: ${snapshot.promptModeLabel}`}</span>
           <span className="status-chip">{`Chat indexing: ${chatIndexModeLabel(normalizedChatIndexMode)}`}</span>
           <span className="status-chip">{`Attachment ingestion: ${chatAttachmentModeLabel(normalizedChatAttachmentMode)}`}</span>
-          <span className="status-chip">{`Coverage: ${snapshot.contextCoveragePct}%`}</span>
+          <span className="status-chip">{`Indexed coverage: ${snapshot.contextCoveragePct}%`}</span>
         </div>
 
         <div className="context-snapshot-capacity-track" role="img" aria-label="Context capacity usage">
@@ -998,6 +1077,20 @@ export function ProjectContextSnapshotPanel({
 
           <Tabs.Content value="overview" className="context-snapshot-tab-content">
             <div className="graph-context-metrics context-snapshot-metrics">
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M4 4h16v16H4zM8 8h8v8H8z" />
+                  <span className="meta">Indexed entities</span>
+                </div>
+                <strong>{snapshot.indexedEntityCount.toLocaleString()}</strong>
+              </div>
+              <div className="graph-context-metric context-snapshot-metric">
+                <div className="context-snapshot-metric-head">
+                  <Icon path="M4 6h16v10H7l-3 3V6z" />
+                  <span className="meta">Comment activity</span>
+                </div>
+                <strong>{snapshot.commentActivityCount.toLocaleString()}</strong>
+              </div>
               <div className="graph-context-metric context-snapshot-metric">
                 <div className="context-snapshot-metric-head">
                   <Icon path="M6 2h9l3 3v17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm8 1v3h3" />
@@ -1089,7 +1182,7 @@ export function ProjectContextSnapshotPanel({
                 Indexed chat corpus remains available when active session is empty, as long as project chat indexing policy is enabled.
               </div>
               <div className="meta">
-                Distinct evidence entities: {snapshot.distinctEvidenceEntities} · Chat evidence entities: {snapshot.chatEvidenceEntityCount} · Map resolution: {snapshot.tileCount.toLocaleString()} cells (~{Math.max(1, Math.round(snapshot.tokensPerTile || 0)).toLocaleString()} tokens/cell)
+                Indexed entities: {snapshot.indexedEntityCount} · Distinct evidence entities: {snapshot.distinctEvidenceEntities} · Chat evidence entities: {snapshot.chatEvidenceEntityCount} · Map resolution: {snapshot.tileCount.toLocaleString()} cells (~{Math.max(1, Math.round(snapshot.tokensPerTile || 0)).toLocaleString()} tokens/cell)
               </div>
             </div>
           </Tabs.Content>

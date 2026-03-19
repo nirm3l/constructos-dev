@@ -165,7 +165,7 @@ def _normalize_path_component(value: object, *, fallback: str) -> str:
 
 
 def _resolve_codex_home_root() -> Path:
-    root_raw = str(AGENT_HOME_ROOT or os.getenv("AGENT_CODEX_HOME_ROOT", _DEFAULT_AGENT_HOME_ROOT)).strip() or _DEFAULT_AGENT_HOME_ROOT
+    root_raw = str(os.getenv("AGENT_CODEX_HOME_ROOT") or AGENT_HOME_ROOT or _DEFAULT_AGENT_HOME_ROOT).strip() or _DEFAULT_AGENT_HOME_ROOT
     return Path(root_raw).expanduser().resolve()
 
 

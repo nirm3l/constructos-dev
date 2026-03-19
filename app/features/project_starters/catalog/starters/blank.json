@@ -1,0 +1,11 @@
+{
+  "key": "blank",
+  "label": "Blank",
+  "description": "For custom projects that should not start from an opinionated path.",
+  "positioning_text": "Use when you want project setup metadata without seeded starter artifacts.",
+  "recommended_use_cases": ["custom", "experimental", "minimal"],
+  "default_custom_statuses": ["To Do", "In Progress", "Done"],
+  "retrieval_hints": ["project setup", "custom"],
+  "question_set": ["What kind of project is this?"],
+  "setup_tags": ["blank"]
+}

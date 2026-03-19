@@ -1024,7 +1024,6 @@ export function ProjectsInlineEditor({
     () => parseAttachmentRefsText(editProjectAttachmentRefsText),
     [editProjectAttachmentRefsText]
   )
-  const templateBinding = selectedProject.template_binding
   const [selectedProjectSkillId, setSelectedProjectSkillId] = React.useState<string | null>(null)
   const [skillImportSourceUrl, setSkillImportSourceUrl] = React.useState('')
   const skillImportFileInputRef = React.useRef<HTMLInputElement | null>(null)
@@ -3400,46 +3399,7 @@ export function ProjectsInlineEditor({
                 </div>
               </div>
             </div>
-            <details style={{ marginTop: 8 }} className="plugin-policy-details">
-              <summary>Advanced JSON config</summary>
-              <textarea
-                className="md-textarea plugin-json-textarea"
-                value={teamModeConfigText}
-                onChange={(e) => {
-                  setTeamModeLocalEditLock(true)
-                  setTeamModeConfigText(e.target.value)
-                }}
-                placeholder="{}"
-                style={{ width: '100%', minHeight: 260, marginTop: 8 }}
-              />
-            </details>
-              <div className="plugin-actions-row">
-              <DropdownMenu.Root>
-                <DropdownMenu.Trigger asChild>
-                  <button className="status-chip" type="button">
-                    Config actions
-                  </button>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Portal>
-                  <DropdownMenu.Content className="task-group-menu-content" sideOffset={6} align="start">
-                    <DropdownMenu.Item
-                      className="task-group-menu-item"
-                      onSelect={() => {
-                        setTeamModeLocalEditLock(true)
-                        setTeamModeConfigText(prettyJson(teamModeStarterConfig))
-                      }}
-                    >
-                      Use starter config
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => void runValidatePluginConfig('team_mode', teamModeConfigText)}>
-                      Validate
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => void runDiffPluginConfig('team_mode', teamModeConfigText)}>
-                      Preview diff
-                    </DropdownMenu.Item>
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
-              </DropdownMenu.Root>
+            <div className="plugin-actions-row">
               <div className="plugin-actions-meta">
                 <span className="badge">v{teamModePluginQuery.data?.version ?? 0}</span>
                 <span className="badge">
@@ -3452,30 +3412,6 @@ export function ProjectsInlineEditor({
                 [{pluginUiStatus.team_mode.tone.toUpperCase()}] {pluginUiStatus.team_mode.text}
               </div>
             ) : null}
-            {pluginValidationByKey.team_mode?.errors?.length ? (
-              <div className="notice" style={{ marginTop: 8 }}>
-                {pluginValidationByKey.team_mode.errors.map((err, idx) => (
-                  <div key={`team-mode-validation-error-${idx}`}>{JSON.stringify(err)}</div>
-                ))}
-              </div>
-            ) : null}
-            {pluginDiffByKey.team_mode ? <div className="notice" style={{ marginTop: 8 }}>{renderPluginDiffDetails(pluginDiffByKey.team_mode)}</div> : null}
-            <details style={{ marginTop: 8 }}>
-              <summary>Effective policy overview</summary>
-              <div className="plugin-policy-summary">
-                <div className="row wrap plugin-policy-badges">
-                  <span className="badge">Required checks: {teamModePolicySummary.teamModeRequired.length}</span>
-                  <span className="badge">Available checks: {teamModePolicySummary.teamModeAvailable.length}</span>
-                </div>
-                <div className="meta">
-                  Required: {teamModePolicySummary.teamModeRequired.join(', ') || '(none)'}
-                </div>
-                <details className="plugin-policy-raw">
-                  <summary>Show raw compiled policy JSON</summary>
-                  <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}>{prettyJson(teamModePolicySummary.raw)}</pre>
-                </details>
-              </div>
-            </details>
           </div>
         </Tabs.Content>
         <Tabs.Content value="git-delivery" className="project-editor-tab-content">
@@ -3628,48 +3564,7 @@ export function ProjectsInlineEditor({
                 <InfoTip text="When enabled, Developer automation must report tests_run=true and tests_passed=true." />
               </div>
             </div>
-            <details style={{ marginTop: 8 }} className="plugin-policy-details">
-              <summary>Advanced JSON config</summary>
-              <textarea
-                className="md-textarea plugin-json-textarea"
-                value={gitDeliveryConfigText}
-                onChange={(e) => {
-                  setGitDeliveryLocalEditLock(true)
-                  setGlobalSaveStatus(null)
-                  setGitDeliveryConfigText(e.target.value)
-                }}
-                placeholder="{}"
-                style={{ width: '100%', minHeight: 260, marginTop: 8 }}
-              />
-            </details>
             <div className="plugin-actions-row">
-              <DropdownMenu.Root>
-                <DropdownMenu.Trigger asChild>
-                  <button className="status-chip" type="button">
-                    Config actions
-                  </button>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Portal>
-                  <DropdownMenu.Content className="task-group-menu-content" sideOffset={6} align="start">
-                    <DropdownMenu.Item
-                      className="task-group-menu-item"
-                      onSelect={() => {
-                        setGitDeliveryLocalEditLock(true)
-                        setGlobalSaveStatus(null)
-                        setGitDeliveryConfigText(prettyJson(GIT_DELIVERY_STARTER_CONFIG))
-                      }}
-                    >
-                      Use starter config
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => void runValidatePluginConfig('git_delivery', gitDeliveryConfigText)}>
-                      Validate
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item className="task-group-menu-item" onSelect={() => void runDiffPluginConfig('git_delivery', gitDeliveryConfigText)}>
-                      Preview diff
-                    </DropdownMenu.Item>
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
-              </DropdownMenu.Root>
               <div className="plugin-actions-meta">
                 <span className="badge">v{gitDeliveryPluginQuery.data?.version ?? 0}</span>
                 <span className="badge">
@@ -3682,30 +3577,6 @@ export function ProjectsInlineEditor({
                 [{pluginUiStatus.git_delivery.tone.toUpperCase()}] {pluginUiStatus.git_delivery.text}
               </div>
             ) : null}
-            {pluginValidationByKey.git_delivery?.errors?.length ? (
-              <div className="notice" style={{ marginTop: 8 }}>
-                {pluginValidationByKey.git_delivery.errors.map((err, idx) => (
-                  <div key={`git-delivery-validation-error-${idx}`}>{JSON.stringify(err)}</div>
-                ))}
-              </div>
-            ) : null}
-            {pluginDiffByKey.git_delivery ? <div className="notice" style={{ marginTop: 8 }}>{renderPluginDiffDetails(pluginDiffByKey.git_delivery)}</div> : null}
-            <details style={{ marginTop: 8 }}>
-              <summary>Effective policy overview</summary>
-              <div className="plugin-policy-summary">
-                <div className="row wrap plugin-policy-badges">
-                  <span className="badge">Required checks: {gitDeliveryPolicySummary.deliveryRequired.length}</span>
-                  <span className="badge">Available checks: {gitDeliveryPolicySummary.deliveryAvailable.length}</span>
-                </div>
-                <div className="meta">
-                  Required: {gitDeliveryPolicySummary.deliveryRequired.join(', ') || '(none)'}
-                </div>
-                <details className="plugin-policy-raw">
-                  <summary>Show raw compiled policy JSON</summary>
-                  <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}>{prettyJson(gitDeliveryPolicySummary.raw)}</pre>
-                </details>
-              </div>
-            </details>
           </div>
         </Tabs.Content>
         <Tabs.Content value="docker-compose" className="project-editor-tab-content">
@@ -3860,7 +3731,7 @@ export function ProjectsInlineEditor({
               </div>
             </div>
             <details style={{ marginTop: 8 }} className="plugin-policy-details">
-              <summary>Advanced JSON config</summary>
+              <summary>Advanced JSON config (Debug)</summary>
               <textarea
                 className="md-textarea plugin-json-textarea"
                 value={dockerComposeConfigText}
@@ -3921,20 +3792,6 @@ export function ProjectsInlineEditor({
               </div>
             ) : null}
             {pluginDiffByKey.docker_compose ? <div className="notice" style={{ marginTop: 8 }}>{renderPluginDiffDetails(pluginDiffByKey.docker_compose)}</div> : null}
-            <details style={{ marginTop: 8 }}>
-              <summary>Effective policy overview</summary>
-              <div className="plugin-policy-summary">
-                <div className="row wrap plugin-policy-badges">
-                  <span className="badge">{dockerPolicySummary.runtimeRequired ? 'Runtime check required' : 'Runtime check optional'}</span>
-                  <span className="badge">Stack: {dockerPolicySummary.runtimeStack}</span>
-                  <span className="badge">Endpoint: gateway:{dockerPolicySummary.runtimePort}{dockerPolicySummary.runtimeHealthPath}</span>
-                </div>
-                <details className="plugin-policy-raw">
-                  <summary>Show raw compiled policy JSON</summary>
-                  <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}>{prettyJson(dockerPolicySummary.raw)}</pre>
-                </details>
-              </div>
-            </details>
           </div>
         </Tabs.Content>
         <Tabs.Content value="rules" className="project-editor-tab-content">
@@ -4820,15 +4677,6 @@ export function ProjectsInlineEditor({
       <div className="row wrap resource-meta-row" style={{ marginTop: 10 }}>
         <div className="meta">Created by: {selectedProjectCreator}</div>
         {selectedProjectTimeMeta && <div className="meta">{selectedProjectTimeMeta.label}: {toUserDateTime(selectedProjectTimeMeta.value, userTimezone)}</div>}
-        {templateBinding ? (
-          <div className="meta">
-            Template: {templateBinding.template_key} v{templateBinding.template_version}
-            {' | '}
-            Applied: {toUserDateTime(templateBinding.applied_at, userTimezone) || 'Unknown'}
-          </div>
-        ) : (
-          <div className="meta">Template: Manual project (no template binding)</div>
-        )}
       </div>
         </Tabs.Content>
         <Tabs.Content value="context" className="project-editor-tab-content">

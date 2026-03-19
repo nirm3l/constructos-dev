@@ -12,7 +12,17 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shared.core import Note, Project, Task, User, ensure_project_access, ensure_role, get_current_user, get_db
+from shared.core import (
+    Note,
+    Project,
+    Task,
+    User,
+    ensure_project_access,
+    ensure_role,
+    get_current_user,
+    get_db,
+    load_task_command_state,
+)
 from shared.settings import ATTACHMENTS_DIR
 
 router = APIRouter()
@@ -50,14 +60,23 @@ def _validate_scope(
 
     if resolved_task_id:
         task = db.execute(select(Task).where(Task.id == resolved_task_id, Task.is_deleted == False)).scalar_one_or_none()
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-        if task.workspace_id != workspace_id:
-            raise HTTPException(status_code=400, detail="Task does not belong to workspace")
-        if resolved_project_id and task.project_id != resolved_project_id:
-            raise HTTPException(status_code=400, detail="Task does not belong to project")
-        if not resolved_project_id:
-            resolved_project_id = task.project_id
+        if task:
+            if task.workspace_id != workspace_id:
+                raise HTTPException(status_code=400, detail="Task does not belong to workspace")
+            if resolved_project_id and task.project_id != resolved_project_id:
+                raise HTTPException(status_code=400, detail="Task does not belong to project")
+            if not resolved_project_id:
+                resolved_project_id = task.project_id
+        else:
+            task_state = load_task_command_state(db, resolved_task_id)
+            if not task_state or task_state.is_deleted:
+                raise HTTPException(status_code=404, detail="Task not found")
+            if task_state.workspace_id != workspace_id:
+                raise HTTPException(status_code=400, detail="Task does not belong to workspace")
+            if resolved_project_id and task_state.project_id != resolved_project_id:
+                raise HTTPException(status_code=400, detail="Task does not belong to project")
+            if not resolved_project_id:
+                resolved_project_id = task_state.project_id
 
     if resolved_note_id:
         note = db.execute(select(Note).where(Note.id == resolved_note_id, Note.is_deleted == False)).scalar_one_or_none()

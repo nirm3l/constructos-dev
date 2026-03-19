@@ -71,11 +71,22 @@ export function useBootstrapSelectionEffects(c: any) {
   }, [c.showProjectCreateForm, c.createProjectMemberIds.length, c.bootstrap.data?.current_user?.id, c.setCreateProjectMemberIds])
 
   React.useEffect(() => {
-    if (!c.showProjectEditForm || !c.selectedProjectId) return
+    if (!c.showProjectEditForm || !c.selectedProjectId) {
+      c.setProjectEditorMembersHydratedProjectId('')
+      return
+    }
+    c.setProjectEditorMembersHydratedProjectId('')
     const ids = (c.bootstrap.data?.project_members ?? [])
       .filter((pm: any) => pm.project_id === c.selectedProjectId)
       .map((pm: any) => pm.user_id)
     const uniqueIds = Array.from(new Set(ids))
     c.setEditProjectMemberIds(uniqueIds)
-  }, [c.showProjectEditForm, c.selectedProjectId, c.bootstrap.data?.project_members, c.setEditProjectMemberIds])
+    c.setProjectEditorMembersHydratedProjectId(String(c.selectedProjectId || ''))
+  }, [
+    c.showProjectEditForm,
+    c.selectedProjectId,
+    c.bootstrap.data?.project_members,
+    c.setEditProjectMemberIds,
+    c.setProjectEditorMembersHydratedProjectId,
+  ])
 }

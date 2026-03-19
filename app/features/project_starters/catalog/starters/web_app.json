@@ -1,0 +1,11 @@
+{
+  "key": "web_app",
+  "label": "Web App",
+  "description": "For dashboards, SaaS products, portals, and CRUD-heavy applications.",
+  "positioning_text": "Best when the primary product is a browser-facing application with user workflows.",
+  "recommended_use_cases": ["SaaS", "dashboard", "admin tool", "portal", "CRUD app"],
+  "default_custom_statuses": ["To Do", "In Progress", "In Review", "Completed"],
+  "retrieval_hints": ["ui workflows", "auth", "forms", "dashboard", "frontend"],
+  "question_set": ["Who are the primary users?", "Do you need authentication?", "Is there a backend/API?"],
+  "setup_tags": ["web", "frontend", "workflow"]
+}

@@ -36,7 +36,7 @@ x-agent-common-config-env: &agent_common_config_env
   AGENT_CODEX_DEFAULT_REASONING_EFFORT: "${AGENT_CODEX_DEFAULT_REASONING_EFFORT:-medium}"
   AGENT_CLAUDE_DEFAULT_MODEL: "${AGENT_CLAUDE_DEFAULT_MODEL:-sonnet}"
   AGENT_CLAUDE_DEFAULT_REASONING_EFFORT: "${AGENT_CLAUDE_DEFAULT_REASONING_EFFORT:-medium}"
-  AGENT_ENABLED_PLUGINS: "${AGENT_ENABLED_PLUGINS:-team_mode,git_delivery,github_delivery}"
+  AGENT_ENABLED_PLUGINS: "${AGENT_ENABLED_PLUGINS:-team_mode,git_delivery,github_delivery,doctor}"
   MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-dev-mcp-token}"
   GITHUB_PAT: "${GITHUB_PAT:-}"
   AGENT_DOCKER_PROJECT_NAME: "${AGENT_DOCKER_PROJECT_NAME:-constructos-ws-default}"

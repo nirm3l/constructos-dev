@@ -105,6 +105,30 @@ BOOTSTRAP_ES_COMMAND_EXECUTE_ID = _bootstrap_entity_id("event-storming", "comman
 BOOTSTRAP_ES_POLICY_ID = _bootstrap_entity_id("event-storming", "policy-quality-gate")
 BOOTSTRAP_ES_READ_MODEL_ID = _bootstrap_entity_id("event-storming", "read-model-board")
 
+# ---------------------------------------------------------------------------
+# ConstructOS docs project seed IDs
+# ---------------------------------------------------------------------------
+CONSTRUCTOS_PROJECT_ID = "20000000-0000-0000-0000-000000000002"
+CONSTRUCTOS_PROJECT_NAME = "ConstructOS"
+CONSTRUCTOS_PROJECT_STATUSES = ["Backlog", "In Progress", "Done"]
+
+
+def _cos_entity_id(kind: str, key: str) -> str:
+    seed = f"constructos:{CONSTRUCTOS_PROJECT_ID}:{kind}:{key}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
+
+CONSTRUCTOS_NOTE_START_GROUP_ID = _cos_entity_id("note-group", "getting-started")
+CONSTRUCTOS_NOTE_FLOW_GROUP_ID = _cos_entity_id("note-group", "workflows")
+CONSTRUCTOS_NOTE_WELCOME_ID = _cos_entity_id("note", "welcome")
+CONSTRUCTOS_NOTE_PROJECTS_ID = _cos_entity_id("note", "projects")
+CONSTRUCTOS_NOTE_TASKS_ID = _cos_entity_id("note", "tasks")
+CONSTRUCTOS_NOTE_SPECS_ID = _cos_entity_id("note", "specifications")
+CONSTRUCTOS_NOTE_NOTES_ID = _cos_entity_id("note", "notes")
+CONSTRUCTOS_NOTE_RULES_ID = _cos_entity_id("note", "project-rules")
+CONSTRUCTOS_NOTE_AI_ID = _cos_entity_id("note", "ai-automation")
+CONSTRUCTOS_NOTE_TIPS_ID = _cos_entity_id("note", "tips")
+
 
 def _enabled_plugin_keys() -> set[str]:
     from plugins.registry import list_workflow_plugins
@@ -918,6 +942,699 @@ def ensure_license_installation(db: Session):
         db.commit()
 
 
+def _seed_constructos_project(db: Session) -> None:  # noqa: C901
+    """Seed the ConstructOS project with user-facing documentation notes."""
+    if current_version(db, "Project", CONSTRUCTOS_PROJECT_ID) == 0:
+        append_event(
+            db,
+            aggregate_type="Project",
+            aggregate_id=CONSTRUCTOS_PROJECT_ID,
+            event_type=PROJECT_EVENT_CREATED,
+            payload={
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "name": CONSTRUCTOS_PROJECT_NAME,
+                "description": "User guide for ConstructOS — learn how to manage projects, tasks, notes, specs, and AI automation.",
+                "custom_statuses": CONSTRUCTOS_PROJECT_STATUSES,
+                "external_refs": [
+                    {"url": "https://github.com/nirm3l/constructos", "title": "ConstructOS repository"},
+                ],
+                "attachment_refs": [],
+                "embedding_enabled": True,
+                "event_storming_enabled": False,
+                "chat_index_mode": "NOTES_AND_SPECS",
+                "chat_attachment_ingestion_mode": "METADATA_ONLY",
+            },
+            metadata={
+                "actor_id": DEFAULT_USER_ID,
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+            },
+            expected_version=0,
+        )
+        db.commit()
+
+    if current_version(db, "NoteGroup", CONSTRUCTOS_NOTE_START_GROUP_ID) == 0:
+        append_event(
+            db,
+            aggregate_type="NoteGroup",
+            aggregate_id=CONSTRUCTOS_NOTE_START_GROUP_ID,
+            event_type=NOTE_GROUP_EVENT_CREATED,
+            payload={
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "name": "Getting Started",
+                "description": "Everything you need to get up and running.",
+                "color": "#22c55e",
+                "order_index": 1,
+                "is_deleted": False,
+            },
+            metadata={
+                "actor_id": DEFAULT_USER_ID,
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_group_id": CONSTRUCTOS_NOTE_START_GROUP_ID,
+            },
+            expected_version=0,
+        )
+    if current_version(db, "NoteGroup", CONSTRUCTOS_NOTE_FLOW_GROUP_ID) == 0:
+        append_event(
+            db,
+            aggregate_type="NoteGroup",
+            aggregate_id=CONSTRUCTOS_NOTE_FLOW_GROUP_ID,
+            event_type=NOTE_GROUP_EVENT_CREATED,
+            payload={
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "name": "Workflows",
+                "description": "How to use tasks, specs, notes, rules, and AI automation.",
+                "color": "#6366f1",
+                "order_index": 2,
+                "is_deleted": False,
+            },
+            metadata={
+                "actor_id": DEFAULT_USER_ID,
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_group_id": CONSTRUCTOS_NOTE_FLOW_GROUP_ID,
+            },
+            expected_version=0,
+        )
+
+    if current_version(db, "Note", CONSTRUCTOS_NOTE_WELCOME_ID) == 0:
+        append_event(
+            db,
+            aggregate_type="Note",
+            aggregate_id=CONSTRUCTOS_NOTE_WELCOME_ID,
+            event_type=NOTE_EVENT_CREATED,
+            payload={
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_group_id": CONSTRUCTOS_NOTE_START_GROUP_ID,
+                "task_id": None,
+                "specification_id": None,
+                "title": "Welcome to ConstructOS",
+                "body": (
+                    "# Welcome to ConstructOS\n\n"
+                    "ConstructOS is a project and task management platform with a built-in AI agent. "
+                    "Your team plans work, tracks progress, and ships — and the AI agent can pick up tasks "
+                    "and execute them on your behalf, inside the same tool.\n\n"
+                    "---\n\n"
+                    "## What you can do\n\n"
+                    "| Capability | How it helps |\n"
+                    "|---|---|\n"
+                    "| **Projects** | Organise work into focused spaces, each with its own board, notes, and specs. |\n"
+                    "| **Tasks** | Track every piece of work. Move cards across custom board columns as work progresses. |\n"
+                    "| **Specifications** | Write acceptance criteria once. Link them to tasks so everyone knows what \"done\" means. |\n"
+                    "| **Notes** | Keep decisions, research, and context in one place — searchable and linked to your work. |\n"
+                    "| **Project Rules** | Short guidelines that govern how the team (and the AI agent) works in a project. |\n"
+                    "| **AI Automation** | Assign a task to the AI agent. It reads the brief, does the work, and reports back. |\n"
+                    "| **Chat** | Ask the AI assistant questions about your project, or describe a task and let it create it. |\n\n"
+                    "---\n\n"
+                    "## How everything connects\n\n"
+                    "```\n"
+                    "Project\n"
+                    " ├── Tasks  ──────────────── linked to ──→  Specification\n"
+                    " │    ├── Subtasks                            (acceptance criteria)\n"
+                    " │    ├── Comments & activity log\n"
+                    " │    └── AI agent run\n"
+                    " │\n"
+                    " ├── Notes  ──────────────── linked to ──→  Task or Specification\n"
+                    " │    └── Note groups (Discovery, Shiproom…)\n"
+                    " │\n"
+                    " ├── Specifications\n"
+                    " │    └── Status: Draft → Ready → Archived\n"
+                    " │\n"
+                    " └── Project Rules  ─────── injected into every AI agent run\n"
+                    "```\n\n"
+                    "---\n\n"
+                    "## Getting started in 5 steps\n\n"
+                    "1. Open the **Demo** project — it has example tasks, notes, and a spec so you can see how everything fits together.\n"
+                    "2. **Create a new project** from the sidebar. Pick a project starter or start blank.\n"
+                    "3. **Set your board statuses** in Project Settings (e.g. `To Do → In Progress → Review → Done`).\n"
+                    "4. **Add a few tasks** and move them across the board.\n"
+                    "5. **Write a specification**, link it to a task, then assign that task to the AI agent and run it.\n\n"
+                    "---\n\n"
+                    "> **Tip:** The Demo project is always a safe sandbox. Use it to experiment before setting up your real workspace."
+                ),
+                "tags": ["welcome", "constructos", "getting-started"],
+                "external_refs": [],
+                "attachment_refs": [],
+                "pinned": True,
+                "archived": False,
+                "created_at": to_iso_utc(datetime.now(timezone.utc)),
+            },
+            metadata={
+                "actor_id": DEFAULT_USER_ID,
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_id": CONSTRUCTOS_NOTE_WELCOME_ID,
+            },
+            expected_version=0,
+        )
+
+    if current_version(db, "Note", CONSTRUCTOS_NOTE_PROJECTS_ID) == 0:
+        append_event(
+            db,
+            aggregate_type="Note",
+            aggregate_id=CONSTRUCTOS_NOTE_PROJECTS_ID,
+            event_type=NOTE_EVENT_CREATED,
+            payload={
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_group_id": CONSTRUCTOS_NOTE_START_GROUP_ID,
+                "task_id": None,
+                "specification_id": None,
+                "title": "Projects: setup and configuration",
+                "body": (
+                    "# Projects\n\n"
+                    "A **project** is the top-level container for everything your team works on. "
+                    "Tasks, notes, specifications, and rules all live inside a project.\n\n"
+                    "---\n\n"
+                    "## Creating a project\n\n"
+                    "Click **+** in the projects sidebar. Two paths:\n\n"
+                    "- **Start from a starter** — pre-fills example tasks, specs, and rules so you have something to work with immediately.\n"
+                    "- **Start blank** — a clean project you configure from scratch.\n\n"
+                    "### Project starters\n\n"
+                    "| Template | Best for |\n"
+                    "|---|---|\n"
+                    "| Web App | SaaS products, dashboards, admin tools, customer portals |\n"
+                    "| API Service | Backend services, workers, integration pipelines |\n"
+                    "| DDD System | Domain-driven design with bounded contexts and aggregates |\n"
+                    "| Web Game | Browser games, interactive experiences |\n"
+                    "| Blank | Anything that doesn\'t fit the above |\n\n"
+                    "> **Tip:** Even if you\'re starting blank, browse the project starters first — "
+                    "they show you how to structure tasks and specs for different project types.\n\n"
+                    "---\n\n"
+                    "## Setting up your board\n\n"
+                    "Go to **Project Settings → Statuses** and define the stages work moves through. "
+                    "A few common patterns:\n\n"
+                    "| Simple | Engineering | Design & build |\n"
+                    "|---|---|---|\n"
+                    "| To Do | Backlog | Brief |\n"
+                    "| In Progress | In Dev | Design |\n"
+                    "| Done | In Review | Dev |\n"
+                    "| | QA | QA |\n"
+                    "| | Done | Shipped |\n\n"
+                    "> **Tip:** Fewer statuses is usually better. Add a column only when you genuinely need "
+                    "to distinguish that stage from the ones around it.\n\n"
+                    "---\n\n"
+                    "## Members and roles\n\n"
+                    "**Project Settings → Members** to invite your team.\n\n"
+                    "| Role | What they can do |\n"
+                    "|---|---|\n"
+                    "| **Owner** | Full control, including deleting the project |\n"
+                    "| **Admin** | Manage settings, members, and all content |\n"
+                    "| **Member** | Create and edit tasks, notes, and specs |\n"
+                    "| **Viewer** | Read-only — can see everything but not change it |\n\n"
+                    "---\n\n"
+                    "## Archiving a project\n\n"
+                    "When a project is complete, archive it from Project Settings. "
+                    "Archived projects disappear from the sidebar but retain all data — tasks, notes, specs, history. "
+                    "They can be restored any time. Deleting is permanent, so archive first if you\'re unsure."
+                ),
+                "tags": ["projects", "setup", "getting-started"],
+                "external_refs": [],
+                "attachment_refs": [],
+                "pinned": False,
+                "archived": False,
+                "created_at": to_iso_utc(datetime.now(timezone.utc)),
+            },
+            metadata={
+                "actor_id": DEFAULT_USER_ID,
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_id": CONSTRUCTOS_NOTE_PROJECTS_ID,
+            },
+            expected_version=0,
+        )
+
+    if current_version(db, "Note", CONSTRUCTOS_NOTE_TASKS_ID) == 0:
+        append_event(
+            db,
+            aggregate_type="Note",
+            aggregate_id=CONSTRUCTOS_NOTE_TASKS_ID,
+            event_type=NOTE_EVENT_CREATED,
+            payload={
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_group_id": CONSTRUCTOS_NOTE_FLOW_GROUP_ID,
+                "task_id": None,
+                "specification_id": None,
+                "title": "Tasks: creating and managing work",
+                "body": (
+                    "# Tasks\n\n"
+                    "Tasks are the core unit of work. They live on a board, move through your custom statuses, "
+                    "and can be assigned to a person or the AI agent.\n\n"
+                    "---\n\n"
+                    "## Creating a task\n\n"
+                    "Use the **+ FAB button** (bottom-right) or click **+** at the top of any board column.\n\n"
+                    "| Field | What to put here |\n"
+                    "|---|---|\n"
+                    "| **Title** | Short imperative label: \"Add login page\", \"Fix checkout bug\" |\n"
+                    "| **Description** | Markdown body — context, links, acceptance notes |\n"
+                    "| **Status** | Which column it starts in |\n"
+                    "| **Priority** | Low / Med / High / Critical |\n"
+                    "| **Due date** | Optional deadline |\n"
+                    "| **Assignee** | A team member, or the AI agent |\n"
+                    "| **Labels** | Free-form tags: `bug`, `blocked`, `frontend`, `quick-win` |\n"
+                    "| **Task group** | Which sprint or milestone this belongs to |\n"
+                    "| **Specification** | Link to the spec that defines done for this task |\n\n"
+                    "---\n\n"
+                    "## Board and list views\n\n"
+                    "**Board** — tasks as cards in columns. Drag and drop to change status. "
+                    "Use the filter bar to narrow by assignee, label, priority, or due date.\n\n"
+                    "**List** — all tasks in a sortable table. Best for reviewing a large backlog "
+                    "or doing quick inline edits on multiple tasks.\n\n"
+                    "> **Tip:** Keep your board honest. A task sitting in \"In Progress\" for two weeks "
+                    "isn\'t in progress — move it to a blocked or waiting state so the board reflects reality.\n\n"
+                    "---\n\n"
+                    "## Task relationships\n\n"
+                    "| Relationship | Meaning |\n"
+                    "|---|---|\n"
+                    "| **Depends on** | This task can\'t start until the linked task is done |\n"
+                    "| **Blocks** | Completing this task unblocks the linked task |\n\n"
+                    "Relationships appear in the task detail and are included in the AI agent\'s context.\n\n"
+                    "---\n\n"
+                    "## Comments and activity\n\n"
+                    "Every task has a comment thread and an automatic activity log. "
+                    "Good uses for comments:\n\n"
+                    "- **Handoff:** \"Moved to QA — test with account `demo@example.com`.\"\n"
+                    "- **Decision:** \"Scoped out mobile breakpoints — adding a separate task.\"\n"
+                    "- **Evidence:** \"Verified all acceptance criteria. Screenshot attached.\"\n\n"
+                    "Comments from the AI agent also appear here — it logs what it did and why.\n\n"
+                    "---\n\n"
+                    "## Recurring tasks\n\n"
+                    "Set a **recurring rule** to recreate a task automatically on a schedule. "
+                    "Useful for weekly check-ins, monthly reports, and regular maintenance. "
+                    "When a recurring task is completed, the next instance is created automatically."
+                ),
+                "tags": ["tasks", "board", "workflow"],
+                "external_refs": [],
+                "attachment_refs": [],
+                "pinned": False,
+                "archived": False,
+                "created_at": to_iso_utc(datetime.now(timezone.utc)),
+            },
+            metadata={
+                "actor_id": DEFAULT_USER_ID,
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_id": CONSTRUCTOS_NOTE_TASKS_ID,
+            },
+            expected_version=0,
+        )
+
+    if current_version(db, "Note", CONSTRUCTOS_NOTE_SPECS_ID) == 0:
+        append_event(
+            db,
+            aggregate_type="Note",
+            aggregate_id=CONSTRUCTOS_NOTE_SPECS_ID,
+            event_type=NOTE_EVENT_CREATED,
+            payload={
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_group_id": CONSTRUCTOS_NOTE_FLOW_GROUP_ID,
+                "task_id": None,
+                "specification_id": None,
+                "title": "Specifications: defining what done means",
+                "body": (
+                    "# Specifications\n\n"
+                    "A **specification** is a markdown document that defines what a feature should do — "
+                    "written before work starts. It\'s the single source of truth for acceptance criteria.\n\n"
+                    "---\n\n"
+                    "## Why write a spec first\n\n"
+                    "Without a spec, \"done\" means different things to different people. With a spec:\n\n"
+                    "- **The team** has a shared definition of done before work begins.\n"
+                    "- **The AI agent** has a complete brief and can execute without guessing.\n"
+                    "- **Future you** has a record of what was decided and why.\n\n"
+                    "> **The rule:** if a task would take more than a day or involves more than one person, it should have a spec.\n\n"
+                    "---\n\n"
+                    "## Spec statuses\n\n"
+                    "| Status | When to use it |\n"
+                    "|---|---|\n"
+                    "| **Draft** | Still being written — not ready to act on |\n"
+                    "| **Ready** | Approved — tasks can be linked and execution can begin |\n"
+                    "| **Archived** | Superseded or no longer relevant |\n\n"
+                    "---\n\n"
+                    "## Anatomy of a good spec\n\n"
+                    "A spec doesn\'t need to be long. A few clear acceptance criteria beats a "
+                    "10-page document nobody reads.\n\n"
+                    "```markdown\n"
+                    "## Problem\n"
+                    "What user need or business goal does this address?\n\n"
+                    "## Scope\n"
+                    "**In scope:** Feature A, Feature B\n"
+                    "**Out of scope:** Feature C (tracked separately)\n\n"
+                    "## Acceptance criteria\n"
+                    "- [ ] User can log in with email and password\n"
+                    "- [ ] Invalid credentials show a clear error message\n"
+                    "- [ ] Session persists across page reloads\n\n"
+                    "## Open questions\n"
+                    "- [ ] SSO in v1? (Owner: @alice, Due: Friday)\n"
+                    "```\n\n"
+                    "---\n\n"
+                    "## Mermaid diagrams\n\n"
+                    "Specs render Mermaid diagrams inline:\n\n"
+                    "```mermaid\n"
+                    "flowchart LR\n"
+                    "  User -->|submits form| Login[Validate credentials]\n"
+                    "  Login -->|valid| Session[Create session]\n"
+                    "  Login -->|invalid| Error[Show error message]\n"
+                    "  Session --> Dashboard\n"
+                    "```\n\n"
+                    "---\n\n"
+                    "## Linking specs to tasks\n\n"
+                    "Open any task and set the **Specification** field. "
+                    "The agent reads the spec as part of its brief when running the task. "
+                    "One spec can be linked to multiple tasks — useful when a large feature is broken "
+                    "into smaller tasks that share the same acceptance criteria."
+                ),
+                "tags": ["specifications", "acceptance-criteria", "workflow"],
+                "external_refs": [],
+                "attachment_refs": [],
+                "pinned": False,
+                "archived": False,
+                "created_at": to_iso_utc(datetime.now(timezone.utc)),
+            },
+            metadata={
+                "actor_id": DEFAULT_USER_ID,
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_id": CONSTRUCTOS_NOTE_SPECS_ID,
+            },
+            expected_version=0,
+        )
+
+    if current_version(db, "Note", CONSTRUCTOS_NOTE_NOTES_ID) == 0:
+        append_event(
+            db,
+            aggregate_type="Note",
+            aggregate_id=CONSTRUCTOS_NOTE_NOTES_ID,
+            event_type=NOTE_EVENT_CREATED,
+            payload={
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_group_id": CONSTRUCTOS_NOTE_FLOW_GROUP_ID,
+                "task_id": None,
+                "specification_id": None,
+                "title": "Notes: building project knowledge",
+                "body": (
+                    "# Notes\n\n"
+                    "**Notes** are long-lived documents that live alongside your work. "
+                    "Use them for decisions, meeting outcomes, research, checklists — anything the team "
+                    "needs to keep accessible but that doesn\'t fit in a task or spec.\n\n"
+                    "---\n\n"
+                    "## Note groups\n\n"
+                    "Organise notes into colour-coded groups. Common patterns:\n\n"
+                    "| Group | What goes here |\n"
+                    "|---|---|\n"
+                    "| **Discovery** | Research, user interviews, product decisions, brainstorms |\n"
+                    "| **Shiproom** | Release checklists, deployment records, post-mortems |\n"
+                    "| **Meetings** | Standups, retrospectives, planning sessions |\n"
+                    "| **Architecture** | Design decisions, ADRs, diagrams |\n"
+                    "| **Reference** | Glossary, team conventions, onboarding guides |\n\n"
+                    "---\n\n"
+                    "## Pinning notes\n\n"
+                    "Pin a note to keep it permanently at the top, regardless of when it was last updated. "
+                    "Good candidates: team onboarding guide, current sprint goals, active incident status.\n\n"
+                    "---\n\n"
+                    "## Linking notes\n\n"
+                    "- **Link to a task** → the note appears in that task\'s related notes panel.\n"
+                    "- **Link to a spec** → groups implementation context and decisions around the spec.\n\n"
+                    "A single note can be linked to both a task and a spec simultaneously.\n\n"
+                    "---\n\n"
+                    "## What goes where\n\n"
+                    "| Content type | The right place |\n"
+                    "|---|---|\n"
+                    "| Work that needs to be done | **Task** |\n"
+                    "| What \"done\" means for a feature | **Specification** |\n"
+                    "| Decision made and why | **Note** |\n"
+                    "| Context the team needs to reference | **Note** |\n"
+                    "| Short standing process guideline | **Project Rule** |\n"
+                    "| Running log while implementing | **Note** linked to the task |\n"
+                    "| Post-release observation or incident | **Note** in a Shiproom group |\n"
+                    "| Question about a specific task | **Task comment** |\n\n"
+                    "---\n\n"
+                    "> **Pattern:** For any significant task, create a note titled "
+                    "\"Implementation journal — [task name]\" and update it as you work. "
+                    "Link it to the task. When the task closes, the journal stays — searchable, linkable, permanent."
+                ),
+                "tags": ["notes", "knowledge", "workflow"],
+                "external_refs": [],
+                "attachment_refs": [],
+                "pinned": False,
+                "archived": False,
+                "created_at": to_iso_utc(datetime.now(timezone.utc)),
+            },
+            metadata={
+                "actor_id": DEFAULT_USER_ID,
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_id": CONSTRUCTOS_NOTE_NOTES_ID,
+            },
+            expected_version=0,
+        )
+
+    if current_version(db, "Note", CONSTRUCTOS_NOTE_RULES_ID) == 0:
+        append_event(
+            db,
+            aggregate_type="Note",
+            aggregate_id=CONSTRUCTOS_NOTE_RULES_ID,
+            event_type=NOTE_EVENT_CREATED,
+            payload={
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_group_id": CONSTRUCTOS_NOTE_FLOW_GROUP_ID,
+                "task_id": None,
+                "specification_id": None,
+                "title": "Project Rules: guiding your team and the AI",
+                "body": (
+                    "# Project Rules\n\n"
+                    "**Project Rules** are short named guidelines attached to a project. "
+                    "They define how the team and the AI agent should work — "
+                    "the process agreements that aren\'t written down anywhere else.\n\n"
+                    "---\n\n"
+                    "## What rules are for\n\n"
+                    "Rules are for the things everyone on the team knows but that new members "
+                    "(or an AI agent) wouldn\'t know by default:\n\n"
+                    "- Your definition of done.\n"
+                    "- How to handle status transitions.\n"
+                    "- Naming conventions for tasks.\n"
+                    "- What \"blocked\" means and who handles it.\n"
+                    "- Standing technical preferences (e.g. \"always write tests for new functions\").\n\n"
+                    "Every AI agent run includes all project rules in its brief — "
+                    "so the agent follows the same standards without you repeating yourself.\n\n"
+                    "---\n\n"
+                    "## What makes a good rule\n\n"
+                    "| Principle | Good | Avoid |\n"
+                    "|---|---|---|\n"
+                    "| **Short** | One instruction per rule | Multi-paragraph explanations |\n"
+                    "| **Actionable** | \"Do X when Y happens\" | \"Be thoughtful about…\" |\n"
+                    "| **Specific** | \"Attach a screenshot when moving to Done\" | \"Document your work\" |\n\n"
+                    "---\n\n"
+                    "## Example rules\n\n"
+                    "**Definition of done**\n"
+                    "> A task is done when all acceptance criteria in the linked spec are verified, "
+                    "evidence is attached as a comment, and the task is moved to Done.\n\n"
+                    "**Status transitions**\n"
+                    "> When moving a task to a new status, leave a one-line comment: what changed and what\'s next.\n\n"
+                    "**Task naming**\n"
+                    "> All task titles use imperative verb form: \"Add login page\", \"Fix checkout bug\".\n\n"
+                    "**Handling blockers**\n"
+                    "> If a task is blocked, add the label `blocked`, name the blocker in a comment, "
+                    "and assign an owner to resolve it.\n\n"
+                    "---\n\n"
+                    "> **Tip:** After a few agent runs, review the output. "
+                    "If the agent keeps doing something you need to correct, "
+                    "that correction probably belongs in a project rule."
+                ),
+                "tags": ["rules", "process", "workflow"],
+                "external_refs": [],
+                "attachment_refs": [],
+                "pinned": False,
+                "archived": False,
+                "created_at": to_iso_utc(datetime.now(timezone.utc)),
+            },
+            metadata={
+                "actor_id": DEFAULT_USER_ID,
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_id": CONSTRUCTOS_NOTE_RULES_ID,
+            },
+            expected_version=0,
+        )
+
+    if current_version(db, "Note", CONSTRUCTOS_NOTE_AI_ID) == 0:
+        append_event(
+            db,
+            aggregate_type="Note",
+            aggregate_id=CONSTRUCTOS_NOTE_AI_ID,
+            event_type=NOTE_EVENT_CREATED,
+            payload={
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_group_id": CONSTRUCTOS_NOTE_FLOW_GROUP_ID,
+                "task_id": None,
+                "specification_id": None,
+                "title": "AI Automation: letting the agent do the work",
+                "body": (
+                    "# AI Automation\n\n"
+                    "ConstructOS has a built-in AI agent that can execute tasks on your behalf. "
+                    "You write the brief, assign the task, and the agent does the work — "
+                    "logging every step inside the task so you have full visibility.\n\n"
+                    "---\n\n"
+                    "## How it works\n\n"
+                    "```\n"
+                    "Write a clear task  →  Assign to agent  →  Click Run now\n"
+                    "                                                  ↓\n"
+                    "                                         Agent reads:\n"
+                    "                                         · Task description\n"
+                    "                                         · Linked specification\n"
+                    "                                         · Project rules\n"
+                    "                                         · Related notes & context\n"
+                    "                                                  ↓\n"
+                    "                                        Agent executes\n"
+                    "                                                  ↓\n"
+                    "                                   Results logged in comments\n"
+                    "                                   Task status updated\n"
+                    "```\n\n"
+                    "| Automation status | What\'s happening |\n"
+                    "|---|---|\n"
+                    "| **Queued** | Request submitted, waiting to start |\n"
+                    "| **Running** | Agent is actively working |\n"
+                    "| **Done** | Completed — check comments for output |\n"
+                    "| **Failed** | Something went wrong — reason is in the comments |\n\n"
+                    "---\n\n"
+                    "## Writing a brief the agent can act on\n\n"
+                    "The quality of the output depends on the quality of the brief.\n\n"
+                    "**Good:**\n"
+                    "> **Title:** Generate the March sprint summary report\n"
+                    "> **Description:** Pull all tasks closed in March. Group by assignee. "
+                    "For each person, list task titles and a one-line outcome. "
+                    "Write as markdown and attach as a comment on this task.\n\n"
+                    "**Too vague:**\n"
+                    "> **Title:** Do the report\n\n"
+                    "Tips:\n"
+                    "- **State the output explicitly.** \"Write a markdown table\" beats \"summarise things\".\n"
+                    "- **Link a specification.** The agent reads it as acceptance criteria.\n"
+                    "- **Add context in a linked note.** Background, constraints, examples.\n"
+                    "- **Use project rules for standing instructions.** Write once, always followed.\n\n"
+                    "---\n\n"
+                    "## In-app chat\n\n"
+                    "The **Chat** panel is a conversational interface scoped to your project:\n\n"
+                    "- \"What tasks are blocked right now?\"\n"
+                    "- \"Create a task to add email validation to the signup form.\"\n"
+                    "- \"Summarise the Discovery notes.\"\n\n"
+                    "> **Chat vs. automation:** Chat is conversational and instant. "
+                    "Automation is asynchronous and produces traceable output inside the task. "
+                    "Use chat for exploration, automation for execution.\n\n"
+                    "---\n\n"
+                    "## Check context before a big run\n\n"
+                    "Open **Project → Context** to see the exact brief the agent will receive. "
+                    "If something important is missing — a decision, a constraint, a spec — "
+                    "add it before running. A five-minute review often saves a full retry cycle."
+                ),
+                "tags": ["ai", "automation", "agent", "workflow"],
+                "external_refs": [],
+                "attachment_refs": [],
+                "pinned": False,
+                "archived": False,
+                "created_at": to_iso_utc(datetime.now(timezone.utc)),
+            },
+            metadata={
+                "actor_id": DEFAULT_USER_ID,
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_id": CONSTRUCTOS_NOTE_AI_ID,
+            },
+            expected_version=0,
+        )
+
+    if current_version(db, "Note", CONSTRUCTOS_NOTE_TIPS_ID) == 0:
+        append_event(
+            db,
+            aggregate_type="Note",
+            aggregate_id=CONSTRUCTOS_NOTE_TIPS_ID,
+            event_type=NOTE_EVENT_CREATED,
+            payload={
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_group_id": CONSTRUCTOS_NOTE_FLOW_GROUP_ID,
+                "task_id": None,
+                "specification_id": None,
+                "title": "Tips & Best Practices",
+                "body": (
+                    "# Tips & Best Practices\n\n"
+                    "Practical advice for getting the most out of ConstructOS.\n\n"
+                    "---\n\n"
+                    "## Before you add a single task\n\n"
+                    "Set up the scaffolding first. Ten minutes here saves hours of reorganisation later.\n\n"
+                    "1. **Define your statuses.** These become board columns. "
+                    "Fewer is better — only add a column if it represents a genuinely distinct stage.\n"
+                    "2. **Write 2–3 project rules.** At minimum: a definition of done "
+                    "and how to handle blockers.\n"
+                    "3. **Create task groups** for your sprints or milestones.\n\n"
+                    "---\n\n"
+                    "## Write the spec before you start the task\n\n"
+                    "For anything that takes more than a day, write the spec first. "
+                    "This forces clarity before effort is invested, and pays off three ways:\n"
+                    "- The person doing the work has an unambiguous brief.\n"
+                    "- The AI agent can execute without guessing.\n"
+                    "- You have a permanent record of what was decided and why.\n\n"
+                    "---\n\n"
+                    "## Keep your board honest\n\n"
+                    "A task that\'s been \"In Progress\" for two weeks isn\'t in progress.\n\n"
+                    "| Situation | What to do |\n"
+                    "|---|---|\n"
+                    "| Blocked externally | Add label `blocked`, comment with blocker + owner |\n"
+                    "| Waiting for review | Move to a \"Review\" or \"Waiting\" status |\n"
+                    "| Scope crept | Split into two tasks |\n"
+                    "| Abandoned | Move to Backlog or archive |\n\n"
+                    "---\n\n"
+                    "## Task titles are your first filter\n\n"
+                    "You\'ll scan task titles hundreds of times. Make them worth reading.\n\n"
+                    "**Imperative, specific:** `Add email validation to signup form` · "
+                    "`Fix null pointer on invoice export` · `Write onboarding email sequence`\n\n"
+                    "**Vague:** `Email stuff` · `Bug fix` · `Content`\n\n"
+                    "The same titles end up in the AI agent\'s context. "
+                    "It executes \"Add email validation\" reliably. It guesses at \"Email stuff\".\n\n"
+                    "---\n\n"
+                    "## Comment when you move a task\n\n"
+                    "One line is enough:\n\n"
+                    "> \"Moved to Review — all acceptance criteria verified, screenshot attached.\"\n\n"
+                    "> \"Moved back to In Progress — QA found edge case with empty cart checkout.\"\n\n"
+                    "This creates a timeline inside every task. When something goes wrong, "
+                    "or when you onboard someone new, the history is right there.\n\n"
+                    "---\n\n"
+                    "## Let the agent handle repetitive work\n\n"
+                    "Recurring tasks are ideal for automation: weekly summaries, monthly reports, "
+                    "regular audits. Set up a recurring task, assign it to the agent, write a clear "
+                    "description of the expected output. You keep oversight, the agent does the execution.\n\n"
+                    "---\n\n"
+                    "## Use the Demo project as a sandbox\n\n"
+                    "The Demo project is always safe to experiment with — nothing you do there affects "
+                    "other projects. Test automation, delivery checks, and board views there "
+                    "before setting them up in a project your team is actively using."
+                ),
+                "tags": ["tips", "best-practices", "workflow"],
+                "external_refs": [],
+                "attachment_refs": [],
+                "pinned": False,
+                "archived": False,
+                "created_at": to_iso_utc(datetime.now(timezone.utc)),
+            },
+            metadata={
+                "actor_id": DEFAULT_USER_ID,
+                "workspace_id": BOOTSTRAP_WORKSPACE_ID,
+                "project_id": CONSTRUCTOS_PROJECT_ID,
+                "note_id": CONSTRUCTOS_NOTE_TIPS_ID,
+            },
+            expected_version=0,
+        )
+
+    db.commit()
+
+
 def bootstrap_data():
     shared_models.ensure_engine()
     shared_models.Base.metadata.create_all(bind=shared_models.engine)
@@ -1609,6 +2326,8 @@ def bootstrap_data():
             )
         _seed_demo_event_storming_scaffold()
         db.commit()
+
+        _seed_constructos_project(db)
 
         # Repair drift: if Kurrent was reset but app.db persisted, backfill streams.
         _backfill_project_streams_from_read_model(db)

@@ -334,6 +334,8 @@ function TaskDueInputWithPresets({
 export function TaskDrawer({ state }: { state: any }) {
   const [openSections, setOpenSections] = React.useState<string[]>([])
   const [confirmDiscardOpen, setConfirmDiscardOpen] = React.useState(false)
+  const [requestChangesDialogOpen, setRequestChangesDialogOpen] = React.useState(false)
+  const [requestChangesComment, setRequestChangesComment] = React.useState('')
   const [externalTaskPickerQuery, setExternalTaskPickerQuery] = React.useState('')
   const [gitRepositoryDialogTarget, setGitRepositoryDialogTarget] = React.useState<ProjectGitRepositoryTarget | null>(null)
   const pendingPostDiscardActionRef = React.useRef<(() => void) | null>(null)
@@ -379,6 +381,11 @@ export function TaskDrawer({ state }: { state: any }) {
     setExternalTaskPickerQuery('')
   }, [state.selectedTask?.id])
 
+  React.useEffect(() => {
+    setRequestChangesDialogOpen(false)
+    setRequestChangesComment('')
+  }, [state.selectedTask?.id])
+
   const openGitRepositoryFromRef = React.useCallback((ref: { url: string; title?: string; source?: string }) => {
     const target = parseProjectGitRepositoryExternalRef(ref)
     if (!target) return false
@@ -418,17 +425,82 @@ export function TaskDrawer({ state }: { state: any }) {
     reviewLinkAutoOpenRef.current = ''
   }, [selectedTask?.id])
 
-  const runReviewAction = React.useCallback(async (action: 'approve' | 'request_changes') => {
+  React.useEffect(() => {
+    if (!selectedTask) return
+    if (!isSelectedTaskInReview || !isSelectedTaskReviewRequired) return
+    const baselineTask = state.taskEditorBaselineTask ?? null
+    if (
+      baselineTask
+      && String(baselineTask.id || '').trim() === String(selectedTask.id || '').trim()
+      && (
+        String(baselineTask.status || '').trim() !== String(selectedTask.status || '').trim()
+        || String(baselineTask.assignee_id || '').trim() !== String(selectedTask.assignee_id || '').trim()
+        || String(baselineTask.assigned_agent_code || '').trim() !== String(selectedTask.assigned_agent_code || '').trim()
+      )
+    ) {
+      return
+    }
+    const canonicalAssigneeId = String(selectedTask.assignee_id || '').trim()
+    const canonicalAgentCode = String(selectedTask.assigned_agent_code || '').trim()
+    if (String(state.editAssigneeId || '').trim() !== canonicalAssigneeId) {
+      state.setEditAssigneeId?.(canonicalAssigneeId)
+    }
+    if (String(state.editAssignedAgentCode || '').trim() !== canonicalAgentCode) {
+      state.setEditAssignedAgentCode?.(canonicalAgentCode)
+    }
+  }, [
+    isSelectedTaskInReview,
+    isSelectedTaskReviewRequired,
+    selectedTask,
+    state.taskEditorBaselineTask,
+    state.editAssigneeId,
+    state.editAssignedAgentCode,
+    state.setEditAssigneeId,
+    state.setEditAssignedAgentCode,
+  ])
+
+  const runReviewAction = React.useCallback(async (action: 'approve' | 'request_changes', comment?: string | null) => {
     if (!state.selectedTask?.id) return
+    if (state.taskIsDirty) {
+      const message = 'Save or discard task changes before taking a review action.'
+      state.setUiError?.(message)
+      state.setTaskEditorError?.(message)
+      return
+    }
     if (!state.reviewTaskMutation) {
       const message = 'Review action is unavailable in the current task context.'
       state.setUiError?.(message)
       state.setTaskEditorError?.(message)
       return
     }
-    await state.reviewTaskMutation.mutateAsync({ taskId: state.selectedTask.id, action })
+    await state.reviewTaskMutation.mutateAsync({ taskId: state.selectedTask.id, action, comment })
+    setRequestChangesDialogOpen(false)
+    setRequestChangesComment('')
     setGitRepositoryDialogTarget(null)
+    forceCloseTaskEditor()
+  }, [forceCloseTaskEditor, state])
+
+  const openRequestChangesDialog = React.useCallback(() => {
+    if (state.taskIsDirty) {
+      const message = 'Save or discard task changes before taking a review action.'
+      state.setUiError?.(message)
+      state.setTaskEditorError?.(message)
+      return
+    }
+    setRequestChangesComment('')
+    setRequestChangesDialogOpen(true)
   }, [state])
+
+  const submitRequestChanges = React.useCallback(() => {
+    const comment = String(requestChangesComment || '').trim()
+    if (!comment) {
+      const message = 'Describe the requested changes before sending the task back.'
+      state.setUiError?.(message)
+      state.setTaskEditorError?.(message)
+      return
+    }
+    void runReviewAction('request_changes', comment)
+  }, [requestChangesComment, runReviewAction, state])
 
   if (!selectedTask) return null
   const linkedNotes: Note[] = state.taskNotes?.data?.items ?? []
@@ -444,6 +516,7 @@ export function TaskDrawer({ state }: { state: any }) {
     statusOptions.find((status) => String(status || '').trim().toLowerCase() === 'completed')
     || statusOptions.find((status) => String(status || '').trim().toLowerCase() === 'done')
     || 'Completed'
+  const isReviewActionPending = Boolean(state.reviewTaskMutation?.isPending) || Boolean(state.completeTaskMutation?.isPending)
   const selectedTaskReviewStatus = String(state.selectedTask.review_status || '').trim().toLowerCase()
   const isSelectedTaskCompleted = String(state.selectedTask.status || '').trim().toLowerCase() === String(completedStatusOption).trim().toLowerCase()
     || String(state.selectedTask.status || '').trim().toLowerCase() === 'done'
@@ -756,15 +829,15 @@ export function TaskDrawer({ state }: { state: any }) {
                     <>
                       <DropdownMenu.Item
                         className="taskdrawer-actions-menu-item"
-                        disabled={Boolean(state.reviewTaskMutation?.isPending) || Boolean(state.taskIsDirty)}
+                        disabled={isReviewActionPending || Boolean(state.taskIsDirty)}
                         onSelect={() => runReviewAction('approve')}
                       >
                         Approve review
                       </DropdownMenu.Item>
                       <DropdownMenu.Item
                         className="taskdrawer-actions-menu-item"
-                        disabled={Boolean(state.reviewTaskMutation?.isPending) || Boolean(state.taskIsDirty)}
-                        onSelect={() => runReviewAction('request_changes')}
+                        disabled={isReviewActionPending || Boolean(state.taskIsDirty)}
+                        onSelect={() => openRequestChangesDialog()}
                       >
                         Request changes
                       </DropdownMenu.Item>
@@ -869,15 +942,15 @@ export function TaskDrawer({ state }: { state: any }) {
               <button
                 type="button"
                 className="status-chip danger-ghost"
-                disabled={Boolean(state.reviewTaskMutation?.isPending) || Boolean(state.taskIsDirty)}
-                onClick={() => runReviewAction('request_changes')}
+                disabled={isReviewActionPending || Boolean(state.taskIsDirty)}
+                onClick={() => openRequestChangesDialog()}
               >
                 Request changes
               </button>
               <button
                 type="button"
                 className="status-chip active"
-                disabled={Boolean(state.reviewTaskMutation?.isPending) || Boolean(state.taskIsDirty)}
+                disabled={isReviewActionPending || Boolean(state.taskIsDirty)}
                 onClick={() => runReviewAction('approve')}
               >
                 Approve review
@@ -948,7 +1021,13 @@ export function TaskDrawer({ state }: { state: any }) {
               placeholder="Unassigned"
               ariaLabel="Task assignee"
               options={assigneeSelectOptions}
+              disabled={isSelectedTaskInReview && isSelectedTaskReviewRequired}
             />
+            {isSelectedTaskInReview && isSelectedTaskReviewRequired ? (
+              <span className="meta" style={{ marginTop: 6, display: 'inline-block' }}>
+                Current owner is locked to the human reviewer while this task is in required review.
+              </span>
+            ) : null}
           </label>
           <label className="field-control task-field-half">
             <span className="field-label">Team agent</span>
@@ -959,8 +1038,17 @@ export function TaskDrawer({ state }: { state: any }) {
               ariaLabel="Task team agent"
               options={teamAgentOptions}
               triggerClassName="quickadd-project-trigger taskdrawer-select-trigger"
-              disabled={!String(state.editAssigneeId || '').trim() || teamAgentOptions.length <= 1}
+              disabled={
+                isSelectedTaskInReview && isSelectedTaskReviewRequired
+                  ? true
+                  : (!String(state.editAssigneeId || '').trim() || teamAgentOptions.length <= 1)
+              }
             />
+            {isSelectedTaskInReview && isSelectedTaskReviewRequired ? (
+              <span className="meta" style={{ marginTop: 6, display: 'inline-block' }}>
+                Review tasks do not carry an active team agent assignment.
+              </span>
+            ) : null}
             {!String(state.editAssigneeId || '').trim() && (
               <span className="meta" style={{ marginTop: 6, display: 'inline-block' }}>
                 Assign a user first to enable team agent routing.
@@ -1596,6 +1684,53 @@ export function TaskDrawer({ state }: { state: any }) {
           </AlertDialog.Content>
         </AlertDialog.Portal>
       </AlertDialog.Root>
+      <AlertDialog.Root
+        open={requestChangesDialogOpen}
+        onOpenChange={(open) => {
+          if (state.reviewTaskMutation?.isPending) return
+          setRequestChangesDialogOpen(open)
+          if (!open) {
+            setRequestChangesComment('')
+            state.setTaskEditorError?.(null)
+          }
+        }}
+      >
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay className="codex-chat-alert-overlay" />
+          <AlertDialog.Content className="codex-chat-alert-content">
+            <AlertDialog.Title className="codex-chat-alert-title">Request changes</AlertDialog.Title>
+            <AlertDialog.Description className="codex-chat-alert-description">
+              Describe what must change before this task can proceed.
+            </AlertDialog.Description>
+            <label className="field-control">
+              <span className="field-label">Required changes</span>
+              <textarea
+                value={requestChangesComment}
+                onChange={(e) => setRequestChangesComment(e.target.value)}
+                rows={5}
+                placeholder="Explain the issues to fix, missing work, or review feedback."
+                disabled={Boolean(state.reviewTaskMutation?.isPending)}
+                style={{ width: '100%' }}
+              />
+            </label>
+            <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
+              <AlertDialog.Cancel asChild>
+                <button className="status-chip" type="button" disabled={Boolean(state.reviewTaskMutation?.isPending)}>
+                  Cancel
+                </button>
+              </AlertDialog.Cancel>
+              <button
+                className="status-chip danger-ghost"
+                type="button"
+                onClick={submitRequestChanges}
+                disabled={Boolean(state.reviewTaskMutation?.isPending) || !String(requestChangesComment || '').trim()}
+              >
+                {state.reviewTaskMutation?.isPending ? 'Sending...' : 'Send changes'}
+              </button>
+            </div>
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
       <ProjectGitRepositoryDialog
         open={gitRepositoryDialogTarget !== null}
         onOpenChange={(open) => {
@@ -1610,12 +1745,12 @@ export function TaskDrawer({ state }: { state: any }) {
                 taskId: String(state.selectedTask.id || ''),
                 taskTitle: String(state.selectedTask.title || 'Task review').trim() || 'Task review',
                 taskHref: `?tab=tasks&project=${encodeURIComponent(String(state.selectedTask.project_id || ''))}&task=${encodeURIComponent(String(state.selectedTask.id || ''))}`,
-                isPending: Boolean(state.reviewTaskMutation?.isPending),
+                isPending: isReviewActionPending || Boolean(state.taskIsDirty),
                 onApprove: () => {
                   void runReviewAction('approve')
                 },
                 onRequestChanges: () => {
-                  void runReviewAction('request_changes')
+                  openRequestChangesDialog()
                 },
               }
             : null

@@ -14,7 +14,6 @@ import {
   getProjectSkills,
   getNote,
   getWorkspaceSkills,
-  listProjectTemplates,
   searchProjectKnowledge,
   getSpecification,
   getTaskGroups,
@@ -43,7 +42,7 @@ export function useCoreQueries(c: any) {
   const selectedTask = useQuery({
     queryKey: ['task', c.userId, c.selectedTaskId],
     queryFn: () => getTask(c.userId, c.selectedTaskId),
-    enabled: Boolean(c.userId && c.selectedTaskId && c.tab === 'tasks'),
+    enabled: Boolean(c.userId && c.selectedTaskId && (c.tab === 'tasks' || c.tab === 'inbox')),
   })
 
   const taskLookup = useQuery({
@@ -131,7 +130,7 @@ export function useCoreQueries(c: any) {
         limit: 200,
         offset: 0,
       }),
-    enabled: Boolean(c.workspaceId && c.selectedProjectId && c.selectedTaskId) && c.tab === 'tasks',
+    enabled: Boolean(c.workspaceId && c.selectedProjectId && c.selectedTaskId) && (c.tab === 'tasks' || c.tab === 'inbox'),
   })
 
   const projectTags = useQuery({
@@ -162,12 +161,6 @@ export function useCoreQueries(c: any) {
     queryKey: ['workspace-skills', c.userId, c.workspaceId],
     queryFn: () => getWorkspaceSkills(c.userId, c.workspaceId),
     enabled: Boolean(c.workspaceId) && (c.tab === 'projects' || c.tab === 'settings'),
-  })
-
-  const projectTemplates = useQuery({
-    queryKey: ['project-templates', c.userId],
-    queryFn: () => listProjectTemplates(c.userId),
-    enabled: Boolean(c.workspaceId) && c.tab === 'projects',
   })
 
   const projectGraphOverview = useQuery({
@@ -356,7 +349,6 @@ export function useCoreQueries(c: any) {
     projectRules,
     projectSkills,
     workspaceSkills,
-    projectTemplates,
     projectGraphOverview,
     projectGraphContextPack,
     projectGraphSubgraph,

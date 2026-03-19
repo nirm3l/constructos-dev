@@ -1,2 +1,0 @@
-"""Project template feature slice."""
-

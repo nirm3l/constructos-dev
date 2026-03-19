@@ -1,0 +1,85 @@
+{
+  "key": "web_game",
+  "label": "Web Game",
+  "description": "For browser games and touch-first interactive experiences with asset and performance constraints.",
+  "positioning_text": "Best when the product is an interactive browser experience that needs explicit device and performance planning.",
+  "recommended_use_cases": ["browser game", "interactive frontend", "touch-first UX", "asset-heavy frontend"],
+  "default_custom_statuses": ["Backlog", "In Progress", "QA on devices", "Ready to deploy", "Completed"],
+  "retrieval_hints": ["gameplay", "touch controls", "asset pipeline", "performance budget", "docker compose", "qa"],
+  "question_set": [
+    "What is the gameplay or interaction loop?",
+    "Which devices and browsers matter most?",
+    "Is the experience mobile-first or desktop-first?"
+  ],
+  "setup_tags": ["game", "interactive", "performance"],
+  "facet_defaults": ["mobile_first"],
+  "specifications": [
+    {
+      "title": "Core Gameplay Loop and Controls",
+      "body": "Define core gameplay loop, touch controls, fail/win states, and session length targets for players."
+    },
+    {
+      "title": "Rendering and Asset Pipeline",
+      "body": "Document sprite/audio pipeline, compression strategy, cache policy, and runtime loading model."
+    },
+    {
+      "title": "Performance Budget and Device Matrix",
+      "body": "Define FPS, memory, bundle-size budgets and target device/browser matrix with acceptance thresholds."
+    },
+    {
+      "title": "Progress Persistence and Resilience",
+      "body": "Specify local/session persistence strategy, reconnect behavior, and graceful degradation for constrained networks."
+    },
+    {
+      "title": "Release and QA Deployment Pipeline",
+      "body": "Define reproducible Docker Compose release pipeline, health checks, and browser QA access shape."
+    }
+  ],
+  "tasks": [
+    {
+      "title": "Prototype touch input and movement loop",
+      "description": "Implement first playable loop with gesture and touch controls.",
+      "priority": "High",
+      "labels": ["web-game", "controls"],
+      "specification_title": "Core Gameplay Loop and Controls"
+    },
+    {
+      "title": "Build sprite atlas and lazy-loading asset manifest",
+      "description": "Set up compressed textures and non-blocking asset loading.",
+      "priority": "High",
+      "labels": ["web-game", "assets"],
+      "specification_title": "Rendering and Asset Pipeline"
+    },
+    {
+      "title": "Establish FPS and memory benchmarks for target devices",
+      "description": "Create repeatable benchmark scenarios across baseline devices.",
+      "priority": "High",
+      "labels": ["web-game", "performance"],
+      "specification_title": "Performance Budget and Device Matrix"
+    },
+    {
+      "title": "Implement save-state fallback and recovery flow",
+      "description": "Persist progress with robust fallback for network interruptions.",
+      "priority": "High",
+      "labels": ["web-game", "resilience"],
+      "specification_title": "Progress Persistence and Resilience"
+    },
+    {
+      "title": "Create Docker Compose deployment profile for browser QA",
+      "description": "Expose the app on a predictable port for QA device testing.",
+      "priority": "High",
+      "labels": ["web-game", "deploy", "docker"],
+      "specification_title": "Release and QA Deployment Pipeline"
+    }
+  ],
+  "rules": [
+    {
+      "title": "Gameplay frame budget is mandatory before feature sign-off",
+      "body": "Features are blocked from Completed if FPS and memory budgets fail on baseline devices."
+    },
+    {
+      "title": "Asset payload growth must stay within agreed browser limits",
+      "body": "Bundle and texture growth requires explicit review when crossing performance thresholds."
+    }
+  ]
+}

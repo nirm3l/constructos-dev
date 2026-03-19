@@ -633,7 +633,7 @@ export function ProjectGitRepositoryDialog({
               <div className="docker-runtime-summary-grid">
                 <div className="docker-runtime-summary-card">
                   <span className="meta">Repository root</span>
-                  <strong>{summaryQuery.data.repo_root}</strong>
+                  <strong className="git-repository-summary-value">{summaryQuery.data.repo_root}</strong>
                 </div>
                 <div className="docker-runtime-summary-card">
                   <span className="meta">Current branch</span>

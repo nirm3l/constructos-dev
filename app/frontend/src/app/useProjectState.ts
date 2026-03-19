@@ -4,7 +4,6 @@ import type { DraftProjectRule } from '../components/projects/ProjectsCreateForm
 
 export function useProjectState() {
   const [projectName, setProjectName] = React.useState('')
-  const [projectTemplateKey, setProjectTemplateKey] = React.useState('')
   const [projectDescription, setProjectDescription] = React.useState('')
   const [projectCustomStatusesText, setProjectCustomStatusesText] = React.useState('')
   const [projectExternalRefsText, setProjectExternalRefsText] = React.useState('')
@@ -20,7 +19,6 @@ export function useProjectState() {
     'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
   >('METADATA_ONLY')
   const [projectEventStormingEnabled, setProjectEventStormingEnabled] = React.useState(true)
-  const [projectTemplateParametersText, setProjectTemplateParametersText] = React.useState('')
   const [projectDescriptionView, setProjectDescriptionView] = React.useState<'write' | 'preview' | 'split'>('split')
   const [showProjectCreateForm, setShowProjectCreateForm] = React.useState(false)
   const [showProjectEditForm, setShowProjectEditForm] = React.useState(false)
@@ -44,6 +42,8 @@ export function useProjectState() {
   const [createProjectMemberIds, setCreateProjectMemberIds] = React.useState<string[]>([])
   const [createProjectWorkspaceSkillIds, setCreateProjectWorkspaceSkillIds] = React.useState<string[]>([])
   const [editProjectMemberIds, setEditProjectMemberIds] = React.useState<string[]>([])
+  const [projectEditorHydratedProjectId, setProjectEditorHydratedProjectId] = React.useState('')
+  const [projectEditorMembersHydratedProjectId, setProjectEditorMembersHydratedProjectId] = React.useState('')
   const [editProjectDescriptionView, setEditProjectDescriptionView] = React.useState<'write' | 'preview' | 'split'>('split')
   const [selectedProjectRuleId, setSelectedProjectRuleId] = React.useState<string | null>(null)
   const [projectRuleTitle, setProjectRuleTitle] = React.useState('')
@@ -77,8 +77,6 @@ export function useProjectState() {
   return {
     projectName,
     setProjectName,
-    projectTemplateKey,
-    setProjectTemplateKey,
     projectDescription,
     setProjectDescription,
     projectCustomStatusesText,
@@ -101,8 +99,6 @@ export function useProjectState() {
     setProjectChatAttachmentIngestionMode,
     projectEventStormingEnabled,
     setProjectEventStormingEnabled,
-    projectTemplateParametersText,
-    setProjectTemplateParametersText,
     projectDescriptionView,
     setProjectDescriptionView,
     showProjectCreateForm,
@@ -142,6 +138,10 @@ export function useProjectState() {
     toggleCreateProjectWorkspaceSkill,
     editProjectMemberIds,
     setEditProjectMemberIds,
+    projectEditorHydratedProjectId,
+    setProjectEditorHydratedProjectId,
+    projectEditorMembersHydratedProjectId,
+    setProjectEditorMembersHydratedProjectId,
     editProjectDescriptionView,
     setEditProjectDescriptionView,
     selectedProjectRuleId,

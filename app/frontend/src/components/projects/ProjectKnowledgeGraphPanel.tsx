@@ -163,6 +163,14 @@ type GraphEntityTypeOption = {
   count: number
 }
 
+type OverviewEntitySource = {
+  key: string
+  label: string
+  color: string
+  count: number
+  percent: number
+}
+
 const GRAPH_ENTITY_TYPE_PREFERRED_ORDER = [
   'project',
   'task',
@@ -188,6 +196,29 @@ function normalizeGraphEntityTypeKey(entityType: unknown): string {
     .trim()
     .toLowerCase()
     .replace(/[\s_-]+/g, '')
+}
+
+function formatOverviewEntityTypeLabel(entityType: unknown): string {
+  const key = normalizeGraphEntityTypeKey(entityType)
+  if (key === 'task') return 'Tasks'
+  if (key === 'note') return 'Notes'
+  if (key === 'specification') return 'Specifications'
+  if (key === 'projectrule') return 'Rules'
+  if (key === 'chatmessage') return 'Chat messages'
+  if (key === 'chatattachment') return 'Chat attachments'
+  if (key === 'chatsession') return 'Chat sessions'
+  if (key === 'boundedcontext') return 'Bounded contexts'
+  if (key === 'aggregate') return 'Aggregates'
+  if (key === 'command') return 'Commands'
+  if (key === 'domainevent') return 'Domain events'
+  if (key === 'policy') return 'Policies'
+  if (key === 'readmodel') return 'Read models'
+  if (key === 'comment') return 'Comments'
+  if (key === 'tag') return 'Tags'
+  if (key === 'user') return 'Users'
+  if (key === 'workspace') return 'Workspaces'
+  if (!key) return 'Entities'
+  return String(entityType || 'Entity')
 }
 
 function formatGraphRelationshipLabel(relationship: unknown): string {
@@ -217,15 +248,15 @@ function graphEntityTypeVisualMeta(entityType: unknown): { sticky: string; text:
   if (key === 'domainevent') return { sticky: EVENT_STORMING_TYPE_META.domainevent.sticky, text: EVENT_STORMING_TYPE_META.domainevent.text, border: EVENT_STORMING_TYPE_META.domainevent.border }
   if (key === 'policy') return { sticky: EVENT_STORMING_TYPE_META.policy.sticky, text: EVENT_STORMING_TYPE_META.policy.text, border: EVENT_STORMING_TYPE_META.policy.border }
   if (key === 'readmodel') return { sticky: EVENT_STORMING_TYPE_META.readmodel.sticky, text: EVENT_STORMING_TYPE_META.readmodel.text, border: EVENT_STORMING_TYPE_META.readmodel.border }
-  if (key === 'task') return { sticky: '#dbeafe', text: '#1e3a8a', border: '#2563eb' }
-  if (key === 'specification') return { sticky: '#ccfbf1', text: '#134e4a', border: '#0d9488' }
-  if (key === 'note') return { sticky: '#f3e8ff', text: '#581c87', border: '#9333ea' }
-  if (key === 'comment') return { sticky: '#dcfce7', text: '#14532d', border: '#16a34a' }
-  if (key === 'projectrule') return { sticky: '#ffedd5', text: '#9a3412', border: '#ea580c' }
-  if (key === 'tag') return { sticky: '#fef3c7', text: '#78350f', border: '#ca8a04' }
-  if (key === 'user') return { sticky: '#e0e7ff', text: '#312e81', border: '#4f46e5' }
-  if (key === 'workspace') return { sticky: '#e5e7eb', text: '#111827', border: '#6b7280' }
-  return { sticky: '#e2e8f0', text: '#0f172a', border: '#64748b' }
+  if (key === 'task') return { sticky: 'var(--kg-node-task-bg)', text: 'var(--kg-node-task-text)', border: 'var(--kg-node-task-border)' }
+  if (key === 'specification') return { sticky: 'var(--kg-node-specification-bg)', text: 'var(--kg-node-specification-text)', border: 'var(--kg-node-specification-border)' }
+  if (key === 'note') return { sticky: 'var(--kg-node-note-bg)', text: 'var(--kg-node-note-text)', border: 'var(--kg-node-note-border)' }
+  if (key === 'comment') return { sticky: 'var(--kg-node-comment-bg)', text: 'var(--kg-node-comment-text)', border: 'var(--kg-node-comment-border)' }
+  if (key === 'projectrule') return { sticky: 'var(--kg-node-projectrule-bg)', text: 'var(--kg-node-projectrule-text)', border: 'var(--kg-node-projectrule-border)' }
+  if (key === 'tag') return { sticky: 'var(--kg-node-tag-bg)', text: 'var(--kg-node-tag-text)', border: 'var(--kg-node-tag-border)' }
+  if (key === 'user') return { sticky: 'var(--kg-node-user-bg)', text: 'var(--kg-node-user-text)', border: 'var(--kg-node-user-border)' }
+  if (key === 'workspace') return { sticky: 'var(--kg-node-workspace-bg)', text: 'var(--kg-node-workspace-text)', border: 'var(--kg-node-workspace-border)' }
+  return { sticky: 'var(--kg-node-default-bg)', text: 'var(--kg-node-default-text)', border: 'var(--kg-node-default-border)' }
 }
 
 function buildAppEntityUrl(args: {
@@ -353,30 +384,30 @@ const EVENT_STORMING_TYPE_META: Record<EventStormingTypeKey, EventStormingTypeMe
   },
   task: {
     label: 'Task',
-    sticky: '#e2e8f0',
-    text: '#0f172a',
-    border: '#64748b',
+    sticky: 'var(--kg-node-task-bg)',
+    text: 'var(--kg-node-task-text)',
+    border: 'var(--kg-node-task-border)',
     lane: 'artifact',
   },
   specification: {
     label: 'Specification',
-    sticky: '#e2e8f0',
-    text: '#0f172a',
-    border: '#64748b',
+    sticky: 'var(--kg-node-specification-bg)',
+    text: 'var(--kg-node-specification-text)',
+    border: 'var(--kg-node-specification-border)',
     lane: 'artifact',
   },
   note: {
     label: 'Note',
-    sticky: '#e2e8f0',
-    text: '#0f172a',
-    border: '#64748b',
+    sticky: 'var(--kg-node-note-bg)',
+    text: 'var(--kg-node-note-text)',
+    border: 'var(--kg-node-note-border)',
     lane: 'artifact',
   },
   other: {
     label: 'Entity',
-    sticky: '#e2e8f0',
-    text: '#0f172a',
-    border: '#64748b',
+    sticky: 'var(--kg-node-default-bg)',
+    text: 'var(--kg-node-default-text)',
+    border: 'var(--kg-node-default-border)',
     lane: 'artifact',
   },
 }
@@ -1038,6 +1069,9 @@ export function ProjectKnowledgeGraphPanel({
       charsPerTile: totalChars > 0 ? totalChars / tileCount : 0,
       sources,
       tiles,
+      distinctEvidenceEntityCount: new Set(
+        evidenceItems.map((item) => `${String(item.entity_type || '').trim()}:${String(item.entity_id || '').trim()}`)
+      ).size,
       chatEvidenceCount: chatEvidenceItems.length,
       nonChatEvidenceCount: nonChatEvidenceItems.length,
       chatEvidenceSharePct: evidenceItems.length > 0 ? (chatEvidenceItems.length / evidenceItems.length) * 100 : 0,
@@ -1710,8 +1744,8 @@ export function ProjectKnowledgeGraphPanel({
           data: { relationship },
           type: flowType,
           label: isTaskDependency ? 'depends on' : undefined,
-          labelStyle: { fontSize: 10, fill: '#334155', fontWeight: 700 },
-          labelBgStyle: isTaskDependency ? { fill: 'rgba(248,250,252,0.86)', fillOpacity: 0.9 } : undefined,
+          labelStyle: { fontSize: 10, fill: 'var(--kg-edge-label-text)', fontWeight: 700 },
+          labelBgStyle: isTaskDependency ? { fill: 'var(--kg-edge-label-bg)', fillOpacity: 0.96 } : undefined,
           labelBgPadding: [4, 2],
           labelBgBorderRadius: 4,
           markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
@@ -2103,8 +2137,8 @@ export function ProjectKnowledgeGraphPanel({
             targetHandle,
             type: 'straight',
             label: meta.label,
-            labelStyle: { fontSize: 10, fill: '#334155', fontWeight: 700 },
-            labelBgStyle: { fill: 'rgba(248,250,252,0.9)', fillOpacity: 0.92 },
+            labelStyle: { fontSize: 10, fill: 'var(--kg-edge-label-text)', fontWeight: 700 },
+            labelBgStyle: { fill: 'var(--kg-edge-label-bg)', fillOpacity: 0.96 },
             markerEnd: { type: MarkerType.ArrowClosed, color: meta.color },
             style: { stroke: meta.color, strokeWidth: meta.width, strokeDasharray: meta.dash },
             animated: relation === 'EMITS_EVENT' || relation === 'TRIGGERS_POLICY',
@@ -2121,7 +2155,14 @@ export function ProjectKnowledgeGraphPanel({
       { key: 'domainevent', ...EVENT_STORMING_TYPE_META.domainevent },
       { key: 'policy', ...EVENT_STORMING_TYPE_META.policy },
       { key: 'readmodel', ...EVENT_STORMING_TYPE_META.readmodel },
-      { key: 'task', label: 'Artifacts', sticky: '#e2e8f0', text: '#0f172a', border: '#64748b', lane: 'artifact' as const },
+      {
+        key: 'task',
+        label: 'Artifacts',
+        sticky: 'var(--kg-node-task-bg)',
+        text: 'var(--kg-node-task-text)',
+        border: 'var(--kg-node-task-border)',
+        lane: 'artifact' as const,
+      },
     ],
     []
   )
@@ -2245,23 +2286,38 @@ export function ProjectKnowledgeGraphPanel({
   const knowledgeSearchActive = normalizedKnowledgeSearchQuery.length >= 2
   const knowledgeSearchItems = knowledgeSearchResultsQuery.data?.items ?? []
   const knowledgeSearchMode = knowledgeSearchResultsQuery.data?.mode ?? 'empty'
-  const overviewEntityCount = counts.tasks + counts.notes + counts.specifications + counts.project_rules + counts.comments
-  const overviewSources = React.useMemo(() => {
-    const base = [
-      { key: 'tasks', label: 'Tasks', color: '#0284c7', count: Number(counts.tasks || 0) },
-      { key: 'notes', label: 'Notes', color: '#9333ea', count: Number(counts.notes || 0) },
-      { key: 'specifications', label: 'Specifications', color: '#0d9488', count: Number(counts.specifications || 0) },
-      { key: 'rules', label: 'Rules', color: '#ea580c', count: Number(counts.project_rules || 0) },
-      { key: 'comments', label: 'Comments', color: '#16a34a', count: Number(counts.comments || 0) },
-    ]
+  const overviewSources = React.useMemo<OverviewEntitySource[]>(() => {
+    const entityTypeCounts = Array.isArray(overview?.entity_type_counts) ? overview.entity_type_counts : []
+    const base = entityTypeCounts.length > 0
+      ? entityTypeCounts.map((item) => ({
+        key: normalizeGraphEntityTypeKey(item?.entity_type),
+        label: formatOverviewEntityTypeLabel(item?.entity_type),
+        color: nodeColor(String(item?.entity_type || 'Entity')),
+        count: Math.max(0, Number(item?.count || 0)),
+      }))
+      : [
+        { key: 'task', label: 'Tasks', color: nodeColor('task'), count: Number(counts.tasks || 0) },
+        { key: 'note', label: 'Notes', color: nodeColor('note'), count: Number(counts.notes || 0) },
+        { key: 'specification', label: 'Specifications', color: nodeColor('specification'), count: Number(counts.specifications || 0) },
+        { key: 'projectrule', label: 'Rules', color: nodeColor('projectrule'), count: Number(counts.project_rules || 0) },
+      ]
     const total = base.reduce((sum, item) => sum + item.count, 0)
     return base
-      .filter((item) => item.count > 0)
+      .filter((item) => item.key && item.count > 0)
       .map((item) => ({
         ...item,
         percent: total > 0 ? (item.count / total) * 100 : 0,
       }))
-  }, [counts.comments, counts.notes, counts.project_rules, counts.specifications, counts.tasks])
+  }, [counts.notes, counts.project_rules, counts.specifications, counts.tasks, nodeColor, overview?.entity_type_counts])
+  const overviewEntityCount = React.useMemo(() => {
+    const total = Number(overview?.total_entities || 0)
+    if (Number.isFinite(total) && total > 0) return Math.floor(total)
+    return overviewSources.reduce((sum, item) => sum + item.count, 0)
+  }, [overview?.total_entities, overviewSources])
+  const overviewHeadlineSources = React.useMemo(
+    () => [...overviewSources].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)).slice(0, 6),
+    [overviewSources]
+  )
   const overviewTiles = React.useMemo(
     () =>
       buildGraphCubeTiles(
@@ -2732,29 +2788,19 @@ export function ProjectKnowledgeGraphPanel({
                       <div className="graph-context-snapshot-total">{overviewEntityCount.toLocaleString()} entities</div>
                     </div>
                     <div className="graph-context-metrics context-snapshot-metrics">
-                      <div className="graph-context-metric context-snapshot-metric">
-                        <span className="meta">Tasks</span>
-                        <strong>{counts.tasks.toLocaleString()}</strong>
-                      </div>
-                      <div className="graph-context-metric context-snapshot-metric">
-                        <span className="meta">Notes</span>
-                        <strong>{counts.notes.toLocaleString()}</strong>
-                      </div>
-                      <div className="graph-context-metric context-snapshot-metric">
-                        <span className="meta">Specifications</span>
-                        <strong>{counts.specifications.toLocaleString()}</strong>
-                      </div>
-                      <div className="graph-context-metric context-snapshot-metric">
-                        <span className="meta">Rules</span>
-                        <strong>{counts.project_rules.toLocaleString()}</strong>
-                      </div>
-                      <div className="graph-context-metric context-snapshot-metric">
-                        <span className="meta">Comments</span>
-                        <strong>{counts.comments.toLocaleString()}</strong>
-                      </div>
+                      {overviewHeadlineSources.map((item) => (
+                        <div key={`overview-metric-${item.key}`} className="graph-context-metric context-snapshot-metric">
+                          <span className="meta">{item.label}</span>
+                          <strong>{item.count.toLocaleString()}</strong>
+                        </div>
+                      ))}
                       <div className="graph-context-metric context-snapshot-metric">
                         <span className="meta">Focus neighbors</span>
                         <strong>{focusNeighbors.length.toLocaleString()}</strong>
+                      </div>
+                      <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Comment activity</span>
+                        <strong>{counts.comments.toLocaleString()}</strong>
                       </div>
                     </div>
                   </div>
@@ -3677,14 +3723,14 @@ export function ProjectKnowledgeGraphPanel({
                                       />
                                     </span>
                                   </div>
-                                  {typeof item.template_alignment === 'number' ? (
+                                  {typeof item.starter_alignment === 'number' ? (
                                     <div className="graph-evidence-score-row">
-                                      <span className="meta">Template</span>
-                                      <span className="graph-evidence-score-value">{item.template_alignment.toFixed(3)}</span>
+                                      <span className="meta">Starter</span>
+                                      <span className="graph-evidence-score-value">{item.starter_alignment.toFixed(3)}</span>
                                       <span className="graph-evidence-score-track">
                                         <span
                                           className="graph-evidence-score-fill graph-evidence-score-fill-template"
-                                          style={{ width: `${normalizeScorePercent(item.template_alignment)}%` }}
+                                          style={{ width: `${normalizeScorePercent(item.starter_alignment)}%` }}
                                         />
                                       </span>
                                     </div>
@@ -3794,14 +3840,14 @@ export function ProjectKnowledgeGraphPanel({
                                           />
                                         </span>
                                       </div>
-                                      {typeof item.template_alignment === 'number' ? (
+                                      {typeof item.starter_alignment === 'number' ? (
                                         <div className="graph-evidence-score-row">
-                                          <span className="meta">Template</span>
-                                          <span className="graph-evidence-score-value">{item.template_alignment.toFixed(3)}</span>
+                                          <span className="meta">Starter</span>
+                                          <span className="graph-evidence-score-value">{item.starter_alignment.toFixed(3)}</span>
                                           <span className="graph-evidence-score-track">
                                             <span
                                               className="graph-evidence-score-fill graph-evidence-score-fill-template"
-                                              style={{ width: `${normalizeScorePercent(item.template_alignment)}%` }}
+                                              style={{ width: `${normalizeScorePercent(item.starter_alignment)}%` }}
                                             />
                                           </span>
                                         </div>
@@ -4006,16 +4052,20 @@ export function ProjectKnowledgeGraphPanel({
                     </div>
                     <div className="graph-context-metrics context-snapshot-metrics">
                       <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Indexed entities</span>
+                        <strong>{overviewEntityCount.toLocaleString()}</strong>
+                      </div>
+                      <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Evidence rows</span>
+                        <strong>{evidenceItems.length.toLocaleString()}</strong>
+                      </div>
+                      <div className="graph-context-metric context-snapshot-metric">
+                        <span className="meta">Distinct evidence entities</span>
+                        <strong>{graphPackSnapshot.distinctEvidenceEntityCount.toLocaleString()}</strong>
+                      </div>
+                      <div className="graph-context-metric context-snapshot-metric">
                         <span className="meta">Sources</span>
                         <strong>{graphPackSnapshot.sources.length.toLocaleString()}</strong>
-                      </div>
-                      <div className="graph-context-metric context-snapshot-metric">
-                        <span className="meta">Characters</span>
-                        <strong>{graphPackSnapshot.totalChars.toLocaleString()}</strong>
-                      </div>
-                      <div className="graph-context-metric context-snapshot-metric">
-                        <span className="meta">Lines</span>
-                        <strong>{graphPackSnapshot.totalLines.toLocaleString()}</strong>
                       </div>
                       <div className="graph-context-metric context-snapshot-metric">
                         <span className="meta">Chat-derived evidence</span>
@@ -4135,7 +4185,7 @@ export function ProjectKnowledgeGraphPanel({
                 <Tabs.Content value="markdown" className="context-snapshot-tab-content">
                   <div className="graph-markdown-block">
                     <div className="meta">Context pack preview</div>
-                    <div className="graph-markdown-preview">
+                    <div className="graph-markdown-preview graph-pack-markdown-preview">
                       <MarkdownView value={contextPack?.markdown || ''} />
                     </div>
                   </div>

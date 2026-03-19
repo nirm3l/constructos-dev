@@ -17,11 +17,15 @@ import {
   getClaudeAuthStatus,
   getCodexAuthStatus,
   getLicenseStatus,
+  getWorkspaceDoctorStatus,
+  resetWorkspaceDoctor,
   triggerLicenseAutoUpdate,
   linkTaskToSpecification,
   listAdminUsers,
   patchMyPreferences,
   resetAdminUserPassword,
+  runWorkspaceDoctor,
+  seedWorkspaceDoctor,
   startClaudeDeviceAuth,
   startCodexDeviceAuth,
   submitFeedback,
@@ -55,6 +59,7 @@ import {
   attachmentRefsToText,
   externalRefsToText,
   formatActivitySummary,
+  orderProjectStatuses,
   parseAttachmentRefsText,
   parseCommaTags,
   parseExternalRefsText,
@@ -193,14 +198,13 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const [quickDueDate, setQuickDueDate] = React.useState('')
   const [quickDueDateFocused, setQuickDueDateFocused] = React.useState(false)
   const {
-    projectName, setProjectName, projectTemplateKey, setProjectTemplateKey, projectDescription, setProjectDescription, projectCustomStatusesText, setProjectCustomStatusesText,
+    projectName, setProjectName, projectDescription, setProjectDescription, projectCustomStatusesText, setProjectCustomStatusesText,
     projectExternalRefsText, setProjectExternalRefsText, projectAttachmentRefsText, setProjectAttachmentRefsText,
     projectEmbeddingEnabled, setProjectEmbeddingEnabled, projectEmbeddingModel, setProjectEmbeddingModel,
     projectContextPackEvidenceTopKText, setProjectContextPackEvidenceTopKText,
     projectAutomationMaxParallelTasksText, setProjectAutomationMaxParallelTasksText,
     projectChatIndexMode, setProjectChatIndexMode, projectChatAttachmentIngestionMode, setProjectChatAttachmentIngestionMode,
     projectEventStormingEnabled, setProjectEventStormingEnabled,
-    projectTemplateParametersText, setProjectTemplateParametersText,
     projectDescriptionView, setProjectDescriptionView, showProjectCreateForm,
     setShowProjectCreateForm, showProjectEditForm, setShowProjectEditForm, editProjectName, setEditProjectName, editProjectDescription,
     setEditProjectDescription, editProjectCustomStatusesText, setEditProjectCustomStatusesText, editProjectExternalRefsText,
@@ -215,6 +219,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     createProjectMemberIds,
     setCreateProjectMemberIds, createProjectWorkspaceSkillIds, setCreateProjectWorkspaceSkillIds, toggleCreateProjectWorkspaceSkill,
     editProjectMemberIds, setEditProjectMemberIds, editProjectDescriptionView,
+    projectEditorHydratedProjectId, setProjectEditorHydratedProjectId,
+    projectEditorMembersHydratedProjectId, setProjectEditorMembersHydratedProjectId,
     setEditProjectDescriptionView, selectedProjectRuleId, setSelectedProjectRuleId, projectRuleTitle, setProjectRuleTitle,
     projectRuleBody, setProjectRuleBody, projectRuleView, setProjectRuleView, draftProjectRules, setDraftProjectRules,
     selectedDraftProjectRuleId, setSelectedDraftProjectRuleId, draftProjectRuleTitle, setDraftProjectRuleTitle,
@@ -618,6 +624,44 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     queryFn: () => listAdminUsers(userId, workspaceId),
     enabled: Boolean(workspaceId && canManageUsers && tab === 'settings'),
   })
+  const workspaceDoctorQuery = useQuery({
+    queryKey: ['workspace-doctor', userId, workspaceId],
+    queryFn: () => getWorkspaceDoctorStatus(userId, workspaceId),
+    enabled: Boolean(workspaceId && tab === 'settings'),
+  })
+  const seedWorkspaceDoctorMutation = useMutation({
+    mutationFn: () => seedWorkspaceDoctor(userId, workspaceId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['workspace-doctor', userId, workspaceId] })
+      await qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+      setUiError(null)
+    },
+    onError: (err: any) => {
+      setUiError(err?.message || 'Unable to seed ConstructOS Doctor')
+    },
+  })
+  const runWorkspaceDoctorMutation = useMutation({
+    mutationFn: () => runWorkspaceDoctor(userId, workspaceId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['workspace-doctor', userId, workspaceId] })
+      await qc.invalidateQueries({ queryKey: ['tasks', userId] })
+      setUiError(null)
+    },
+    onError: (err: any) => {
+      setUiError(err?.message || 'Unable to run ConstructOS Doctor')
+    },
+  })
+  const resetWorkspaceDoctorMutation = useMutation({
+    mutationFn: () => resetWorkspaceDoctor(userId, workspaceId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['workspace-doctor', userId, workspaceId] })
+      await qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+      setUiError(null)
+    },
+    onError: (err: any) => {
+      setUiError(err?.message || 'Unable to reset ConstructOS Doctor')
+    },
+  })
 
   const createAdminUserMutation = useMutation({
     mutationFn: (payload: { workspace_id: string; username: string; full_name?: string; role?: string }) =>
@@ -760,6 +804,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setCreateProjectMemberIds,
     showProjectEditForm,
     setEditProjectMemberIds,
+    setProjectEditorMembersHydratedProjectId,
   })
 
   const taskParams = useTaskQueryParams({
@@ -799,7 +844,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectRules,
     projectSkills,
     workspaceSkills,
-    projectTemplates,
     projectGraphOverview,
     projectGraphContextPack,
     projectGraphSubgraph,
@@ -1174,17 +1218,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     const base = Array.isArray(project?.custom_statuses) && project.custom_statuses.length > 0
       ? project.custom_statuses
       : DEFAULT_PROJECT_STATUSES
-    const out: string[] = []
-    const seen = new Set<string>()
-    for (const raw of [...base, editStatus, selectedTask?.status]) {
-      const status = String(raw || '').trim()
-      if (!status) continue
-      const key = status.toLowerCase()
-      if (seen.has(key)) continue
-      seen.add(key)
-      out.push(status)
-    }
-    return out.length > 0 ? out : [...DEFAULT_PROJECT_STATUSES]
+    const ordered = orderProjectStatuses([...base, editStatus, selectedTask?.status])
+    return ordered.length > 0 ? ordered : [...DEFAULT_PROJECT_STATUSES]
   }, [bootstrap.data?.projects, editProjectId, editStatus, selectedProjectId, selectedTask?.project_id, selectedTask?.status])
   const specificationNameMap = React.useMemo(() => {
     const out: Record<string, string> = {}
@@ -1538,6 +1573,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectMembers: bootstrap.data?.project_members ?? [],
     selectedProjectId,
     showProjectEditForm,
+    projectEditorHydratedProjectId,
+    projectEditorMembersHydratedProjectId,
     selectedProject,
     editProjectName,
     editProjectDescription,
@@ -1870,7 +1907,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     archiveTaskMutation,
     restoreTaskMutation,
     reviewTaskMutation,
-    previewProjectFromTemplateMutation,
     createProjectMutation,
     deleteProjectMutation,
     createProjectRuleMutation,
@@ -1964,7 +2000,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setEditStatus,
     setSelectedTaskId,
     projectName,
-    projectTemplateKey,
     projectDescription,
     projectCustomStatusesText,
     projectExternalRefsText,
@@ -1976,13 +2011,11 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     projectChatIndexMode,
     projectChatAttachmentIngestionMode,
     projectEventStormingEnabled,
-    projectTemplateParametersText,
     createProjectMemberIds,
     createProjectWorkspaceSkillIds,
     workspaceSkills,
     draftProjectRules,
     setProjectName,
-    setProjectTemplateKey,
     setProjectDescription,
     setProjectCustomStatusesText,
     setProjectExternalRefsText,
@@ -1994,7 +2027,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setProjectChatIndexMode,
     setProjectChatAttachmentIngestionMode,
     setProjectEventStormingEnabled,
-    setProjectTemplateParametersText,
     setProjectDescriptionView,
     setCreateProjectMemberIds,
     setCreateProjectWorkspaceSkillIds,
@@ -2113,6 +2145,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     selectedProject,
     setEditProjectName,
     setEditProjectDescription,
+    setProjectEditorHydratedProjectId,
     setEditProjectCustomStatusesText,
     setEditProjectExternalRefsText,
     setEditProjectAttachmentRefsText,
@@ -2132,7 +2165,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     setProjectRuleView,
     showProjectCreateForm,
     projectDescription,
-    projectTemplateKey,
     projectCustomStatusesText,
     setProjectCustomStatusesText,
     setProjectDescriptionView,
@@ -2303,9 +2335,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setShowProjectCreateForm,
       projectName,
       setProjectName,
-      projectTemplateKey,
-      setProjectTemplateKey,
-      previewProjectFromTemplateMutation,
       createProjectMutation,
       projectCustomStatusesText,
       setProjectCustomStatusesText,
@@ -2321,8 +2350,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setProjectChatAttachmentIngestionMode,
       projectEventStormingEnabled,
       setProjectEventStormingEnabled,
-      projectTemplateParametersText,
-      setProjectTemplateParametersText,
       projectDescriptionView,
       setProjectDescriptionView,
       projectDescriptionRef,
@@ -2351,6 +2378,10 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       projectRuleCountQueries,
       projectMemberCounts,
       canManageUsers,
+      workspaceDoctorQuery,
+      seedWorkspaceDoctorMutation,
+      runWorkspaceDoctorMutation,
+      resetWorkspaceDoctorMutation,
       adminUsers,
       adminUsersLoading: adminUsersQuery.isLoading,
       adminUsersError,
@@ -2392,7 +2423,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       projectRules,
       projectSkills,
       workspaceSkills,
-      projectTemplates,
       projectGraphOverview,
       projectGraphContextPack,
       projectGraphSubgraph,

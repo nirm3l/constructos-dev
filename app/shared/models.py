@@ -108,17 +108,19 @@ class ProjectMember(Base, TimeMixin):
     role: Mapped[str] = mapped_column(String(16), default="Contributor")
 
 
-class ProjectTemplateBinding(Base, TimeMixin):
-    __tablename__ = "project_template_bindings"
-    __table_args__ = (UniqueConstraint("project_id", name="ux_project_template_bindings_project"),)
+class ProjectSetupProfile(Base, TimeMixin):
+    __tablename__ = "project_setup_profiles"
+    __table_args__ = (UniqueConstraint("project_id", name="ux_project_setup_profiles_project"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
-    template_key: Mapped[str] = mapped_column(String(128), index=True)
-    template_version: Mapped[str] = mapped_column(String(32))
+    primary_starter_key: Mapped[str] = mapped_column(String(128), index=True)
+    facet_keys_json: Mapped[str] = mapped_column(Text, default="[]")
+    starter_version: Mapped[str] = mapped_column(String(32), default="1")
+    resolved_inputs_json: Mapped[str] = mapped_column(Text, default="{}")
+    retrieval_hints_json: Mapped[str] = mapped_column(Text, default="[]")
     applied_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
-    parameters_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
 class ProjectSkill(Base, TimeMixin):
@@ -161,6 +163,38 @@ class ProjectPluginConfig(Base, TimeMixin):
     last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     updated_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class WorkspaceDoctorConfig(Base, TimeMixin):
+    __tablename__ = "workspace_doctor_configs"
+    __table_args__ = (UniqueConstraint("workspace_id", name="ux_workspace_doctor_configs_workspace"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    doctor_project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), nullable=True, index=True)
+    fixture_version: Mapped[str] = mapped_column(String(32), default="1")
+    last_seeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    updated_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class DoctorRun(Base, TimeMixin):
+    __tablename__ = "doctor_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), nullable=True, index=True)
+    fixture_version: Mapped[str] = mapped_column(String(32), default="1")
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    triggered_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 

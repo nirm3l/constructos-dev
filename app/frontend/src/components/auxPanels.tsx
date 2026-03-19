@@ -18,6 +18,7 @@ import type {
   Note,
   Specification,
   Task,
+  WorkspaceDoctorStatus,
   WorkspaceSkill,
   WorkspaceSkillsPage,
 } from '../types'
@@ -332,6 +333,205 @@ function WorkspaceAuthCard({
   )
 }
 
+function WorkspaceDoctorCard({
+  doctorStatus,
+  doctorLoading,
+  doctorError,
+  canManage,
+  onSeedDoctor,
+  seedDoctorPending,
+  onRunDoctor,
+  runDoctorPending,
+  onResetDoctor,
+  resetDoctorPending,
+}: {
+  doctorStatus: WorkspaceDoctorStatus | null
+  doctorLoading: boolean
+  doctorError: string | null
+  canManage: boolean
+  onSeedDoctor: () => Promise<unknown>
+  seedDoctorPending: boolean
+  onRunDoctor: () => Promise<unknown>
+  runDoctorPending: boolean
+  onResetDoctor: () => Promise<unknown>
+  resetDoctorPending: boolean
+}) {
+  const formatDateTime = (value: string | null): string => {
+    if (!value) return 'n/a'
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) return value
+    return parsed.toLocaleString()
+  }
+  const [selectedRunId, setSelectedRunId] = React.useState('')
+  const recentRuns = Array.isArray(doctorStatus?.recent_runs) ? doctorStatus.recent_runs : []
+  const selectedRun = React.useMemo(() => {
+    if (!recentRuns.length) return doctorStatus?.last_run ?? null
+    if (!selectedRunId) return doctorStatus?.last_run ?? recentRuns[0] ?? null
+    return recentRuns.find((item) => item.id === selectedRunId) ?? doctorStatus?.last_run ?? recentRuns[0] ?? null
+  }, [doctorStatus?.last_run, recentRuns, selectedRunId])
+  React.useEffect(() => {
+    if (!recentRuns.length) {
+      setSelectedRunId('')
+      return
+    }
+    if (selectedRunId && recentRuns.some((item) => item.id === selectedRunId)) return
+    setSelectedRunId(String((doctorStatus?.last_run ?? recentRuns[0])?.id || ''))
+  }, [doctorStatus?.last_run, recentRuns, selectedRunId])
+  const checks = Array.isArray(selectedRun?.summary?.checks) ? selectedRun.summary.checks : []
+  return (
+    <section className="profile-pane-card" aria-label="ConstructOS Doctor" data-tour-id="workspace-doctor-card">
+      <div className="profile-pane-head">
+        <h3>
+          <span className="profile-pane-head-icon" aria-hidden="true">
+            <Icon path="M12 3l7 4v5c0 5-3.5 8.5-7 9.5-3.5-1-7-4.5-7-9.5V7l7-4zM9.5 12.5l1.5 1.5 3.5-4" />
+          </span>
+          <span>ConstructOS Doctor</span>
+        </h3>
+        <span className="status-chip">
+          {doctorStatus?.supported ? (doctorStatus?.seeded ? 'Seeded' : 'Ready') : 'Unsupported'}
+        </span>
+      </div>
+      {doctorLoading ? <div className="notice">Loading Doctor status...</div> : null}
+      {doctorError ? <div className="notice notice-error">{doctorError}</div> : null}
+      {doctorStatus && !doctorStatus.supported ? (
+        <div className="notice notice-error">
+          Doctor is not enabled in <code>AGENT_ENABLED_PLUGINS</code>.
+        </div>
+      ) : null}
+      <dl className="profile-facts">
+        <div className="profile-fact">
+          <dt>Fixture version</dt>
+          <dd>{doctorStatus?.fixture_version || 'n/a'}</dd>
+        </div>
+        <div className="profile-fact">
+          <dt>Doctor project</dt>
+          <dd>{doctorStatus?.project?.name || 'Not seeded'}</dd>
+        </div>
+        <div className="profile-fact">
+          <dt>Seeded team tasks</dt>
+          <dd>{doctorStatus?.checks?.seeded_team_task_count ?? 0}</dd>
+        </div>
+        <div className="profile-fact">
+          <dt>Last run</dt>
+          <dd>{doctorStatus?.last_run_status || 'Never run'}</dd>
+        </div>
+      </dl>
+      <div className="row" style={{ gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
+        <button
+          className="status-chip"
+          onClick={() => { void onSeedDoctor() }}
+          disabled={!canManage || seedDoctorPending || !doctorStatus?.supported}
+        >
+          {seedDoctorPending ? 'Seeding...' : (doctorStatus?.seeded ? 'Reseed Doctor Project' : 'Seed Doctor Project')}
+        </button>
+        <button
+          className="status-chip"
+          onClick={() => { void onRunDoctor() }}
+          disabled={!canManage || runDoctorPending || !doctorStatus?.supported}
+        >
+          {runDoctorPending ? 'Running...' : 'Run Doctor'}
+        </button>
+        <button
+          className="status-chip"
+          onClick={() => { void onResetDoctor() }}
+          disabled={!canManage || resetDoctorPending || !doctorStatus?.seeded}
+        >
+          {resetDoctorPending ? 'Resetting...' : 'Reset Doctor Project'}
+        </button>
+        {doctorStatus?.project?.link ? (
+          <a className="status-chip" href={doctorStatus.project.link}>Open Doctor Project</a>
+        ) : null}
+      </div>
+      <p className="meta" style={{ marginTop: 12 }}>
+        Doctor seeds a dedicated workspace validation project, verifies Team Mode wiring, and queues a lead automation cycle.
+      </p>
+      <dl className="profile-facts" style={{ marginTop: 12 }}>
+        <div className="profile-fact">
+          <dt>Runner</dt>
+          <dd>{doctorStatus?.runner_enabled ? 'Enabled' : 'Disabled'}</dd>
+        </div>
+        <div className="profile-fact">
+          <dt>Last seeded</dt>
+          <dd>{formatDateTime(doctorStatus?.last_seeded_at || null)}</dd>
+        </div>
+        <div className="profile-fact">
+          <dt>Last run at</dt>
+          <dd>{formatDateTime(doctorStatus?.last_run_at || null)}</dd>
+        </div>
+        <div className="profile-fact">
+          <dt>Project plugins</dt>
+          <dd>
+            Team Mode {doctorStatus?.checks?.team_mode_enabled ? 'on' : 'off'} / Git Delivery {doctorStatus?.checks?.git_delivery_enabled ? 'on' : 'off'}
+          </dd>
+        </div>
+      </dl>
+      {recentRuns.length > 0 ? (
+        <div style={{ marginTop: 14 }}>
+          <strong>Recent runs</strong>
+          <div className="profile-facts" style={{ marginTop: 10 }}>
+            {recentRuns.slice(0, 6).map((item) => (
+              <div className="profile-fact" key={item.id}>
+                <dt>
+                  <button
+                    className="status-chip"
+                    onClick={() => setSelectedRunId(item.id)}
+                    style={{ width: '100%', textAlign: 'left' }}
+                  >
+                    {formatDateTime(item.started_at)}
+                  </button>
+                </dt>
+                <dd>{item.status}</dd>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {selectedRun ? (
+        <div style={{ marginTop: 14 }}>
+          <strong>Run details</strong>
+          <dl className="profile-facts" style={{ marginTop: 10 }}>
+            <div className="profile-fact">
+              <dt>Started</dt>
+              <dd>{formatDateTime(selectedRun.started_at)}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Finished</dt>
+              <dd>{formatDateTime(selectedRun.finished_at)}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Status</dt>
+              <dd>{selectedRun.status}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Fixture version</dt>
+              <dd>{selectedRun.fixture_version}</dd>
+            </div>
+          </dl>
+          {checks.length > 0 ? (
+            <div style={{ marginTop: 12 }}>
+              <strong>Checks</strong>
+              <div className="profile-facts" style={{ marginTop: 10 }}>
+                {checks.map((item) => (
+                  <div className="profile-fact" key={item.id}>
+                    <dt>{item.label}</dt>
+                    <dd>{String(item.status || 'unknown')}</dd>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          <div style={{ marginTop: 12 }}>
+            <strong>Summary</strong>
+            <pre style={{ marginTop: 10, overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+              {JSON.stringify(selectedRun.summary || {}, null, 2)}
+            </pre>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
 function SearchFilterSelect({
   value,
   onValueChange,
@@ -493,7 +693,7 @@ export function SearchPanel({
   ])
 
   return (
-    <section className="card search-panel-card">
+    <section className="card search-panel-card" data-tour-id="search-panel">
       <div className="row search-panel-header">
         <h2 style={{ margin: 0 }}>Search</h2>
         <div className="search-panel-header-actions">
@@ -2010,6 +2210,15 @@ export function WorkspacePanel({
   workspaceName,
   workspaceRole,
   canManageUsers,
+  doctorStatus,
+  doctorLoading,
+  doctorError,
+  onSeedDoctor,
+  seedDoctorPending,
+  onRunDoctor,
+  runDoctorPending,
+  onResetDoctor,
+  resetDoctorPending,
   workspaceUsersCount,
   workspaceSkillsCount,
   workspaceUsersContent,
@@ -2045,6 +2254,15 @@ export function WorkspacePanel({
   workspaceName: string
   workspaceRole: string
   canManageUsers: boolean
+  doctorStatus: WorkspaceDoctorStatus | null
+  doctorLoading: boolean
+  doctorError: string | null
+  onSeedDoctor: () => Promise<unknown>
+  seedDoctorPending: boolean
+  onRunDoctor: () => Promise<unknown>
+  runDoctorPending: boolean
+  onResetDoctor: () => Promise<unknown>
+  resetDoctorPending: boolean
   workspaceUsersCount: number
   workspaceSkillsCount: number
   workspaceUsersContent?: React.ReactNode
@@ -2106,7 +2324,7 @@ export function WorkspacePanel({
       ? `Subscription (${formatLabel(subscriptionStatus)})`
       : 'Trial fallback'
   const showTrialWindow = licenseStatus === 'trial' || licenseStatus === 'grace'
-  const [workspaceTab, setWorkspaceTab] = React.useState<'connections' | 'runtime' | 'users' | 'skills' | 'license'>('connections')
+  const [workspaceTab, setWorkspaceTab] = React.useState<'connections' | 'runtime' | 'doctor' | 'users' | 'skills' | 'license'>('connections')
   const [installationCopyState, setInstallationCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
   const [runtimeCopyState, setRuntimeCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
   const codexAuthFactRef = React.useRef<HTMLDivElement | null>(null)
@@ -2476,6 +2694,7 @@ export function WorkspacePanel({
             if (
               nextValue === 'connections'
               || nextValue === 'runtime'
+              || nextValue === 'doctor'
               || nextValue === 'users'
               || nextValue === 'skills'
               || nextValue === 'license'
@@ -2496,6 +2715,12 @@ export function WorkspacePanel({
                 <Icon path="M4 4h16v12H4zM10 20h4M12 16v4" />
               </span>
               <span>Runtime</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger className="profile-tab-trigger" value="doctor" data-tour-id="workspace-tab-doctor">
+              <span className="profile-tab-trigger-icon" aria-hidden="true">
+                <Icon path="M12 3l7 4v5c0 5-3.5 8.5-7 9.5-3.5-1-7-4.5-7-9.5V7l7-4z" />
+              </span>
+              <span>Doctor</span>
             </Tabs.Trigger>
             {hasWorkspaceAdminTabs ? (
               <Tabs.Trigger className="profile-tab-trigger" value="users">
@@ -2707,6 +2932,23 @@ export function WorkspacePanel({
                   </div>
                 ) : null}
                 feedback={claudeAuthFeedback}
+              />
+            </div>
+          </Tabs.Content>
+
+          <Tabs.Content className="profile-tab-content" value="doctor">
+            <div className="profile-pane-grid profile-workspace-grid">
+              <WorkspaceDoctorCard
+                doctorStatus={doctorStatus}
+                doctorLoading={doctorLoading}
+                doctorError={doctorError}
+                canManage={canManageUsers}
+                onSeedDoctor={onSeedDoctor}
+                seedDoctorPending={seedDoctorPending}
+                onRunDoctor={onRunDoctor}
+                runDoctorPending={runDoctorPending}
+                onResetDoctor={onResetDoctor}
+                resetDoctorPending={resetDoctorPending}
               />
             </div>
           </Tabs.Content>

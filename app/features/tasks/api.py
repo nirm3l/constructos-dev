@@ -501,6 +501,8 @@ def run_automation_stream(
             "execution_intent": payload.execution_intent,
             "execution_kickoff_intent": payload.execution_kickoff_intent,
             "project_creation_intent": payload.project_creation_intent,
+            "project_knowledge_lookup_intent": False,
+            "grounded_answer_required": False,
             "workflow_scope": payload.workflow_scope,
             "execution_mode": payload.execution_mode,
             "task_completion_requested": payload.task_completion_requested,

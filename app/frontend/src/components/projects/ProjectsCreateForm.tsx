@@ -5,7 +5,7 @@ import * as Select from '@radix-ui/react-select'
 import { MarkdownView } from '../../markdown/MarkdownView'
 import { ExternalRefEditor, Icon, MarkdownModeToggle, MarkdownSplitPane } from '../shared/uiHelpers'
 import { externalRefsToText, parseExternalRefsText, removeExternalRefByIndex } from '../../utils/ui'
-import type { ProjectFromTemplatePreviewResponse, ProjectTemplate, WorkspaceSkill } from '../../types'
+import type { WorkspaceSkill } from '../../types'
 
 export type DraftProjectRule = { id: string; title: string; body: string }
 
@@ -73,11 +73,6 @@ function ProjectCreateSelect({
 export function ProjectsCreateForm({
   projectName,
   setProjectName,
-  projectTemplateKey,
-  setProjectTemplateKey,
-  projectTemplates,
-  projectTemplatesLoading,
-  previewProjectFromTemplateMutation,
   createProjectMutation,
   projectCustomStatusesText,
   setProjectCustomStatusesText,
@@ -93,8 +88,6 @@ export function ProjectsCreateForm({
   setProjectChatAttachmentIngestionMode,
   projectEventStormingEnabled,
   setProjectEventStormingEnabled,
-  projectTemplateParametersText,
-  setProjectTemplateParametersText,
   embeddingAllowedModels,
   embeddingDefaultModel,
   vectorStoreEnabled,
@@ -127,16 +120,6 @@ export function ProjectsCreateForm({
 }: {
   projectName: string
   setProjectName: React.Dispatch<React.SetStateAction<string>>
-  projectTemplateKey: string
-  setProjectTemplateKey: React.Dispatch<React.SetStateAction<string>>
-  projectTemplates: ProjectTemplate[]
-  projectTemplatesLoading: boolean
-  previewProjectFromTemplateMutation: {
-    mutate: () => void
-    data?: ProjectFromTemplatePreviewResponse
-    isPending: boolean
-    reset: () => void
-  }
   createProjectMutation: { mutate: () => void; isPending: boolean }
   projectCustomStatusesText: string
   setProjectCustomStatusesText: React.Dispatch<React.SetStateAction<string>>
@@ -154,8 +137,6 @@ export function ProjectsCreateForm({
   >
   projectEventStormingEnabled: boolean
   setProjectEventStormingEnabled: React.Dispatch<React.SetStateAction<boolean>>
-  projectTemplateParametersText: string
-  setProjectTemplateParametersText: React.Dispatch<React.SetStateAction<string>>
   embeddingAllowedModels: string[]
   embeddingDefaultModel: string
   vectorStoreEnabled: boolean
@@ -207,51 +188,7 @@ export function ProjectsCreateForm({
     if (current && modelOptions.includes(current)) return current
     return defaultModel
   }, [defaultModel, modelOptions, projectEmbeddingModel])
-  const selectedTemplate = React.useMemo(
-    () => projectTemplates.find((item) => item.key === projectTemplateKey) ?? null,
-    [projectTemplateKey, projectTemplates]
-  )
-  const templateMode = Boolean(String(projectTemplateKey || '').trim())
-  const templatePreview = templateMode ? (previewProjectFromTemplateMutation.data ?? null) : null
-  const templatePreviewParametersJson = React.useMemo(() => {
-    if (!templatePreview) return ''
-    const parameters = templatePreview.binding_preview?.parameters ?? {}
-    const entries = Object.entries(parameters)
-    if (entries.length === 0) return ''
-    return JSON.stringify(parameters, null, 2)
-  }, [templatePreview])
-  const templatePreviewSkillNames = React.useMemo(() => {
-    const raw = templatePreview?.seed_blueprint?.skills
-    if (!Array.isArray(raw) || raw.length === 0) return []
-    return raw
-      .map((item) => {
-        if (!item || typeof item !== 'object') return ''
-        const payload = item as Record<string, unknown>
-        const name = String(payload.name || '').trim()
-        const key = String(payload.skill_key || '').trim()
-        return name || key
-      })
-      .filter(Boolean)
-  }, [templatePreview])
-  const previewCanCreate = Boolean(templatePreview?.project_conflict?.can_create)
-  const previewConflictStatus = String(templatePreview?.project_conflict?.status || '').trim()
-  const canPreviewTemplatePlan =
-    templateMode && !previewProjectFromTemplateMutation.isPending && !createProjectMutation.isPending
-  const canCreateProject =
-    Boolean(projectName.trim()) &&
-    !createProjectMutation.isPending &&
-    (!templateMode || previewCanCreate)
-
-  const conflictMessage = React.useMemo(() => {
-    if (!templateMode || !templatePreview) return ''
-    if (previewConflictStatus === 'none') return 'No project name conflict detected.'
-    if (previewConflictStatus === 'active') return 'A project with this name already exists in this workspace.'
-    if (previewConflictStatus === 'deleted') {
-      return 'A deleted project with this name exists; choose another name.'
-    }
-    if (previewConflictStatus === 'name_missing') return 'Enter a project name to validate conflicts.'
-    return `Project conflict status: ${previewConflictStatus}`
-  }, [previewConflictStatus, templateMode, templatePreview])
+  const canCreateProject = Boolean(projectName.trim()) && !createProjectMutation.isPending
   const chatPolicyDisabled = !projectEmbeddingEnabled
   const effectiveProjectChatIndexMode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' = chatPolicyDisabled
     ? 'OFF'
@@ -264,17 +201,6 @@ export function ProjectsCreateForm({
     'resources',
   ])
   const [createMemberSearch, setCreateMemberSearch] = React.useState('')
-  const projectTemplateSelectValue = projectTemplateKey || '__manual__'
-  const projectTemplateOptions = React.useMemo<ProjectCreateSelectOption[]>(
-    () => [
-      { value: '__manual__', label: 'Manual setup (no template)' },
-      ...projectTemplates.map((template) => ({
-        value: template.key,
-        label: template.name,
-      })),
-    ],
-    [projectTemplates]
-  )
   const embeddingModelSelectOptions = React.useMemo<ProjectCreateSelectOption[]>(
     () =>
       modelOptions.length > 0
@@ -335,40 +261,17 @@ export function ProjectsCreateForm({
   }, [workspaceSkills])
   const canSelectAllMembers = workspaceUsers.some((user) => !selectedMemberSet.has(String(user.id || '').trim()))
   const canClearMembers = selectedMemberSet.size > 0
-  const sectionMetaSetup = templateMode
-    ? `Template: ${selectedTemplate?.name || projectTemplateKey}`
-    : 'Manual project setup'
+  const sectionMetaSetup = 'Project settings'
   const sectionMetaRetrieval = projectEmbeddingEnabled
     ? `Embeddings on · Chat ${effectiveProjectChatIndexMode}`
     : 'Embeddings off · Chat OFF'
   const sectionMetaResources = `${selectedWorkspaceUsers.length} member${selectedWorkspaceUsers.length === 1 ? '' : 's'}, ${selectedWorkspaceSkillSet.size} skill${selectedWorkspaceSkillSet.size === 1 ? '' : 's'}`
   const sectionMetaRules = `${draftProjectRules.length} draft rule${draftProjectRules.length === 1 ? '' : 's'}`
 
-  const runTemplatePreview = React.useCallback(() => {
-    if (!canPreviewTemplatePlan) return
-    previewProjectFromTemplateMutation.mutate()
-  }, [canPreviewTemplatePlan, previewProjectFromTemplateMutation])
-
   const runCreate = React.useCallback(() => {
     if (!projectName.trim() || createProjectMutation.isPending) return
-    if (!templateMode) {
-      createProjectMutation.mutate()
-      return
-    }
-    if (!templatePreview) {
-      runTemplatePreview()
-      return
-    }
-    if (!previewCanCreate) return
     createProjectMutation.mutate()
-  }, [
-    createProjectMutation,
-    previewCanCreate,
-    projectName,
-    runTemplatePreview,
-    templateMode,
-    templatePreview,
-  ])
+  }, [createProjectMutation, projectName])
   const selectAllMembers = React.useCallback(() => {
     for (const user of workspaceUsers) {
       const userId = String(user.id || '').trim()
@@ -399,68 +302,36 @@ export function ProjectsCreateForm({
     setCreateProjectWorkspaceSkillIds([])
   }, [setCreateProjectWorkspaceSkillIds])
 
-  const resetTemplatePreview = previewProjectFromTemplateMutation.reset
-  React.useEffect(() => {
-    resetTemplatePreview()
-  }, [
-    resetTemplatePreview,
-    projectTemplateKey,
-    projectName,
-    projectDescription,
-    projectCustomStatusesText,
-    projectEmbeddingEnabled,
-    projectEmbeddingModel,
-    projectContextPackEvidenceTopKText,
-    projectChatIndexMode,
-    projectChatAttachmentIngestionMode,
-    projectTemplateParametersText,
-    createProjectMemberIds,
-  ])
-
   return (
     <div className="project-create-form">
       <div className="project-create-headrow">
         <h3 style={{ margin: 0 }}>Create project</h3>
-        <span className="meta">{templateMode ? 'Template flow' : 'Manual flow'}</span>
+        <span className="meta">Project settings</span>
       </div>
 
-      <label className="field-control project-create-name-field">
-        <span className="field-label">Project name</span>
-        <input
-          value={projectName}
-          onChange={(e) => setProjectName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              runCreate()
-            }
-          }}
-          placeholder="New project"
-        />
-      </label>
-
-      <div className="project-create-actions-bar project-create-actions-bar-top">
-        {templateMode ? (
-          <button
-            type="button"
-            className="status-chip"
-            disabled={!canPreviewTemplatePlan}
-            onClick={runTemplatePreview}
-            title="Preview template creation plan"
-            aria-label="Preview template creation plan"
-          >
-            {previewProjectFromTemplateMutation.isPending ? 'Previewing...' : 'Preview plan'}
-          </button>
-        ) : null}
+      <div className="project-create-name-row">
+        <label className="field-control project-create-name-field">
+          <span className="field-label">Project name</span>
+          <input
+            value={projectName}
+            onChange={(e) => setProjectName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                runCreate()
+              }
+            }}
+            placeholder="New project"
+          />
+        </label>
         <button
           type="button"
           className="primary project-create-submit-btn"
           disabled={!canCreateProject}
           onClick={runCreate}
-          title={templateMode ? 'Create project from previewed template' : 'Create project'}
-          aria-label={templateMode ? 'Create project from previewed template' : 'Create project'}
+          title="Create"
+          aria-label="Create"
         >
-          <Icon path="M12 5v14M5 12h14" />
-          <span>{createProjectMutation.isPending ? 'Creating...' : 'Create project'}</span>
+          <span>{createProjectMutation.isPending ? 'Creating...' : 'Create'}</span>
         </button>
       </div>
 
@@ -483,116 +354,6 @@ export function ProjectsCreateForm({
             </Accordion.Trigger>
           </Accordion.Header>
           <Accordion.Content className="project-create-section-content">
-            <label className="field-control" style={{ marginBottom: 10 }}>
-              <span className="field-label">Project template</span>
-              <ProjectCreateSelect
-                value={projectTemplateSelectValue}
-                onValueChange={(value) => {
-                  const next = value === '__manual__' ? '' : value
-                  setProjectTemplateKey(next)
-                  if (!next) return
-                  const template = projectTemplates.find((item) => item.key === next)
-                  if (!template) return
-                  setProjectCustomStatusesText((template.default_custom_statuses ?? []).join(', '))
-                  setProjectEmbeddingEnabled(Boolean(template.default_embedding_enabled))
-                  if (template.default_embedding_enabled && !String(projectEmbeddingModel || '').trim() && defaultModel) {
-                    setProjectEmbeddingModel(defaultModel)
-                  }
-                  if (!template.default_embedding_enabled) {
-                    setProjectEmbeddingModel('')
-                    setProjectChatIndexMode('OFF')
-                    setProjectChatAttachmentIngestionMode('METADATA_ONLY')
-                  }
-                  setProjectContextPackEvidenceTopKText(
-                    template.default_context_pack_evidence_top_k == null
-                      ? ''
-                      : String(template.default_context_pack_evidence_top_k)
-                  )
-                }}
-                options={projectTemplateOptions}
-                disabled={projectTemplatesLoading}
-                ariaLabel="Project template"
-                placeholder="Select template"
-              />
-              {selectedTemplate ? (
-                <div className="meta" style={{ marginTop: 6 }}>
-                  {selectedTemplate.description}
-                  {' · '}
-                  Seed specs: {selectedTemplate.seed_counts.specifications}, tasks: {selectedTemplate.seed_counts.tasks}, rules:{' '}
-                  {selectedTemplate.seed_counts.rules}, skills: {selectedTemplate.seed_counts.skills ?? 0}
-                </div>
-              ) : (
-                <div className="meta" style={{ marginTop: 6 }}>
-                  Use manual mode for a blank project, or pick a template to seed initial specs, tasks, rules, and skills.
-                </div>
-              )}
-            </label>
-            {templateMode ? (
-              <div className="field-control" style={{ marginBottom: 10 }}>
-                <span className="field-label">Template plan preview</span>
-                {previewProjectFromTemplateMutation.isPending ? (
-                  <div className="meta">Building preview...</div>
-                ) : !templatePreview ? (
-                  <div className="meta">
-                    Run preview to validate creation and inspect what will be seeded before creating the project.
-                  </div>
-                ) : (
-                  <div className="meta">
-                    Seed specs: {templatePreview.seed_summary.specification_count}, tasks: {templatePreview.seed_summary.task_count},
-                    rules: {templatePreview.seed_summary.rule_count}, skills: {templatePreview.seed_summary.skill_count ?? 0},
-                    graph nodes: {templatePreview.seed_summary.graph_node_count}, graph edges: {templatePreview.seed_summary.graph_edge_count}.
-                    {' '}
-                    {conflictMessage}
-                  </div>
-                )}
-                {templatePreview ? (
-                  <div className="meta" style={{ marginTop: 6 }}>
-                    Resolved statuses: {templatePreview.project_blueprint.custom_statuses.join(', ') || '(none)'}.
-                    {' '}
-                    Embeddings: {templatePreview.project_blueprint.embedding_enabled ? 'enabled' : 'disabled'}
-                    {templatePreview.project_blueprint.embedding_model
-                      ? ` (${templatePreview.project_blueprint.embedding_model})`
-                      : ''}.
-                    {' '}
-                    Context top K:{' '}
-                    {templatePreview.project_blueprint.context_pack_evidence_top_k == null
-                      ? 'default'
-                      : templatePreview.project_blueprint.context_pack_evidence_top_k}
-                    .
-                    {' '}
-                    Chat indexing: {templatePreview.project_blueprint.chat_index_mode}.
-                    {' '}
-                    Chat attachment ingestion: {templatePreview.project_blueprint.chat_attachment_ingestion_mode}.
-                  </div>
-                ) : null}
-                {templatePreviewParametersJson ? (
-                  <div className="meta" style={{ marginTop: 6 }}>
-                    Applied parameters:
-                    <pre style={{ margin: '6px 0 0', whiteSpace: 'pre-wrap' }}>{templatePreviewParametersJson}</pre>
-                  </div>
-                ) : null}
-                {templatePreviewSkillNames.length > 0 ? (
-                  <div className="meta" style={{ marginTop: 6 }}>
-                    Seeded skills: {templatePreviewSkillNames.join(', ')}
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-            {templateMode ? (
-              <label className="field-control" style={{ marginBottom: 10 }}>
-                <span className="field-label">Template parameters (JSON, optional)</span>
-                <textarea
-                  value={projectTemplateParametersText}
-                  onChange={(e) => setProjectTemplateParametersText(e.target.value)}
-                  placeholder='{"domain_name":"Order","bounded_context_name":"Sales Context"}'
-                  rows={4}
-                  style={{ width: '100%', minHeight: 84 }}
-                />
-                <div className="meta" style={{ marginTop: 6 }}>
-                  Parameters are applied in template preview and template create.
-                </div>
-              </label>
-            ) : null}
             <div className="md-editor-surface" style={{ marginBottom: 10 }}>
               <MarkdownModeToggle
                 view={projectDescriptionView}

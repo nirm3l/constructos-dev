@@ -102,6 +102,74 @@ export type AdminUserAgentRuntimeUpdateResponse = {
   is_background_execution_selected: boolean
 }
 
+export type DoctorRunCheck = {
+  id: string
+  label: string
+  status: 'passed' | 'warning' | 'failed' | string
+  details?: Record<string, unknown> | null
+}
+
+export type DoctorRunSummary = {
+  project_id?: string | null
+  project_link?: string | null
+  queued_task_id?: string | null
+  checks?: DoctorRunCheck[]
+  counts?: {
+    passed?: number
+    warning?: number
+    failed?: number
+  } | null
+  [key: string]: unknown
+}
+
+export type DoctorRun = {
+  id: string
+  workspace_id: string
+  project_id?: string | null
+  fixture_version: string
+  status: 'pending' | 'running' | 'passed' | 'warning' | 'failed' | string
+  summary: DoctorRunSummary
+  started_at: string | null
+  finished_at: string | null
+  triggered_by?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export type WorkspaceDoctorStatus = {
+  workspace_id: string
+  plugin_key: string
+  supported: boolean
+  enabled: boolean
+  fixture_version: string
+  project?: {
+    id: string
+    name: string
+    status: string
+    link: string
+  } | null
+  seeded: boolean
+  runner_enabled: boolean
+  checks: {
+    team_mode_enabled: boolean
+    git_delivery_enabled: boolean
+    seeded_team_task_count: number
+    task_count: number
+  }
+  last_seeded_at: string | null
+  last_run_at: string | null
+  last_run_status: string | null
+  last_run?: DoctorRun | null
+  recent_runs: DoctorRun[]
+  setup?: Record<string, unknown> | null
+}
+
+export type WorkspaceDoctorRunResponse = {
+  workspace_id: string
+  run: DoctorRun
+  status: WorkspaceDoctorStatus
+}
+
 export type ExternalRef = {
   url: string
   title?: string
@@ -182,125 +250,7 @@ export type Project = {
   created_by: string
   created_at: string | null
   updated_at: string | null
-  template_binding?: ProjectTemplateBinding | null
-}
-
-export type ProjectTemplate = {
-  key: string
-  name: string
-  version: string
-  description: string
-  default_custom_statuses: string[]
-  default_embedding_enabled: boolean
-  default_context_pack_evidence_top_k: number | null
-  seed_counts: {
-    specifications: number
-    tasks: number
-    rules: number
-    skills?: number
-    graph_nodes?: number
-    graph_edges?: number
-  }
-}
-
-export type ProjectTemplatesPage = {
-  items: ProjectTemplate[]
-}
-
-export type ProjectFromTemplateResponse = {
-  project: Project
-  template: {
-    key: string
-    name: string
-    version: string
-  }
-  binding: {
-    project_id: string
-    workspace_id: string
-    template_key: string
-    template_version: string
-    applied_by: string
-    applied_at: string | null
-    parameters: Record<string, unknown>
-  }
-  seed_summary: {
-    specification_count: number
-    rule_count: number
-    task_count: number
-    skill_count?: number
-    skill_skip_count?: number
-  }
-  seeded_entity_ids: {
-    specification_ids: string[]
-    rule_ids: string[]
-    task_ids: string[]
-    project_skill_ids?: string[]
-    project_skill_rule_ids?: string[]
-  }
-  skill_seed_report?: {
-    skipped: Array<Record<string, unknown>>
-  }
-}
-
-export type ProjectFromTemplatePreviewResponse = {
-  mode: 'preview'
-  template: {
-    key: string
-    name: string
-    version: string
-    description: string
-  }
-  project_blueprint: {
-    workspace_id: string
-    project_id: string | null
-    name: string
-    description: string
-    custom_statuses: string[]
-    member_user_ids: string[]
-    effective_member_user_ids: string[]
-    embedding_enabled: boolean
-    embedding_model: string | null
-    context_pack_evidence_top_k: number | null
-    chat_index_mode: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' | string
-    chat_attachment_ingestion_mode: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT' | string
-  }
-  binding_preview: {
-    workspace_id: string
-    project_id: string | null
-    template_key: string
-    template_version: string
-    applied_by: string
-    parameters: Record<string, unknown>
-  }
-  seed_summary: {
-    specification_count: number
-    rule_count: number
-    task_count: number
-    skill_count?: number
-    graph_node_count: number
-    graph_edge_count: number
-  }
-  seed_blueprint: {
-    specifications: Array<Record<string, unknown>>
-    tasks: Array<Record<string, unknown>>
-    rules: Array<Record<string, unknown>>
-    skills?: Array<Record<string, unknown>>
-    graph: {
-      nodes: Array<Record<string, unknown>>
-      edges: Array<Record<string, unknown>>
-    }
-  }
-  graph_scaffold_summary: {
-    template_node_id: string
-    template_version_node_id: string
-    project_relation_types: string[]
-    graph_node_count: number
-    graph_edge_count: number
-  }
-  project_conflict: {
-    status: 'none' | 'active' | 'deleted' | 'name_missing' | string
-    can_create: boolean
-  }
+  setup_profile?: ProjectSetupProfile | null
 }
 
 export type Task = {
@@ -559,6 +509,7 @@ export type ProjectTags = {
 export type GraphProjectOverview = {
   project_id: string
   project_name: string
+  total_entities: number
   counts: {
     tasks: number
     notes: number
@@ -566,6 +517,10 @@ export type GraphProjectOverview = {
     project_rules: number
     comments: number
   }
+  entity_type_counts: Array<{
+    entity_type: string
+    count: number
+  }>
   top_tags: Array<{
     tag: string
     usage: number
@@ -610,7 +565,7 @@ export type GraphContextEvidence = {
   snippet: string
   vector_similarity: number | null
   graph_score: number
-  template_alignment?: number
+  starter_alignment?: number
   final_score: number
   graph_path: string[]
   updated_at: string | null
@@ -626,9 +581,34 @@ export type GraphSummary = {
   gaps: string[]
 }
 
-export type ProjectTemplateBinding = {
-  template_key: string
-  template_version: string
+export type ProjectStarterDefinition = {
+  key: string
+  label: string
+  description: string
+  positioning_text: string
+  recommended_use_cases: string[]
+  default_custom_statuses: string[]
+  retrieval_hints: string[]
+  question_set: string[]
+  setup_tags: string[]
+  facet_defaults: string[]
+  artifact_counts: {
+    specifications: number
+    tasks: number
+    rules: number
+  }
+}
+
+export type ProjectStarterCatalog = {
+  items: ProjectStarterDefinition[]
+  facets: string[]
+}
+
+export type ProjectSetupProfile = {
+  primary_starter_key: string
+  facet_keys: string[]
+  starter_version: string
+  retrieval_hints?: string[]
   applied_by: string
   applied_at: string | null
 }
@@ -639,7 +619,7 @@ export type GraphContextPack = {
   mode: 'graph-only' | 'graph+vector'
   structure: GraphContextStructure
   evidence: GraphContextEvidence[]
-  template?: ProjectTemplateBinding
+  setup_profile?: ProjectSetupProfile
   summary?: GraphSummary
   gaps?: string[]
   markdown: string
@@ -1144,7 +1124,7 @@ export type ProjectKnowledgeSearchItem = {
   snippet: string
   vector_similarity: number | null
   graph_score: number
-  template_alignment?: number
+  starter_alignment?: number
   final_score: number
   graph_path: string[]
   updated_at: string | null
@@ -1156,7 +1136,7 @@ export type ProjectKnowledgeSearchResult = {
   query: string
   mode: 'graph-only' | 'graph+vector' | 'vector-only' | 'empty'
   focus?: GraphContextFocus
-  template?: ProjectTemplateBinding
+  setup_profile?: ProjectSetupProfile
   gaps?: string[]
   items: ProjectKnowledgeSearchItem[]
 }

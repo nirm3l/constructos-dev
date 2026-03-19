@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from .base import WorkflowPlugin
+from .doctor.plugin import DoctorPlugin
 from .git_delivery.plugin import GitDeliveryPlugin
 from .github_delivery.plugin import GithubDeliveryPlugin
 from .team_mode.plugin import TeamModePlugin
@@ -11,7 +12,7 @@ from shared.settings import AGENT_ENABLED_PLUGINS
 
 @lru_cache(maxsize=1)
 def list_workflow_plugins() -> list[WorkflowPlugin]:
-    all_plugins: list[WorkflowPlugin] = [TeamModePlugin(), GitDeliveryPlugin(), GithubDeliveryPlugin()]
+    all_plugins: list[WorkflowPlugin] = [TeamModePlugin(), GitDeliveryPlugin(), GithubDeliveryPlugin(), DoctorPlugin()]
     plugin_by_key_map = {
         str(getattr(plugin, "key", "")).strip().lower(): plugin
         for plugin in all_plugins

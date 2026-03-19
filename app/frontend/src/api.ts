@@ -5,6 +5,7 @@ import type {
   AdminUserRoleUpdateResponse,
   AdminUserResetPasswordResponse,
   AdminUsersPage,
+  DoctorRun,
   AuthMePayload,
   BootstrapPayload,
   FeedbackCreateRequest,
@@ -47,9 +48,8 @@ import type {
   ExternalRef,
   Project,
   ProjectBoard,
+  ProjectStarterCatalog,
   ProjectMembersPage,
-  ProjectFromTemplatePreviewResponse,
-  ProjectFromTemplateResponse,
   ProjectPolicyChecksVerifyResponse,
   ProjectCapabilities,
   ProjectPluginConfig,
@@ -60,8 +60,9 @@ import type {
   ProjectSkill,
   ProjectSkillsPage,
   WorkspaceSkill,
+  WorkspaceDoctorRunResponse,
+  WorkspaceDoctorStatus,
   WorkspaceSkillsPage,
-  ProjectTemplatesPage,
   Specification,
   SpecificationBulkTaskCreateResponse,
   SpecificationsPage,
@@ -289,6 +290,24 @@ export const updateAdminUserAgentRuntime = (
   api<AdminUserAgentRuntimeUpdateResponse>(`/api/admin/users/${targetUserId}/agent-runtime`, userId, {
     method: 'POST',
     body: JSON.stringify(payload),
+  })
+
+export const getWorkspaceDoctorStatus = (userId: string, workspaceId: string) =>
+  api<WorkspaceDoctorStatus>(`/api/workspaces/${workspaceId}/doctor`, userId)
+
+export const seedWorkspaceDoctor = (userId: string, workspaceId: string) =>
+  api<WorkspaceDoctorStatus>(`/api/workspaces/${workspaceId}/doctor/seed`, userId, {
+    method: 'POST',
+  })
+
+export const runWorkspaceDoctor = (userId: string, workspaceId: string) =>
+  api<WorkspaceDoctorRunResponse>(`/api/workspaces/${workspaceId}/doctor/run`, userId, {
+    method: 'POST',
+  })
+
+export const resetWorkspaceDoctor = (userId: string, workspaceId: string) =>
+  api<WorkspaceDoctorStatus>(`/api/workspaces/${workspaceId}/doctor/reset`, userId, {
+    method: 'POST',
   })
 
 export const getTasks = (
@@ -1030,52 +1049,8 @@ export const createProject = (
 ) =>
   api<Project>('/api/projects', userId, { method: 'POST', body: JSON.stringify(payload) })
 
-export const listProjectTemplates = (userId: string) =>
-  api<ProjectTemplatesPage>('/api/project-templates', userId)
-
-export const createProjectFromTemplate = (
-  userId: string,
-  payload: {
-    workspace_id: string
-    template_key: string
-    name: string
-    description?: string
-    custom_statuses?: string[]
-    member_user_ids?: string[]
-    embedding_enabled?: boolean
-    embedding_model?: string | null
-    context_pack_evidence_top_k?: number | null
-    chat_index_mode?: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'
-    chat_attachment_ingestion_mode?: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
-    parameters?: Record<string, unknown>
-  }
-) =>
-  api<ProjectFromTemplateResponse>('/api/projects/from-template', userId, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  })
-
-export const previewProjectFromTemplate = (
-  userId: string,
-  payload: {
-    workspace_id: string
-    template_key: string
-    name?: string
-    description?: string
-    custom_statuses?: string[]
-    member_user_ids?: string[]
-    embedding_enabled?: boolean
-    embedding_model?: string | null
-    context_pack_evidence_top_k?: number | null
-    chat_index_mode?: 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR'
-    chat_attachment_ingestion_mode?: 'OFF' | 'METADATA_ONLY' | 'FULL_TEXT'
-    parameters?: Record<string, unknown>
-  }
-) =>
-  api<ProjectFromTemplatePreviewResponse>('/api/projects/from-template/preview', userId, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  })
+export const getProjectStarters = (userId: string) =>
+  api<ProjectStarterCatalog>('/api/project-starters', userId)
 
 export const patchProject = (
   userId: string,
