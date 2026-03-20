@@ -23,6 +23,7 @@ if ! COMPOSE_CMD="$(resolve_compose_cmd)"; then
 fi
 
 DEPLOYED_AT_UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+DEPLOY_STAMP_UTC="$(date -u +"%Y%m%d%H%M%S")"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo "nogit")"
 DEPLOY_TARGET="${DEPLOY_TARGET:-auto}"
 DEPLOY_SOURCE="${DEPLOY_SOURCE:-local}"
@@ -192,7 +193,12 @@ case "$DEPLOY_SOURCE" in
       exit 1
     fi
     APP_VERSION="$IMAGE_TAG"
-    APP_BUILD="ghcr-${IMAGE_TAG}-${GIT_SHA}"
+    if [[ "${IMAGE_TAG}" == "main" ]]; then
+      # Ensure each main-tag redeploy is visible in UI as a unique build marker.
+      APP_BUILD="ghcr-${IMAGE_TAG}-${DEPLOY_STAMP_UTC}-${GIT_SHA}"
+    else
+      APP_BUILD="ghcr-${IMAGE_TAG}-${GIT_SHA}"
+    fi
     TASK_APP_IMAGE="${TASK_APP_IMAGE:-ghcr.io/${GHCR_OWNER}/${GHCR_IMAGE_PREFIX}-task-app:${IMAGE_TAG}}"
     MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-ghcr.io/${GHCR_OWNER}/${GHCR_IMAGE_PREFIX}-mcp-tools:${IMAGE_TAG}}"
     ;;
