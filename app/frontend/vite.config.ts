@@ -2,10 +2,17 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import pkg from './package.json'
 
+const runtimeEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {}
+const resolvedFrontendVersion =
+  runtimeEnv.VITE_APP_VERSION
+  || runtimeEnv.APP_VERSION
+  || pkg.version
+  || 'dev'
+
 export default defineConfig({
   base: '/static/',
   define: {
-    'import.meta.env.VITE_APP_VERSION': JSON.stringify(pkg.version ?? 'dev'),
+    'import.meta.env.VITE_APP_VERSION': JSON.stringify(resolvedFrontendVersion),
   },
   plugins: [react()],
   build: {

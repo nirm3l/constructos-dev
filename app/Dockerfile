@@ -1,4 +1,9 @@
+ARG APP_VERSION=dev
+ARG APP_BUILD=
+
 FROM node:22-alpine AS frontend-builder
+ARG APP_VERSION
+ENV VITE_APP_VERSION=${APP_VERSION}
 
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json /frontend/
@@ -12,11 +17,15 @@ RUN npm install -g --include=optional "@openai/codex@latest" "@anthropic-ai/clau
 
 FROM python:3.12-slim
 
+ARG APP_VERSION
+ARG APP_BUILD
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     HOME=/home/app \
     PATH="/home/app/.local/bin:${PATH}" \
+    APP_VERSION=${APP_VERSION} \
+    APP_BUILD=${APP_BUILD} \
     APP_ENCRYPTED_BUNDLE_ENABLED=false \
     APP_ENCRYPTED_BUNDLE_PATH=/opt/constructos/app.tar.gz.enc \
     APP_BUNDLE_KDF_ITERATIONS=200000 \

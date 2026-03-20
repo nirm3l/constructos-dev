@@ -25,6 +25,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Resolve release version metadata
+        id: release_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [[ -z "${BASE_VERSION}" ]]; then
+            BASE_VERSION="dev"
+          fi
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && -n "${GITHUB_REF_NAME}" ]]; then
+            APP_VERSION="${GITHUB_REF_NAME}"
+          else
+            APP_VERSION="${BASE_VERSION}.${GITHUB_RUN_NUMBER}"
+          fi
+          SHORT_SHA="${GITHUB_SHA::7}"
+          APP_BUILD="ghcr-${APP_VERSION}-${SHORT_SHA}"
+          {
+            echo "app_version=${APP_VERSION}"
+            echo "app_build=${APP_BUILD}"
+          } >> "${GITHUB_OUTPUT}"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -45,6 +66,7 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_PREFIX }}-${{ matrix.image_suffix }}
           tags: |
             type=raw,value=main,enable={{is_default_branch}}
+            type=raw,value=${{ steps.release_meta.outputs.app_version }}
             type=ref,event=tag
             type=sha,prefix=sha-
           labels: |
@@ -61,5 +83,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.release_meta.outputs.app_version }}
+            APP_BUILD=${{ steps.release_meta.outputs.app_build }}
           provenance: true
           sbom: true
