@@ -137,7 +137,11 @@ export function NotesPanel({
       const filteredOpenKeys = previousOpenKeys.filter((key) => allowed.has(key))
       const existing = new Set(filteredOpenKeys)
       const missing = allKeys.filter((key) => !existing.has(key))
-      return [...filteredOpenKeys, ...missing]
+      const next = [...filteredOpenKeys, ...missing]
+      if (next.length === previousOpenKeys.length && next.every((key, index) => key === previousOpenKeys[index])) {
+        return previousOpenKeys
+      }
+      return next
     })
   }, [noteSections])
 
