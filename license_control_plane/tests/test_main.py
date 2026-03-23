@@ -33,6 +33,9 @@ def _build_client(
     client_token_delimiter: str = ".",
     client_token_bundle_segment_index: int = 2,
     customer_ref_secret: str = "",
+    email_resend_api_key: str = "",
+    email_from: str = "",
+    email_reply_to: str = "",
 ) -> TestClient:
     db_file = tmp_path / "control-plane.db"
     os.environ["LCP_DATABASE_URL"] = f"sqlite:///{db_file}"
@@ -48,9 +51,9 @@ def _build_client(
     os.environ["LCP_CLIENT_TOKEN_BUNDLE_PASSWORD"] = client_token_bundle_password
     os.environ["LCP_CLIENT_TOKEN_DELIMITER"] = client_token_delimiter
     os.environ["LCP_CLIENT_TOKEN_BUNDLE_SEGMENT_INDEX"] = str(client_token_bundle_segment_index)
-    os.environ["LCP_EMAIL_RESEND_API_KEY"] = ""
-    os.environ["LCP_EMAIL_FROM"] = ""
-    os.environ["LCP_EMAIL_REPLY_TO"] = ""
+    os.environ["LCP_EMAIL_RESEND_API_KEY"] = email_resend_api_key
+    os.environ["LCP_EMAIL_FROM"] = email_from
+    os.environ["LCP_EMAIL_REPLY_TO"] = email_reply_to
     os.environ["LCP_CUSTOMER_REF_SECRET"] = customer_ref_secret
 
     import license_control_plane.main as lcp_main
@@ -1612,6 +1615,57 @@ def test_public_contact_request_create_list_and_deduplicate(tmp_path: Path):
         assert listed_payload["ok"] is True
         assert listed_payload["total"] == 1
         assert listed_payload["items"][0]["request_type"] == "onboarding"
+
+
+def test_public_onboarding_request_auto_sends_onboarding_package_with_beta_plan(monkeypatch, tmp_path: Path):
+    with _build_client(
+        tmp_path,
+        customer_ref_secret="test-customer-ref-secret",
+        email_resend_api_key="re_test_key",
+        email_from="ConstructOS <onboarding@constructos.dev>",
+    ) as client:
+        import license_control_plane.main as lcp_main
+
+        captured: dict[str, str] = {}
+
+        def _fake_send(*, to_email: str, subject: str, text_body: str, html_body: str | None = None) -> str:
+            captured["to_email"] = to_email
+            captured["subject"] = subject
+            captured["text_body"] = text_body
+            captured["html_body"] = str(html_body or "")
+            return "re_auto_onboarding_message_id"
+
+        monkeypatch.setattr(lcp_main, "_send_email_via_resend", _fake_send)
+
+        response = client.post(
+            "/v1/public/contact-requests",
+            json={
+                "request_type": "onboarding",
+                "email": "auto-onboarding@example.com",
+                "source": "marketing-site",
+                "metadata": {"team_size": "4"},
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is True
+        assert payload["created"] is True
+        assert payload["contact_request"]["request_type"] == "onboarding"
+        assert payload["contact_request"]["email"] == "auto-onboarding@example.com"
+        assert payload["contact_request"]["status"] == "onboarding_sent"
+
+        assert captured["to_email"] == "auto-onboarding@example.com"
+        assert "ConstructOS onboarding package" in captured["subject"]
+
+        customer_ref = lcp_main._customer_ref_from_email("auto-onboarding@example.com")
+        codes = client.get(
+            f"/v1/admin/activation-codes?customer_ref={customer_ref}",
+            headers={"Authorization": "Bearer control-plane-token"},
+        )
+        assert codes.status_code == 200
+        codes_payload = codes.json()
+        assert codes_payload["total"] == 1
+        assert codes_payload["items"][0]["plan_code"] == "beta"
 
 
 def test_public_contact_request_rejects_unsupported_request_type(tmp_path: Path):

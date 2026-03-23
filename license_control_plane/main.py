@@ -2365,6 +2365,49 @@ def public_create_contact_request(
         "created",
         {"email": record.email, "request_type": record.request_type, "created": True},
     )
+    if request_type == "onboarding":
+        auto_metadata = dict(metadata)
+        auto_metadata["source"] = "public-contact-request-onboarding"
+        auto_metadata["contact_request_id"] = record.id
+        auto_metadata["contact_request_source"] = source
+        auto_payload = AdminProvisionOnboardingRequest(
+            to_email=email,
+            plan_code="beta",
+            metadata=auto_metadata,
+        )
+        try:
+            provision_result = admin_provision_onboarding(payload=auto_payload, _auth=None, db=db)
+            _publish_admin_event(
+                "contact_requests",
+                "onboarding_auto_provisioned",
+                {
+                    "email": email,
+                    "contact_request_id": record.id,
+                    "customer_ref": provision_result.get("customer_ref"),
+                    "message_id": provision_result.get("message_id"),
+                },
+            )
+            db.refresh(record)
+        except HTTPException as exc:
+            _publish_admin_event(
+                "contact_requests",
+                "onboarding_auto_provision_failed",
+                {
+                    "email": email,
+                    "contact_request_id": record.id,
+                    "detail": str(exc.detail),
+                },
+            )
+        except Exception as exc:
+            _publish_admin_event(
+                "contact_requests",
+                "onboarding_auto_provision_failed",
+                {
+                    "email": email,
+                    "contact_request_id": record.id,
+                    "detail": str(exc),
+                },
+            )
     return {
         "ok": True,
         "created": True,
