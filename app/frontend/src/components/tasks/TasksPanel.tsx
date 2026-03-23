@@ -625,9 +625,8 @@ export function TasksPanel({
   const visibleBoardStatuses = React.useMemo(() => {
     if (!boardData || !boardLanes) return []
     const orderedStatuses = orderProjectStatuses([...boardData.statuses, ...Object.keys(boardLanes)])
-    if (hasGroups) return orderedStatuses
     return orderedStatuses.filter((status) => (boardLanes[status] ?? []).length > 0)
-  }, [boardData, boardLanes, hasGroups])
+  }, [boardData, boardLanes])
 
   const onProjectsModeChange = React.useCallback((value: string) => {
     if (!allowBoardView) return

@@ -4250,6 +4250,54 @@ class AgentTaskService:
                     "Set delivery_mode on all implementation tasks before kickoff."
                 ),
             )
+        tasks_by_id = {
+            str(item.get("id") or "").strip(): item
+            for item in active_tasks
+            if str(item.get("id") or "").strip()
+        }
+        impossible_dependency_messages: list[str] = []
+        for item in active_tasks:
+            task_id = str(item.get("id") or "").strip()
+            if not task_id:
+                continue
+            relationships = normalize_task_relationships(item.get("task_relationships"))
+            for relationship in relationships:
+                if str(relationship.get("kind") or "").strip().lower() != "depends_on":
+                    continue
+                statuses = {
+                    str(status or "").strip().casefold()
+                    for status in (relationship.get("statuses") or [])
+                    if str(status or "").strip()
+                }
+                if "deployed" not in statuses:
+                    continue
+                source_task_ids = [
+                    str(source_task_id or "").strip()
+                    for source_task_id in (relationship.get("task_ids") or [])
+                    if str(source_task_id or "").strip() and str(source_task_id or "").strip() != task_id
+                ]
+                for source_task_id in source_task_ids:
+                    source_task = tasks_by_id.get(source_task_id)
+                    if not isinstance(source_task, dict):
+                        continue
+                    source_delivery_mode = normalize_delivery_mode(source_task.get("delivery_mode"))
+                    if source_delivery_mode == "deployable_slice":
+                        continue
+                    impossible_dependency_messages.append(
+                        (
+                            f"Task {task_id} depends on deployed milestone from source {source_task_id}, "
+                            f"but source delivery_mode is '{source_delivery_mode or 'unknown'}'."
+                        )
+                    )
+        if impossible_dependency_messages:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Kickoff backlog validation failed: one or more dependency milestones are impossible for the "
+                    "current delivery_mode configuration. "
+                    + " ".join(impossible_dependency_messages[:6])
+                ),
+            )
 
         missing_scope = [
             str(item.get("id") or "").strip()

@@ -564,6 +564,24 @@ h1 {
   align-content: start;
 }
 
+.demo-embed {
+  margin-top: 0.8rem;
+  width: 100%;
+  border: 1px solid rgba(95, 229, 148, 0.26);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: rgba(5, 14, 9, 0.95);
+  box-shadow: inset 0 0 0 1px rgba(117, 255, 173, 0.08);
+}
+
+.demo-embed iframe {
+  display: block;
+  width: 100%;
+  aspect-ratio: 62 / 42;
+  height: auto;
+  border: 0;
+}
+
 .waitlist-label {
   font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, monospace;
   font-size: 0.76rem;

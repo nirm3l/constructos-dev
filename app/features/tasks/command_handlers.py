@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -545,6 +545,87 @@ def _backfill_team_mode_structural_dependencies(
             workspace_id=workspace_id,
             project_id=project_id,
             task_id=task_id,
+        )
+
+
+def _maybe_reorder_task_groups_by_first_task_created_at(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str | None,
+) -> None:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return
+    group_rows = db.execute(
+        select(TaskGroup.id, TaskGroup.order_index, TaskGroup.created_at).where(
+            TaskGroup.workspace_id == str(workspace_id),
+            TaskGroup.project_id == normalized_project_id,
+            TaskGroup.is_deleted == False,  # noqa: E712
+        )
+    ).all()
+    if len(group_rows) < 2:
+        return
+    group_ids = [str(group_id or "").strip() for group_id, _order_index, _created_at in group_rows if str(group_id or "").strip()]
+    if len(group_ids) < 2:
+        return
+
+    first_task_rows = db.execute(
+        select(Task.task_group_id, func.min(Task.created_at))
+        .where(
+            Task.workspace_id == str(workspace_id),
+            Task.project_id == normalized_project_id,
+            Task.is_deleted == False,  # noqa: E712
+            Task.archived == False,  # noqa: E712
+            Task.task_group_id.in_(group_ids),
+        )
+        .group_by(Task.task_group_id)
+    ).all()
+    first_task_by_group = {
+        str(task_group_id or "").strip(): first_created_at
+        for task_group_id, first_created_at in first_task_rows
+        if str(task_group_id or "").strip()
+    }
+
+    def _as_timestamp(value: object, *, default: float) -> float:
+        if isinstance(value, datetime):
+            dt_value = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            return dt_value.astimezone(timezone.utc).timestamp()
+        return default
+
+    current_ids = [
+        str(group_id or "").strip()
+        for group_id, order_index, created_at in sorted(
+            group_rows,
+            key=lambda row: (
+                int(row[1] or 0),
+                _as_timestamp(row[2], default=float("inf")),
+                str(row[0] or "").strip(),
+            ),
+        )
+        if str(group_id or "").strip()
+    ]
+    ordered_ids = [
+        str(group_id or "").strip()
+        for group_id, order_index, created_at in sorted(
+            group_rows,
+            key=lambda row: (
+                0 if first_task_by_group.get(str(row[0] or "").strip()) is not None else 1,
+                _as_timestamp(first_task_by_group.get(str(row[0] or "").strip()), default=float("inf")),
+                _as_timestamp(row[2], default=float("inf")),
+                int(row[1] or 0),
+                str(row[0] or "").strip(),
+            ),
+        )
+        if str(group_id or "").strip()
+    ]
+    if ordered_ids == current_ids:
+        return
+    for index, group_id in enumerate(ordered_ids, start=1):
+        db.execute(
+            update(TaskGroup)
+            .where(TaskGroup.id == group_id)
+            .values(order_index=index)
         )
 
 
@@ -1528,6 +1609,53 @@ def _validate_automation_fields(
                 )
 
 
+def _validate_dependency_status_contract(
+    *,
+    db: Session,
+    workspace_id: str,
+    project_id: str | None,
+    task_id: str | None,
+    task_relationships: list[dict[str, object]] | None,
+) -> None:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return
+    normalized_task_id = str(task_id or "").strip()
+    relationships = normalize_task_relationships(task_relationships)
+    for relationship in relationships:
+        if str(relationship.get("kind") or "").strip().lower() != "depends_on":
+            continue
+        statuses = {
+            str(item or "").strip().casefold()
+            for item in (relationship.get("statuses") or [])
+            if str(item or "").strip()
+        }
+        if "deployed" not in statuses:
+            continue
+        source_task_ids = [
+            str(item or "").strip()
+            for item in (relationship.get("task_ids") or [])
+            if str(item or "").strip() and str(item or "").strip() != normalized_task_id
+        ]
+        for source_task_id in source_task_ids:
+            source_state, _ = rebuild_state(db, "Task", source_task_id)
+            if str(source_state.get("workspace_id") or "").strip() != workspace_id:
+                continue
+            if str(source_state.get("project_id") or "").strip() != normalized_project_id:
+                continue
+            source_delivery_mode = normalize_delivery_mode(source_state.get("delivery_mode"))
+            if source_delivery_mode == DELIVERY_MODE_DEPLOYABLE_SLICE:
+                continue
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Invalid dependency milestone: depends_on status 'deployed' requires source tasks "
+                    "with delivery_mode='deployable_slice'. "
+                    f"Source task '{source_task_id}' has delivery_mode='{source_delivery_mode or 'unknown'}'."
+                ),
+            )
+
+
 def _team_mode_task_dependency_ready(
     *,
     db: Session,
@@ -1821,6 +1949,13 @@ class CreateTaskHandler:
             execution_triggers=normalized_triggers,
             source_task_id=tid,
         )
+        _validate_dependency_status_contract(
+            db=self.ctx.db,
+            workspace_id=self.payload.workspace_id,
+            project_id=self.payload.project_id,
+            task_id=tid,
+            task_relationships=self.payload.task_relationships,
+        )
         legacy_schedule = derive_legacy_schedule_fields(
             instruction=normalized_instruction,
             execution_triggers=normalized_triggers,
@@ -1891,6 +2026,11 @@ class CreateTaskHandler:
             project_id=self.payload.project_id,
             specification_id=specification_id,
             actor_user_id=str(self.ctx.user.id),
+        )
+        _maybe_reorder_task_groups_by_first_task_created_at(
+            self.ctx.db,
+            workspace_id=self.payload.workspace_id,
+            project_id=self.payload.project_id,
         )
         self.ctx.db.commit()
         task_view = load_task_view(self.ctx.db, tid)
@@ -2156,6 +2296,14 @@ class PatchTaskHandler:
             if "task_relationships" in event_payload
             else current_task_relationships
         )
+        if "task_relationships" in event_payload:
+            _validate_dependency_status_contract(
+                db=self.ctx.db,
+                workspace_id=workspace_id,
+                project_id=effective_project_id,
+                task_id=self.task_id,
+                task_relationships=requested_relationships,
+            )
         if "delivery_mode" in event_payload:
             event_payload["delivery_mode"] = normalize_delivery_mode(event_payload.get("delivery_mode"))
         elif current_state:
@@ -2210,16 +2358,6 @@ class PatchTaskHandler:
             event_payload["schedule_state"] = current_schedule_state or "idle"
 
         requested_status = str(event_payload.get("status") or "").strip()
-        if requested_status and current_status:
-            _enforce_team_mode_transition_policy(
-                db=self.ctx.db,
-                workspace_id=workspace_id,
-                project_id=str(event_payload.get("project_id") or project_id or "").strip() or None,
-                actor_user_id=str(self.ctx.user.id),
-                from_status=current_status,
-                to_status=requested_status,
-                task_id=self.task_id,
-            )
         team_mode_config = _load_enabled_team_mode_config(
             self.ctx.db,
             workspace_id=workspace_id,
@@ -2233,6 +2371,32 @@ class PatchTaskHandler:
         review_policy = normalize_review_policy(
             team_mode_config.get("review_policy") if isinstance(team_mode_config, dict) else None
         )
+        if (
+            requested_semantic_status == "in_review"
+            and isinstance(team_mode_config, dict)
+            and not bool(review_policy.get("require_code_review"))
+        ):
+            requested_status = str(status_semantics.get("active") or REQUIRED_SEMANTIC_STATUSES["active"])
+            requested_semantic_status = "active"
+            event_payload["status"] = requested_status
+            event_payload["team_mode_phase"] = "implementation"
+            event_payload["review_required"] = False
+            event_payload["review_status"] = None
+            event_payload["review_requested_at"] = None
+            event_payload["review_source_assignee_id"] = None
+            event_payload["review_source_assigned_agent_code"] = None
+            event_payload["review_next_lead_assignee_id"] = None
+            event_payload["review_next_lead_assigned_agent_code"] = None
+        if requested_status and current_status:
+            _enforce_team_mode_transition_policy(
+                db=self.ctx.db,
+                workspace_id=workspace_id,
+                project_id=str(event_payload.get("project_id") or project_id or "").strip() or None,
+                actor_user_id=str(self.ctx.user.id),
+                from_status=current_status,
+                to_status=requested_status,
+                task_id=self.task_id,
+            )
         if requested_semantic_status == "in_review" and bool(review_policy.get("require_code_review")):
             reviewer_user_id = _resolve_team_mode_reviewer_user_id(
                 self.ctx.db,
