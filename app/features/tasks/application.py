@@ -19,6 +19,9 @@ from .command_handlers import (
     ReopenTaskHandler,
     ReorderTasksHandler,
     ReviewTaskHandler,
+    MarkAutomationCompletedHandler,
+    MarkAutomationFailedHandler,
+    MarkAutomationStartedHandler,
     RequestAutomationRunHandler,
     RestoreTaskHandler,
     ToggleWatchHandler,
@@ -176,6 +179,78 @@ class TaskApplicationService:
                 payload.task_completion_requested,
                 payload.classifier_reason,
                 wake_runner=wake_runner,
+            ),
+        )
+
+    def mark_automation_started(
+        self,
+        task_id: str,
+        *,
+        started_at: str,
+        run_id: str | None = None,
+        stream_status: str | None = None,
+    ) -> dict:
+        return execute_command(
+            self.db,
+            command_name="Task.Automation.MarkStarted",
+            user_id=self.user.id,
+            command_id=None,
+            handler=MarkAutomationStartedHandler(
+                self.ctx,
+                task_id,
+                started_at=started_at,
+                run_id=run_id,
+                stream_status=stream_status,
+            ),
+        )
+
+    def mark_automation_failed(
+        self,
+        task_id: str,
+        *,
+        failed_at: str,
+        error: str,
+        summary: str | None = None,
+        run_id: str | None = None,
+    ) -> dict:
+        return execute_command(
+            self.db,
+            command_name="Task.Automation.MarkFailed",
+            user_id=self.user.id,
+            command_id=None,
+            handler=MarkAutomationFailedHandler(
+                self.ctx,
+                task_id,
+                failed_at=failed_at,
+                error=error,
+                summary=summary,
+                run_id=run_id,
+            ),
+        )
+
+    def mark_automation_completed(
+        self,
+        task_id: str,
+        *,
+        completed_at: str,
+        summary: str | None = None,
+        comment: str | None = None,
+        usage_metadata: dict[str, object] | None = None,
+        run_id: str | None = None,
+    ) -> dict:
+        return execute_command(
+            self.db,
+            command_name="Task.Automation.MarkCompleted",
+            user_id=self.user.id,
+            command_id=None,
+            handler=MarkAutomationCompletedHandler(
+                self.ctx,
+                task_id,
+                completed_at=completed_at,
+                summary=summary,
+                comment=comment,
+                usage_metadata=dict(usage_metadata or {}),
+                run_id=run_id,
             ),
         )
 

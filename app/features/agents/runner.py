@@ -58,15 +58,19 @@ from features.projects.domain import EVENT_UPDATED as PROJECT_EVENT_UPDATED
 from features.tasks.domain import (
     EVENT_UPDATED as TASK_EVENT_UPDATED,
     EVENT_COMPLETED as TASK_EVENT_COMPLETED,
-    EVENT_AUTOMATION_COMPLETED,
     EVENT_AUTOMATION_REQUESTED,
-    EVENT_AUTOMATION_FAILED,
-    EVENT_AUTOMATION_STARTED,
     EVENT_COMMENT_ADDED,
     EVENT_SCHEDULE_COMPLETED,
     EVENT_SCHEDULE_FAILED,
     EVENT_SCHEDULE_QUEUED,
     EVENT_SCHEDULE_STARTED,
+)
+from features.tasks.command_handlers import (
+    CommandContext as TaskCommandContext,
+    MarkAutomationCompletedHandler,
+    MarkAutomationFailedHandler,
+    MarkAutomationStartedHandler,
+    RequestAutomationRunInternalHandler,
 )
 from shared.contracts import ConcurrencyConflictError
 from shared.eventing import append_event, rebuild_state
@@ -693,6 +697,142 @@ def _resolve_task_actor_user_id(
         if not is_agent_project_role(effective_role):
             return str(fallback_actor_user_id or "").strip() or AGENT_SYSTEM_USER_ID
     return assignee_id
+
+
+def _resolve_actor_user_model(*, db, actor_user_id: str | None) -> UserModel:
+    normalized = str(actor_user_id or "").strip()
+    if normalized:
+        user = db.get(UserModel, normalized)
+        if user is not None:
+            return user
+    fallback = db.get(UserModel, AGENT_SYSTEM_USER_ID) or db.get(UserModel, DEFAULT_USER_ID)
+    if fallback is None:
+        raise RuntimeError("Automation actor user is missing")
+    return fallback
+
+
+def _emit_task_automation_completed_via_handler(
+    *,
+    db,
+    actor_user_id: str,
+    task_id: str,
+    completed_at: str,
+    summary: str,
+    comment: str | None = None,
+    usage_metadata: dict[str, object] | None = None,
+) -> None:
+    actor_user = _resolve_actor_user_model(db=db, actor_user_id=actor_user_id)
+    handler = MarkAutomationCompletedHandler(
+        TaskCommandContext(db=db, user=actor_user),
+        task_id=task_id,
+        completed_at=completed_at,
+        summary=summary,
+        comment=comment,
+        usage_metadata=dict(usage_metadata or {}),
+        commit=False,
+    )
+    handler()
+
+
+def _emit_task_automation_failed_via_handler(
+    *,
+    db,
+    actor_user_id: str,
+    task_id: str,
+    failed_at: str,
+    error: str,
+    summary: str,
+) -> None:
+    actor_user = _resolve_actor_user_model(db=db, actor_user_id=actor_user_id)
+    handler = MarkAutomationFailedHandler(
+        TaskCommandContext(db=db, user=actor_user),
+        task_id=task_id,
+        failed_at=failed_at,
+        error=error,
+        summary=summary,
+        commit=False,
+    )
+    handler()
+
+
+def _emit_task_automation_requested_via_handler(
+    *,
+    db,
+    actor_user_id: str,
+    task_id: str,
+    requested_at: str,
+    instruction: str,
+    source: str | None = None,
+    source_task_id: str | None = None,
+    reason: str | None = None,
+    trigger_link: str | None = None,
+    correlation_id: str | None = None,
+    trigger_task_id: str | None = None,
+    from_status: str | None = None,
+    to_status: str | None = None,
+    triggered_at: str | None = None,
+    lead_handoff_token: str | None = None,
+    lead_handoff_at: str | None = None,
+    lead_handoff_refs: list[dict[str, object]] | None = None,
+    lead_handoff_deploy_execution: dict[str, object] | None = None,
+) -> None:
+    actor_user = _resolve_actor_user_model(db=db, actor_user_id=actor_user_id)
+    handler = RequestAutomationRunInternalHandler(
+        TaskCommandContext(db=db, user=actor_user),
+        task_id=task_id,
+        requested_at=requested_at,
+        instruction=instruction,
+        source=source,
+        source_task_id=source_task_id,
+        reason=reason,
+        trigger_link=trigger_link,
+        correlation_id=correlation_id,
+        trigger_task_id=trigger_task_id,
+        from_status=from_status,
+        to_status=to_status,
+        triggered_at=triggered_at,
+        lead_handoff_token=lead_handoff_token,
+        lead_handoff_at=lead_handoff_at,
+        lead_handoff_refs=(
+            [dict(item) for item in lead_handoff_refs if isinstance(item, dict)]
+            if isinstance(lead_handoff_refs, list)
+            else None
+        ),
+        lead_handoff_deploy_execution=(
+            dict(lead_handoff_deploy_execution)
+            if isinstance(lead_handoff_deploy_execution, dict)
+            else None
+        ),
+        commit=False,
+    )
+    handler()
+
+
+def _emit_task_automation_started_via_handler(
+    *,
+    db,
+    actor_user_id: str,
+    task_id: str,
+    started_at: str,
+    run_id: str | None = None,
+    stream_status: str | None = None,
+    progress_text: str | None = None,
+    additional_changes: dict[str, object] | None = None,
+    expected_version: int | None = None,
+) -> None:
+    actor_user = _resolve_actor_user_model(db=db, actor_user_id=actor_user_id)
+    handler = MarkAutomationStartedHandler(
+        TaskCommandContext(db=db, user=actor_user),
+        task_id=task_id,
+        started_at=started_at,
+        run_id=run_id,
+        stream_status=stream_status,
+        progress_text=progress_text,
+        additional_changes=dict(additional_changes or {}),
+        expected_version=expected_version,
+        commit=False,
+    )
+    handler()
 
 
 def _resolve_assignee_project_role(
@@ -3916,38 +4056,25 @@ def _queue_qa_handoff_requests(
                 "task_id": qa_task_id,
             },
         )
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=qa_task_id,
-            event_type=EVENT_AUTOMATION_REQUESTED,
-            payload={
-                "requested_at": lead_handoff_at,
-                "instruction": qa_instruction,
-                "source": "lead_handoff",
-                "source_task_id": lead_task_id,
-                "reason": "lead_handoff",
-                "trigger_link": f"{lead_task_id}->{qa_task_id}:QA",
-                "correlation_id": lead_handoff_token,
-                "trigger_task_id": lead_task_id,
-                "from_status": qa_handoff_status,
-                "to_status": qa_handoff_status,
-                "triggered_at": lead_handoff_at,
-                "lead_handoff_token": lead_handoff_token,
-                "lead_handoff_at": lead_handoff_at,
-                "lead_handoff_refs": lead_handoff_refs,
-                "lead_handoff_deploy_execution": lead_deploy_execution,
-            },
-            metadata={
-                "actor_id": actor_user_id,
-                "workspace_id": workspace_id,
-                "project_id": normalized_project_id,
-                "task_id": qa_task_id,
-                "trigger_task_id": lead_task_id,
-                "trigger_from_status": REQUIRED_SEMANTIC_STATUSES["active"],
-                "trigger_to_status": REQUIRED_SEMANTIC_STATUSES["active"],
-                "triggered_at": lead_handoff_at,
-            },
+        _emit_task_automation_requested_via_handler(
+            db=db,
+            actor_user_id=actor_user_id,
+            task_id=qa_task_id,
+            requested_at=lead_handoff_at,
+            instruction=qa_instruction,
+            source="lead_handoff",
+            source_task_id=lead_task_id,
+            reason="lead_handoff",
+            trigger_link=f"{lead_task_id}->{qa_task_id}:QA",
+            correlation_id=lead_handoff_token,
+            trigger_task_id=lead_task_id,
+            from_status=qa_handoff_status,
+            to_status=qa_handoff_status,
+            triggered_at=lead_handoff_at,
+            lead_handoff_token=lead_handoff_token,
+            lead_handoff_at=lead_handoff_at,
+            lead_handoff_refs=lead_handoff_refs,
+            lead_handoff_deploy_execution=lead_deploy_execution,
         )
         return True
 
@@ -5425,27 +5552,17 @@ def _enqueue_team_lead_blocker_escalation(
             or "Handle blocker escalation and coordinate next actions."
         )
         requested_at = to_iso_utc(datetime.now(timezone.utc))
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=lead_task.id,
-            event_type=EVENT_AUTOMATION_REQUESTED,
-            payload={
-                "requested_at": requested_at,
-                "instruction": instruction,
-                "source": "blocker_escalation",
-                "source_task_id": blocked_task_id,
-                "trigger_task_id": blocked_task_id,
-                "to_status": blocked_status or effective_blocked_status,
-                "from_status": None,
-                "triggered_at": requested_at,
-            },
-            metadata={
-                "actor_id": str(lead_task.assignee_id or AGENT_SYSTEM_USER_ID),
-                "workspace_id": workspace_id,
-                "project_id": normalized_project_id,
-                "task_id": lead_task.id,
-            },
+        _emit_task_automation_requested_via_handler(
+            db=db,
+            actor_user_id=str(lead_task.assignee_id or AGENT_SYSTEM_USER_ID),
+            task_id=lead_task.id,
+            requested_at=requested_at,
+            instruction=instruction,
+            source="blocker_escalation",
+            source_task_id=blocked_task_id,
+            trigger_task_id=blocked_task_id,
+            to_status=blocked_status or effective_blocked_status,
+            triggered_at=requested_at,
         )
         append_event(
             db,
@@ -5599,30 +5716,17 @@ def _requeue_pending_status_change_request(
     trigger_from_status = str(state.get("last_requested_from_status") or run.trigger_from_status or "").strip() or None
     trigger_to_status = str(state.get("last_requested_to_status") or run.trigger_to_status or "").strip() or None
     triggered_at = str(state.get("last_requested_triggered_at") or run.triggered_at or "").strip() or requested_at_iso
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=run.task_id,
-        event_type=EVENT_AUTOMATION_REQUESTED,
-        payload={
-            "requested_at": requested_at_iso,
-            "instruction": instruction,
-            "source": "status_change",
-            "trigger_task_id": trigger_task_id,
-            "from_status": trigger_from_status,
-            "to_status": trigger_to_status,
-            "triggered_at": triggered_at,
-        },
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": project_id,
-            "task_id": run.task_id,
-            "trigger_task_id": trigger_task_id,
-            "trigger_from_status": trigger_from_status,
-            "trigger_to_status": trigger_to_status,
-            "triggered_at": triggered_at,
-        },
+    _emit_task_automation_requested_via_handler(
+        db=db,
+        actor_user_id=actor_user_id,
+        task_id=run.task_id,
+        requested_at=requested_at_iso,
+        instruction=instruction,
+        source="status_change",
+        trigger_task_id=trigger_task_id,
+        from_status=trigger_from_status,
+        to_status=trigger_to_status,
+        triggered_at=triggered_at,
     )
 
 
@@ -5691,26 +5795,16 @@ def _claim_queued_task(task_id: str, *, allow_fresh_kickoff: bool = False) -> Qu
         now_iso = to_iso_utc(datetime.now(timezone.utc))
         resumed_status: str | None = None
         try:
-            append_event(
-                db,
-                aggregate_type="Task",
-                aggregate_id=task_id,
-                event_type=EVENT_AUTOMATION_STARTED,
-                payload={
-                    "started_at": now_iso,
-                    "last_agent_progress": "Automation run started.",
-                    "last_agent_stream_status": "Automation run started.",
-                    "last_agent_stream_updated_at": now_iso,
-                    **_team_mode_progress_payload(phase=claim_phase),
-                },
-                metadata={
-                    "actor_id": actor_user_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": task_id,
-                },
+            _emit_task_automation_started_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=task_id,
+                started_at=now_iso,
+                stream_status="Automation run started.",
+                progress_text="Automation run started.",
+                additional_changes=_team_mode_progress_payload(phase=claim_phase),
                 expected_version=version,
-                )
+            )
             if is_scheduled_run and schedule_state in {"queued", "idle"}:
                 append_event(
                     db,
@@ -5855,7 +5949,6 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
     summary = str(outcome.summary or "").strip()
     comment = str(outcome.comment or "").strip() or None
     usage_metadata = build_automation_usage_metadata(outcome)
-    usage_payload = usage_metadata.get("last_agent_usage")
     completed_at = to_iso_utc(datetime.now(timezone.utc))
     now_utc = datetime.now(timezone.utc)
     queued_followup_developer_dispatches = 0
@@ -6190,30 +6283,14 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                     },
                 )
 
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=run.task_id,
-            event_type=EVENT_AUTOMATION_COMPLETED,
-            payload={
-                "completed_at": completed_at,
-                "summary": summary,
-                "source_event": EVENT_AUTOMATION_REQUESTED,
-                "comment": comment,
-                "usage": usage_payload if isinstance(usage_payload, dict) else None,
-                "prompt_mode": usage_metadata.get("last_agent_prompt_mode"),
-                "prompt_segment_chars": usage_metadata.get("last_agent_prompt_segment_chars"),
-                "codex_session_id": usage_metadata.get("last_agent_codex_session_id"),
-                "resume_attempted": usage_metadata.get("last_agent_codex_resume_attempted"),
-                "resume_succeeded": usage_metadata.get("last_agent_codex_resume_succeeded"),
-                "resume_fallback_used": usage_metadata.get("last_agent_codex_resume_fallback_used"),
-            },
-            metadata={
-                "actor_id": actor_user_id,
-                "workspace_id": workspace_id,
-                "project_id": project_id,
-                "task_id": run.task_id,
-            },
+        _emit_task_automation_completed_via_handler(
+            db=db,
+            actor_user_id=actor_user_id,
+            task_id=run.task_id,
+            completed_at=completed_at,
+            summary=summary,
+            comment=comment,
+            usage_metadata=usage_metadata,
         )
         append_event(
             db,
@@ -6281,23 +6358,14 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
         if should_auto_retry:
             retry_instruction = str(run.instruction or "").strip()
             if retry_instruction:
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=run.task_id,
-                    event_type=EVENT_AUTOMATION_REQUESTED,
-                    payload={
-                        "requested_at": completed_at,
-                        "instruction": retry_instruction,
-                        "source": "auto_retry",
-                    },
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": run.task_id,
-                        },
-                    )
+                _emit_task_automation_requested_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=run.task_id,
+                    requested_at=completed_at,
+                    instruction=retry_instruction,
+                    source="auto_retry",
+                )
         is_team_mode_kickoff_run = bool(
             team_mode_enabled
             and is_lead_role(assignee_role)
@@ -6493,23 +6561,14 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                     or str(state.get("scheduled_instruction") or "").strip()
                 )
                 if instruction:
-                    append_event(
-                        db,
-                        aggregate_type="Task",
-                        aggregate_id=run.task_id,
-                        event_type=EVENT_AUTOMATION_REQUESTED,
-                        payload={
-                            "requested_at": completed_at,
-                            "instruction": instruction,
-                            "source": "developer_handoff",
-                            "source_task_id": run.task_id,
-                        },
-                        metadata={
-                            "actor_id": actor_user_id,
-                            "workspace_id": workspace_id,
-                            "project_id": project_id,
-                            "task_id": run.task_id,
-                        },
+                    _emit_task_automation_requested_via_handler(
+                        db=db,
+                        actor_user_id=actor_user_id,
+                        task_id=run.task_id,
+                        requested_at=completed_at,
+                        instruction=instruction,
+                        source="developer_handoff",
+                        source_task_id=run.task_id,
                     )
                     state["last_requested_source"] = "developer_handoff"
                     state["last_requested_source_task_id"] = run.task_id
@@ -7073,6 +7132,7 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             )
         retry_count = _normalize_nonnegative_int(state.get("runner_recover_retry_count"))
         should_retry = transient_interruption or (recoverable_failure and retry_count < _MAX_RECOVERABLE_RETRIES)
+        retry_exhausted = bool(recoverable_failure and not transient_interruption and retry_count >= _MAX_RECOVERABLE_RETRIES)
         non_blocking_gate_failure = _is_non_blocking_team_mode_gate_error(error)
         if non_blocking_gate_failure:
             gate_key = _current_nonblocking_gate_key(
@@ -7083,18 +7143,12 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 task_status=str(state.get("status") or run.status or ""),
                 task_state=state,
             )
-            append_event(
-                db,
-                aggregate_type="Task",
-                aggregate_id=run.task_id,
-                event_type=EVENT_AUTOMATION_COMPLETED,
-                payload={"completed_at": failed_at, "summary": "Automation deferred by workflow gate."},
-                metadata={
-                    "actor_id": actor_user_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": run.task_id,
-                },
+            _emit_task_automation_completed_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=run.task_id,
+                completed_at=failed_at,
+                summary="Automation deferred by workflow gate.",
             )
             append_event(
                 db,
@@ -7130,6 +7184,7 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             and is_blocker_source_role(assignee_role)
             and str(state.get("status") or "").strip() != effective_blocked_status
             and not should_retry
+            and not retry_exhausted
             and not non_blocking_gate_failure
         ):
             transitioned = _append_task_status_transition_if_allowed(
@@ -7236,6 +7291,7 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 execution_triggers=state.get("execution_triggers"),
                 now_utc=now_utc,
             )
+        retry_requeued = False
         if should_retry:
             append_event(
                 db,
@@ -7256,29 +7312,46 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 or str(state.get("scheduled_instruction") or "").strip()
             )
             if retry_instruction:
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=run.task_id,
-                    event_type=EVENT_AUTOMATION_REQUESTED,
-                    payload={
-                        "requested_at": failed_at,
-                        "instruction": retry_instruction,
-                        "source": (
-                            "runner_recover_after_interrupt"
-                            if transient_interruption
-                            else "runner_recover_after_failure"
-                        ),
-                    },
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": run.task_id,
-                    },
+                _emit_task_automation_requested_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=run.task_id,
+                    requested_at=failed_at,
+                    instruction=retry_instruction,
+                    source=(
+                        "runner_recover_after_interrupt"
+                        if transient_interruption
+                        else "runner_recover_after_failure"
+                    ),
                 )
+                retry_requeued = True
+        if retry_exhausted:
+            append_event(
+                db,
+                aggregate_type="Task",
+                aggregate_id=run.task_id,
+                event_type=TASK_EVENT_UPDATED,
+                payload={
+                    "status": REQUIRED_SEMANTIC_STATUSES["awaiting_decision"],
+                    **_team_mode_progress_payload(
+                        phase="blocked",
+                        blocking_gate=failure_gate,
+                        blocked_reason=str(error),
+                        blocked_at=failed_at,
+                    ),
+                },
+                metadata={
+                    "actor_id": actor_user_id,
+                    "workspace_id": workspace_id,
+                    "project_id": project_id,
+                    "task_id": run.task_id,
+                },
+            )
+            state = dict(state)
+            state["status"] = REQUIRED_SEMANTIC_STATUSES["awaiting_decision"]
         if (
             not should_retry
+            and not retry_exhausted
             and not non_blocking_gate_failure
             and not developer_main_reconciliation_queued
             and not developer_handoff_recovery_queued
@@ -7348,32 +7421,31 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 or lead_human_escalation
             )
         )
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=run.task_id,
-            event_type=EVENT_AUTOMATION_COMPLETED if lead_workflow_resolved else EVENT_AUTOMATION_FAILED,
-            payload=(
-                {
-                    "completed_at": failed_at,
-                    "summary": (
-                        "Lead workflow triage queued."
-                        if lead_developer_triage_queued
-                        else "Lead escalated to human decision."
-                        if lead_human_escalation
-                        else "Automation deferred to workflow resolution."
-                    ),
-                }
-                if lead_workflow_resolved
-                else {"failed_at": failed_at, "error": str(error), "summary": "Automation runner failed."}
-            ),
-            metadata={
-                "actor_id": actor_user_id,
-                "workspace_id": workspace_id,
-                "project_id": project_id,
-                "task_id": run.task_id,
-            },
-        )
+        if retry_requeued:
+            pass
+        elif lead_workflow_resolved:
+            _emit_task_automation_completed_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=run.task_id,
+                completed_at=failed_at,
+                summary=(
+                    "Lead workflow triage queued."
+                    if lead_developer_triage_queued
+                    else "Lead escalated to human decision."
+                    if lead_human_escalation
+                    else "Automation deferred to workflow resolution."
+                ),
+            )
+        else:
+            _emit_task_automation_failed_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=run.task_id,
+                failed_at=failed_at,
+                error=str(error),
+                summary="Automation runner failed.",
+            )
         append_event(
             db,
             aggregate_type="Task",
@@ -7381,6 +7453,9 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             event_type=TASK_EVENT_UPDATED,
             payload={
                 "last_agent_stream_status": (
+                    "Automation retry queued after transient failure."
+                    if retry_requeued
+                    else
                     "Lead returned the task to Developer for remediation."
                     if lead_developer_triage_queued
                     else "Lead escalated the task for human decision."
@@ -7398,9 +7473,9 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                             status=str(state.get("status") or run.status or ""),
                         )
                     ),
-                    blocking_gate=None if lead_developer_triage_queued else failure_gate,
-                    blocked_reason=None if lead_developer_triage_queued else str(error),
-                    blocked_at=None if lead_developer_triage_queued else failed_at,
+                    blocking_gate=None if (lead_developer_triage_queued or retry_requeued) else failure_gate,
+                    blocked_reason=None if (lead_developer_triage_queued or retry_requeued) else str(error),
+                    blocked_at=None if (lead_developer_triage_queued or retry_requeued) else failed_at,
                 ),
             },
             metadata={
@@ -7948,28 +8023,16 @@ def queue_satisfied_external_status_triggers_once(limit: int = 20) -> int:
                     continue
 
                 actor_user_id = _resolve_task_actor_user_id(db=db, task_id=task_id, state=state)
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=task_id,
-                    event_type=EVENT_AUTOMATION_REQUESTED,
-                    payload={
-                        "requested_at": now_iso,
-                        "instruction": instruction,
-                        "source": "trigger_reconcile",
-                        "trigger_task_id": trigger_task_id,
-                        "from_status": None,
-                        "to_status": trigger_to_status,
-                        "triggered_at": str(trigger_source.get("updated_at") or now_iso),
-                    },
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": task_id,
-                        "trigger_task_id": trigger_task_id,
-                        "trigger_to_status": trigger_to_status,
-                    },
+                _emit_task_automation_requested_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=task_id,
+                    requested_at=now_iso,
+                    instruction=instruction,
+                    source="trigger_reconcile",
+                    trigger_task_id=trigger_task_id,
+                    to_status=trigger_to_status,
+                    triggered_at=str(trigger_source.get("updated_at") or now_iso),
                 )
                 db.commit()
                 queued += 1
@@ -8354,13 +8417,13 @@ def recover_stale_running_automation_once(limit: int = 20, stale_after_seconds_o
             actor_user_id = _resolve_task_actor_user_id(db=db, task_id=task_id, state=state)
             failed_at = to_iso_utc(now)
             error = f"Automation run exceeded stale threshold ({int(stale_after_seconds)}s) and was recovered."
-            append_event(
-                db,
-                aggregate_type="Task",
-                aggregate_id=task_id,
-                event_type=EVENT_AUTOMATION_FAILED,
-                payload={"failed_at": failed_at, "error": error, "summary": "Automation runner recovered stale running task."},
-                metadata={"actor_id": actor_user_id, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
+            _emit_task_automation_failed_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=task_id,
+                failed_at=failed_at,
+                error=error,
+                summary="Automation runner recovered stale running task.",
             )
             request_source = str(state.get("last_requested_source") or "").strip().lower()
             schedule_state = str(state.get("schedule_state") or "").strip().lower()
@@ -8466,18 +8529,13 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
                     "task_id": task.id,
                 },
             )
-            append_event(
-                db,
-                aggregate_type="Task",
-                aggregate_id=task.id,
-                event_type=EVENT_AUTOMATION_REQUESTED,
-                payload={"requested_at": now_iso, "instruction": instruction, "source": "schedule"},
-                metadata={
-                    "actor_id": actor_user_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": task.id,
-                },
+            _emit_task_automation_requested_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=task.id,
+                requested_at=now_iso,
+                instruction=instruction,
+                source="schedule",
             )
             db.commit()
             queued += 1

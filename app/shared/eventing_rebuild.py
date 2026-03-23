@@ -1010,6 +1010,134 @@ def apply_chat_session_event(state: dict[str, Any], event: EventEnvelope) -> dic
     return s
 
 
+def apply_notification_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, Any]:
+    s = dict(state)
+    p = event.payload
+    m = event.metadata
+
+    if event.event_type == NOTIFICATION_EVENT_CREATED:
+        s = {
+            "id": event.aggregate_id,
+            "user_id": p.get("user_id"),
+            "workspace_id": p.get("workspace_id") or m.get("workspace_id"),
+            "project_id": p.get("project_id") or m.get("project_id"),
+            "task_id": p.get("task_id") or m.get("task_id"),
+            "note_id": p.get("note_id") or m.get("note_id"),
+            "specification_id": p.get("specification_id") or m.get("specification_id"),
+            "message": str(p.get("message") or ""),
+            "notification_type": normalize_notification_type(p.get("notification_type") or DEFAULT_NOTIFICATION_TYPE),
+            "severity": normalize_severity(p.get("severity") or DEFAULT_NOTIFICATION_SEVERITY),
+            "dedupe_key": normalize_dedupe_key(p.get("dedupe_key")),
+            "payload_json": p.get("payload_json"),
+            "source_event": str(p.get("source_event") or "").strip() or None,
+            "is_read": False,
+        }
+        return s
+
+    if event.event_type == NOTIFICATION_EVENT_MARKED_READ:
+        if p.get("notification_id") == event.aggregate_id:
+            s["is_read"] = True
+        return s
+
+    if event.event_type == NOTIFICATION_EVENT_MARKED_UNREAD:
+        if p.get("notification_id") == event.aggregate_id:
+            s["is_read"] = False
+        return s
+
+    return s
+
+
+def apply_saved_view_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, Any]:
+    s = dict(state)
+    p = event.payload
+
+    if event.event_type == SAVED_VIEW_EVENT_CREATED:
+        s = {
+            "id": event.aggregate_id,
+            "workspace_id": p.get("workspace_id"),
+            "project_id": p.get("project_id"),
+            "user_id": p.get("user_id"),
+            "name": str(p.get("name") or ""),
+            "shared": bool(p.get("shared", False)),
+            "filters": p.get("filters") if isinstance(p.get("filters"), dict) else {},
+        }
+        return s
+
+    return s
+
+
+def apply_user_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, Any]:
+    s = dict(state)
+    p = event.payload
+
+    if event.event_type == USER_EVENT_CREATED:
+        workspace_roles: dict[str, str] = {}
+        workspace_id = str(p.get("workspace_id") or "").strip()
+        workspace_role = str(p.get("workspace_role") or "").strip()
+        if workspace_id and workspace_role:
+            workspace_roles[workspace_id] = workspace_role
+        s = {
+            "id": event.aggregate_id,
+            "username": str(p.get("username") or ""),
+            "full_name": str(p.get("full_name") or ""),
+            "user_type": str(p.get("user_type") or "human"),
+            "password_hash": p.get("password_hash"),
+            "must_change_password": bool(p.get("must_change_password", True)),
+            "password_changed_at": p.get("password_changed_at"),
+            "is_active": bool(p.get("is_active", True)),
+            "theme": str(p.get("theme") or "light"),
+            "timezone": str(p.get("timezone") or "UTC"),
+            "notifications_enabled": bool(p.get("notifications_enabled", True)),
+            "agent_chat_model": str(p.get("agent_chat_model") or ""),
+            "agent_chat_reasoning_effort": str(p.get("agent_chat_reasoning_effort") or "medium"),
+            "onboarding_quick_tour_completed": bool(p.get("onboarding_quick_tour_completed", False)),
+            "onboarding_advanced_tour_completed": bool(p.get("onboarding_advanced_tour_completed", False)),
+            "workspace_roles": workspace_roles,
+        }
+        return s
+
+    if event.event_type == USER_EVENT_PREFERENCES_UPDATED:
+        if "theme" in p and p.get("theme") is not None:
+            s["theme"] = str(p.get("theme") or s.get("theme") or "light")
+        if "timezone" in p and p.get("timezone") is not None:
+            s["timezone"] = str(p.get("timezone") or s.get("timezone") or "UTC")
+        if "notifications_enabled" in p and p.get("notifications_enabled") is not None:
+            s["notifications_enabled"] = bool(p.get("notifications_enabled"))
+        if "agent_chat_model" in p and p.get("agent_chat_model") is not None:
+            s["agent_chat_model"] = str(p.get("agent_chat_model") or "")
+        if "agent_chat_reasoning_effort" in p and p.get("agent_chat_reasoning_effort") is not None:
+            s["agent_chat_reasoning_effort"] = str(p.get("agent_chat_reasoning_effort") or "medium")
+        if "onboarding_quick_tour_completed" in p and p.get("onboarding_quick_tour_completed") is not None:
+            s["onboarding_quick_tour_completed"] = bool(p.get("onboarding_quick_tour_completed"))
+        if "onboarding_advanced_tour_completed" in p and p.get("onboarding_advanced_tour_completed") is not None:
+            s["onboarding_advanced_tour_completed"] = bool(p.get("onboarding_advanced_tour_completed"))
+        return s
+
+    if event.event_type in {USER_EVENT_PASSWORD_CHANGED, USER_EVENT_PASSWORD_RESET}:
+        if "password_hash" in p:
+            s["password_hash"] = p.get("password_hash")
+        if "must_change_password" in p:
+            s["must_change_password"] = bool(p.get("must_change_password"))
+        if "password_changed_at" in p:
+            s["password_changed_at"] = p.get("password_changed_at")
+        return s
+
+    if event.event_type == USER_EVENT_WORKSPACE_ROLE_SET:
+        workspace_id = str(p.get("workspace_id") or "").strip()
+        role = str(p.get("role") or "").strip()
+        if workspace_id and role:
+            roles = dict(s.get("workspace_roles") or {})
+            roles[workspace_id] = role
+            s["workspace_roles"] = roles
+        return s
+
+    if event.event_type == USER_EVENT_DEACTIVATED:
+        s["is_active"] = False
+        return s
+
+    return s
+
+
 def rebuild_state(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[dict[str, Any], int]:
     state, version = load_snapshot(db, aggregate_type, aggregate_id)
     for ev in load_events_after(db, aggregate_type, aggregate_id, version):
@@ -1029,6 +1157,12 @@ def rebuild_state(db: Session, aggregate_type: str, aggregate_id: str) -> tuple[
             state = apply_specification_event(state, ev)
         elif aggregate_type == "ChatSession":
             state = apply_chat_session_event(state, ev)
+        elif aggregate_type == "Notification":
+            state = apply_notification_event(state, ev)
+        elif aggregate_type == "SavedView":
+            state = apply_saved_view_event(state, ev)
+        elif aggregate_type == "User":
+            state = apply_user_event(state, ev)
         version = ev.version
     return state, version
 

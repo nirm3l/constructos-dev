@@ -48,10 +48,6 @@ from shared.in_memory_stream_broker import InMemoryStreamBroker
 from shared.models import CommandExecution, SessionLocal
 from .application import TaskApplicationService
 from .domain import (
-    EVENT_AUTOMATION_COMPLETED,
-    EVENT_AUTOMATION_FAILED,
-    EVENT_AUTOMATION_REQUESTED,
-    EVENT_AUTOMATION_STARTED,
     EVENT_UPDATED as TASK_EVENT_UPDATED,
 )
 from .read_models import TaskListQuery, list_tasks_read_model
@@ -524,48 +520,27 @@ def run_automation_stream(
 
     now_iso = to_iso_utc(datetime.now(timezone.utc))
     with SessionLocal() as db:
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=task_id,
-            event_type=EVENT_AUTOMATION_REQUESTED,
-            payload={
-                "requested_at": now_iso,
-                "instruction": instruction,
-                "source": "manual_stream",
-                "execution_intent": bool(classification.get("execution_intent")),
-                "execution_kickoff_intent": bool(classification.get("execution_kickoff_intent")),
-                "project_creation_intent": bool(classification.get("project_creation_intent")),
-                "workflow_scope": str(classification.get("workflow_scope") or "").strip() or None,
-                "execution_mode": str(classification.get("execution_mode") or "").strip() or None,
-                "task_completion_requested": bool(classification.get("task_completion_requested")),
-                "classifier_reason": str(classification.get("reason") or "").strip() or None,
-            },
-            metadata={
-                "actor_id": user.id,
-                "workspace_id": workspace_id,
-                "project_id": project_id,
-                "task_id": task_id,
-            },
+        app_service = TaskApplicationService(db, user)
+        app_service.request_automation_run(
+            task_id,
+            TaskAutomationRun(
+                instruction=instruction,
+                source="manual_stream",
+                execution_intent=bool(classification.get("execution_intent")),
+                execution_kickoff_intent=bool(classification.get("execution_kickoff_intent")),
+                project_creation_intent=bool(classification.get("project_creation_intent")),
+                workflow_scope=str(classification.get("workflow_scope") or "").strip() or None,
+                execution_mode=str(classification.get("execution_mode") or "").strip() or None,
+                task_completion_requested=bool(classification.get("task_completion_requested")),
+                classifier_reason=str(classification.get("reason") or "").strip() or None,
+            ),
+            wake_runner=False,
         )
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=task_id,
-            event_type=EVENT_AUTOMATION_STARTED,
-            payload={
-                "started_at": now_iso,
-                "last_agent_progress": "",
-                "last_agent_stream_status": "Automation run started.",
-                "last_agent_stream_updated_at": now_iso,
-                "last_agent_run_id": run_id,
-            },
-            metadata={
-                "actor_id": user.id,
-                "workspace_id": workspace_id,
-                "project_id": project_id,
-                "task_id": task_id,
-            },
+        app_service.mark_automation_started(
+            task_id,
+            started_at=now_iso,
+            run_id=run_id,
+            stream_status="Automation run started.",
         )
         db.commit()
         _publish_stream_event(task_id, {"type": "status", "message": "Automation run started."})
@@ -720,35 +695,13 @@ def run_automation_stream(
                     failed_at = to_iso_utc(datetime.now(timezone.utc))
                     error_text = str(error_holder["value"])
                     with SessionLocal() as local_db:
-                        append_event(
-                            local_db,
-                            aggregate_type="Task",
-                            aggregate_id=task_id,
-                            event_type=EVENT_AUTOMATION_FAILED,
-                            payload={"failed_at": failed_at, "error": error_text, "summary": "Automation runner failed."},
-                            metadata={
-                                "actor_id": user.id,
-                                "workspace_id": workspace_id,
-                                "project_id": project_id,
-                                "task_id": task_id,
-                            },
-                        )
-                        append_event(
-                            local_db,
-                            aggregate_type="Task",
-                            aggregate_id=task_id,
-                            event_type=TASK_EVENT_UPDATED,
-                            payload={
-                                "last_agent_stream_status": "Automation run failed.",
-                                "last_agent_stream_updated_at": failed_at,
-                                "last_agent_run_id": run_id,
-                            },
-                            metadata={
-                                "actor_id": user.id,
-                                "workspace_id": workspace_id,
-                                "project_id": project_id,
-                                "task_id": task_id,
-                            },
+                        app_service = TaskApplicationService(local_db, user)
+                        app_service.mark_automation_failed(
+                            task_id,
+                            failed_at=failed_at,
+                            error=error_text,
+                            summary="Automation runner failed.",
+                            run_id=run_id,
                         )
                         local_db.commit()
                         if normalized_command_id:
@@ -796,51 +749,15 @@ def run_automation_stream(
                 completed_at = to_iso_utc(datetime.now(timezone.utc))
                 outcome_comment = str(outcome.comment or "").strip()
                 usage_metadata = build_automation_usage_metadata(outcome)
-                usage_payload = usage_metadata.get("last_agent_usage")
                 with SessionLocal() as local_db:
-                    append_event(
-                        local_db,
-                        aggregate_type="Task",
-                        aggregate_id=task_id,
-                        event_type=EVENT_AUTOMATION_COMPLETED,
-                        payload={
-                            "completed_at": completed_at,
-                            "summary": str(outcome.summary or "Automation run finished."),
-                            "comment": outcome_comment,
-                            "usage": usage_payload if isinstance(usage_payload, dict) else None,
-                            "prompt_mode": usage_metadata.get("last_agent_prompt_mode"),
-                            "prompt_segment_chars": usage_metadata.get("last_agent_prompt_segment_chars"),
-                            "codex_session_id": usage_metadata.get("last_agent_codex_session_id"),
-                            "resume_attempted": usage_metadata.get("last_agent_codex_resume_attempted"),
-                            "resume_succeeded": usage_metadata.get("last_agent_codex_resume_succeeded"),
-                            "resume_fallback_used": usage_metadata.get("last_agent_codex_resume_fallback_used"),
-                        },
-                        metadata={
-                            "actor_id": user.id,
-                            "workspace_id": workspace_id,
-                            "project_id": project_id,
-                            "task_id": task_id,
-                        },
-                    )
-                    append_event(
-                        local_db,
-                        aggregate_type="Task",
-                        aggregate_id=task_id,
-                        event_type=TASK_EVENT_UPDATED,
-                        payload={
-                            "last_agent_stream_status": "Automation run completed.",
-                            "last_agent_stream_updated_at": completed_at,
-                            "last_agent_progress": outcome_comment or str(outcome.summary or ""),
-                            "last_agent_comment": outcome_comment or None,
-                            "last_agent_run_id": run_id,
-                            **usage_metadata,
-                        },
-                        metadata={
-                            "actor_id": user.id,
-                            "workspace_id": workspace_id,
-                            "project_id": project_id,
-                            "task_id": task_id,
-                        },
+                    app_service = TaskApplicationService(local_db, user)
+                    app_service.mark_automation_completed(
+                        task_id,
+                        completed_at=completed_at,
+                        summary=str(outcome.summary or "Automation run finished."),
+                        comment=outcome_comment,
+                        usage_metadata=usage_metadata,
+                        run_id=run_id,
                     )
                     local_db.commit()
                     if normalized_command_id:

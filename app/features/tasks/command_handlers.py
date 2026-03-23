@@ -1729,6 +1729,22 @@ def require_task_command_state(db: Session, user: User, task_id: str, *, allowed
     return state.workspace_id, state.project_id, state.status, state.archived
 
 
+def _resolve_task_scope_for_internal_or_user_actor(ctx: "CommandContext", task_id: str) -> tuple[str, str | None, str, bool]:
+    actor_id = str(getattr(ctx.user, "id", "") or "").strip()
+    actor_type = str(getattr(ctx.user, "user_type", "") or "").strip().lower()
+    if actor_id in {AGENT_SYSTEM_USER_ID, CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID} or actor_type == "agent":
+        state = load_task_command_state(ctx.db, task_id)
+        if not state or state.is_deleted:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return state.workspace_id, state.project_id, state.status, state.archived
+    return require_task_command_state(
+        ctx.db,
+        ctx.user,
+        task_id,
+        allowed={"Owner", "Admin", "Member", "Guest"},
+    )
+
+
 def _load_task_aggregate(repo: AggregateEventRepository, task_id: str) -> TaskAggregate:
     return repo.load_with_class(
         aggregate_type="Task",
@@ -3325,3 +3341,232 @@ class RequestAutomationRunHandler:
                 # Runner wake-up/start is best-effort; polling loop remains fallback.
                 pass
         return {"ok": True, "task_id": self.task_id, "automation_state": "queued", "requested_at": requested_at}
+
+
+@dataclass(frozen=True, slots=True)
+class RequestAutomationRunInternalHandler:
+    ctx: CommandContext
+    task_id: str
+    requested_at: str
+    instruction: str
+    source: str | None = None
+    source_task_id: str | None = None
+    chat_session_id: str | None = None
+    reason: str | None = None
+    trigger_link: str | None = None
+    correlation_id: str | None = None
+    trigger_task_id: str | None = None
+    from_status: str | None = None
+    to_status: str | None = None
+    triggered_at: str | None = None
+    lead_handoff_token: str | None = None
+    lead_handoff_at: str | None = None
+    lead_handoff_refs: list[dict[str, Any]] | None = None
+    lead_handoff_deploy_execution: dict[str, Any] | None = None
+    execution_intent: bool | None = None
+    execution_kickoff_intent: bool | None = None
+    project_creation_intent: bool | None = None
+    workflow_scope: str | None = None
+    execution_mode: str | None = None
+    task_completion_requested: bool | None = None
+    classifier_reason: str | None = None
+    commit: bool = True
+
+    def __call__(self) -> dict:
+        workspace_id, project_id, _, _ = _resolve_task_scope_for_internal_or_user_actor(self.ctx, self.task_id)
+        requested_at = str(self.requested_at or "").strip() or to_iso_utc(datetime.now(timezone.utc))
+        effective_instruction = str(self.instruction or "").strip()
+        if not effective_instruction:
+            raise HTTPException(status_code=422, detail="instruction is required")
+        requested_source = str(self.source or "").strip().lower() or "manual"
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.request_automation(
+            requested_at=requested_at,
+            instruction=effective_instruction,
+            source=requested_source,
+            source_task_id=str(self.source_task_id or "").strip() or None,
+            chat_session_id=str(self.chat_session_id or "").strip() or None,
+            reason=str(self.reason or "").strip() or None,
+            trigger_link=str(self.trigger_link or "").strip() or None,
+            correlation_id=str(self.correlation_id or "").strip() or None,
+            trigger_task_id=str(self.trigger_task_id or "").strip() or None,
+            from_status=str(self.from_status or "").strip() or None,
+            to_status=str(self.to_status or "").strip() or None,
+            triggered_at=str(self.triggered_at or "").strip() or None,
+            lead_handoff_token=str(self.lead_handoff_token or "").strip() or None,
+            lead_handoff_at=str(self.lead_handoff_at or "").strip() or None,
+            lead_handoff_refs=(
+                [dict(item) for item in self.lead_handoff_refs if isinstance(item, dict)]
+                if isinstance(self.lead_handoff_refs, list)
+                else None
+            ),
+            lead_handoff_deploy_execution=(
+                dict(self.lead_handoff_deploy_execution)
+                if isinstance(self.lead_handoff_deploy_execution, dict)
+                else None
+            ),
+            execution_intent=self.execution_intent,
+            execution_kickoff_intent=self.execution_kickoff_intent,
+            project_creation_intent=self.project_creation_intent,
+            workflow_scope=str(self.workflow_scope or "").strip() or None,
+            execution_mode=str(self.execution_mode or "").strip() or None,
+            task_completion_requested=self.task_completion_requested,
+            classifier_reason=str(self.classifier_reason or "").strip() or None,
+        )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
+        )
+        if self.commit:
+            self.ctx.db.commit()
+        return {"ok": True, "task_id": self.task_id, "automation_state": "queued", "requested_at": requested_at}
+
+
+@dataclass(frozen=True, slots=True)
+class MarkAutomationStartedHandler:
+    ctx: CommandContext
+    task_id: str
+    started_at: str
+    run_id: str | None = None
+    stream_status: str | None = None
+    progress_text: str | None = None
+    additional_changes: dict[str, Any] | None = None
+    expected_version: int | None = None
+    commit: bool = True
+
+    def __call__(self) -> dict:
+        workspace_id, project_id, _, _ = _resolve_task_scope_for_internal_or_user_actor(self.ctx, self.task_id)
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.mark_automation_started(started_at=str(self.started_at or ""))
+        patch_payload: dict[str, Any] = {
+            "last_agent_progress": str(self.progress_text or "").strip(),
+            "last_agent_stream_status": str(self.stream_status or "Automation run started.").strip(),
+            "last_agent_stream_updated_at": str(self.started_at or ""),
+            "last_agent_run_id": str(self.run_id or "").strip() or None,
+        }
+        if isinstance(self.additional_changes, dict):
+            patch_payload.update(dict(self.additional_changes))
+        aggregate.update(
+            changes=patch_payload
+        )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
+            expected_version=self.expected_version,
+        )
+        if self.commit:
+            self.ctx.db.commit()
+        return {"ok": True, "task_id": self.task_id, "automation_state": "running"}
+
+
+@dataclass(frozen=True, slots=True)
+class MarkAutomationFailedHandler:
+    ctx: CommandContext
+    task_id: str
+    failed_at: str
+    error: str
+    summary: str | None = None
+    run_id: str | None = None
+    commit: bool = True
+
+    def __call__(self) -> dict:
+        workspace_id, project_id, _, _ = _resolve_task_scope_for_internal_or_user_actor(self.ctx, self.task_id)
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.mark_automation_failed(
+            failed_at=str(self.failed_at or ""),
+            error=str(self.error or ""),
+            summary=str(self.summary or "Automation runner failed.").strip(),
+        )
+        aggregate.update(
+            changes={
+                "summary": str(self.summary or "Automation runner failed.").strip(),
+                "last_agent_stream_status": "Automation run failed.",
+                "last_agent_stream_updated_at": str(self.failed_at or ""),
+                "last_agent_run_id": str(self.run_id or "").strip() or None,
+            }
+        )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
+        )
+        if self.commit:
+            self.ctx.db.commit()
+        return {"ok": True, "task_id": self.task_id, "automation_state": "failed"}
+
+
+@dataclass(frozen=True, slots=True)
+class MarkAutomationCompletedHandler:
+    ctx: CommandContext
+    task_id: str
+    completed_at: str
+    summary: str | None = None
+    comment: str | None = None
+    usage_metadata: dict[str, Any] | None = None
+    run_id: str | None = None
+    commit: bool = True
+
+    def __call__(self) -> dict:
+        workspace_id, project_id, _, _ = _resolve_task_scope_for_internal_or_user_actor(self.ctx, self.task_id)
+        summary_text = str(self.summary or "Automation run finished.").strip()
+        comment_text = str(self.comment or "").strip()
+        metadata = dict(self.usage_metadata or {})
+        usage_payload = metadata.get("last_agent_usage")
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.mark_automation_completed(
+            completed_at=str(self.completed_at or ""),
+            summary=summary_text,
+            comment=comment_text,
+            usage=usage_payload if isinstance(usage_payload, dict) else None,
+            prompt_mode=metadata.get("last_agent_prompt_mode"),
+            prompt_segment_chars=metadata.get("last_agent_prompt_segment_chars"),
+            codex_session_id=metadata.get("last_agent_codex_session_id"),
+            resume_attempted=metadata.get("last_agent_codex_resume_attempted"),
+            resume_succeeded=metadata.get("last_agent_codex_resume_succeeded"),
+            resume_fallback_used=metadata.get("last_agent_codex_resume_fallback_used"),
+        )
+        aggregate.update(
+            changes={
+                "summary": summary_text,
+                "comment": comment_text,
+                "usage": usage_payload if isinstance(usage_payload, dict) else None,
+                "prompt_mode": metadata.get("last_agent_prompt_mode"),
+                "prompt_segment_chars": metadata.get("last_agent_prompt_segment_chars"),
+                "codex_session_id": metadata.get("last_agent_codex_session_id"),
+                "resume_attempted": metadata.get("last_agent_codex_resume_attempted"),
+                "resume_succeeded": metadata.get("last_agent_codex_resume_succeeded"),
+                "resume_fallback_used": metadata.get("last_agent_codex_resume_fallback_used"),
+                "last_agent_stream_status": "Automation run completed.",
+                "last_agent_stream_updated_at": str(self.completed_at or ""),
+                "last_agent_progress": comment_text or summary_text,
+                "last_agent_comment": comment_text or None,
+                "last_agent_run_id": str(self.run_id or "").strip() or None,
+                **metadata,
+            }
+        )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
+        )
+        if self.commit:
+            self.ctx.db.commit()
+        return {"ok": True, "task_id": self.task_id, "automation_state": "completed"}

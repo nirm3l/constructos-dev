@@ -152,10 +152,17 @@ class TaskAggregate(Aggregate):
         source: str | None = None,
         source_task_id: str | None = None,
         chat_session_id: str | None = None,
+        reason: str | None = None,
+        trigger_link: str | None = None,
+        correlation_id: str | None = None,
         trigger_task_id: str | None = None,
         from_status: str | None = None,
         to_status: str | None = None,
         triggered_at: str | None = None,
+        lead_handoff_token: str | None = None,
+        lead_handoff_at: str | None = None,
+        lead_handoff_refs: list[dict[str, Any]] | None = None,
+        lead_handoff_deploy_execution: dict[str, Any] | None = None,
         execution_intent: bool | None = None,
         execution_kickoff_intent: bool | None = None,
         project_creation_intent: bool | None = None,
@@ -170,10 +177,21 @@ class TaskAggregate(Aggregate):
         self.last_requested_source = source
         self.last_requested_source_task_id = source_task_id
         self.last_requested_chat_session_id = chat_session_id
+        self.last_requested_reason = reason
+        self.last_requested_trigger_link = trigger_link
+        self.last_requested_correlation_id = correlation_id
         self.last_requested_trigger_task_id = trigger_task_id
         self.last_requested_from_status = from_status
         self.last_requested_to_status = to_status
         self.last_requested_triggered_at = triggered_at
+        if lead_handoff_token is not None:
+            self.last_lead_handoff_token = lead_handoff_token
+        if lead_handoff_at is not None:
+            self.last_lead_handoff_at = lead_handoff_at
+        if lead_handoff_refs is not None:
+            self.last_lead_handoff_refs_json = lead_handoff_refs
+        if lead_handoff_deploy_execution is not None:
+            self.last_lead_handoff_deploy_execution = lead_handoff_deploy_execution
         self.last_requested_execution_intent = execution_intent
         self.last_requested_execution_kickoff_intent = execution_kickoff_intent
         self.last_requested_project_creation_intent = project_creation_intent
@@ -188,16 +206,48 @@ class TaskAggregate(Aggregate):
         self.automation_started_at = started_at
 
     @event("AutomationCompleted")
-    def mark_automation_completed(self, completed_at: str) -> None:
+    def mark_automation_completed(
+        self,
+        completed_at: str,
+        summary: str | None = None,
+        comment: str | None = None,
+        usage: dict[str, Any] | None = None,
+        prompt_mode: str | None = None,
+        prompt_segment_chars: dict[str, Any] | None = None,
+        codex_session_id: str | None = None,
+        resume_attempted: bool | None = None,
+        resume_succeeded: bool | None = None,
+        resume_fallback_used: bool | None = None,
+    ) -> None:
         self.automation_state = "completed"
         self.automation_completed_at = completed_at
         self.last_automation_error = None
+        if summary is not None:
+            self.last_agent_comment = summary
+        if comment is not None:
+            self.last_agent_comment = comment
+        if usage is not None:
+            self.last_agent_usage = usage
+        if prompt_mode is not None:
+            self.last_agent_prompt_mode = prompt_mode
+        if prompt_segment_chars is not None:
+            self.last_agent_prompt_segment_chars = prompt_segment_chars
+        if codex_session_id is not None:
+            self.last_agent_codex_session_id = codex_session_id
+        if resume_attempted is not None:
+            self.last_agent_codex_resume_attempted = bool(resume_attempted)
+        if resume_succeeded is not None:
+            self.last_agent_codex_resume_succeeded = bool(resume_succeeded)
+        if resume_fallback_used is not None:
+            self.last_agent_codex_resume_fallback_used = bool(resume_fallback_used)
 
     @event("AutomationFailed")
-    def mark_automation_failed(self, failed_at: str, error: str) -> None:
+    def mark_automation_failed(self, failed_at: str, error: str, summary: str | None = None) -> None:
         self.automation_state = "failed"
         self.automation_failed_at = failed_at
         self.last_automation_error = error
+        if summary is not None:
+            self.last_agent_comment = summary
 
     @event("ScheduleConfigured")
     def configure_schedule(

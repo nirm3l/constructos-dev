@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 
 from features.attachments.api import AttachmentDeletePayload, delete_attachment, download_attachment, upload_attachment
 from features.agents.gateway import build_ui_gateway
-from features.tasks.domain import EVENT_AUTOMATION_COMPLETED, EVENT_AUTOMATION_REQUESTED, EVENT_UPDATED as TASK_EVENT_UPDATED
+from features.tasks.command_handlers import CommandContext as TaskCommandContext, RequestAutomationRunInternalHandler
+from features.tasks.domain import EVENT_UPDATED as TASK_EVENT_UPDATED
 from features.tasks.api import list_comments as list_task_comments
 from features.tasks.application import TaskApplicationService
 from shared.core import CommentCreate, TaskCreate, User, append_event, ensure_role, load_note_view, load_specification_view, load_task_view
@@ -388,6 +389,7 @@ def _seed_doctor_delivery_fixture(
     user: User,
     command_id: str | None = None,
 ) -> dict[str, Any]:
+    task_service = TaskApplicationService(db, user, command_id=command_id)
     existing_project_refs: list[dict[str, str]] = []
     raw_project_refs = str(getattr(project, "external_refs", "") or "").strip()
     if raw_project_refs:
@@ -455,13 +457,10 @@ def _seed_doctor_delivery_fixture(
             },
             metadata=_task_event_metadata(user=user, workspace_id=workspace_id, project_id=project.id, task_id=task_id),
         )
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=task_id,
-            event_type=EVENT_AUTOMATION_COMPLETED,
-            payload={"completed_at": timestamp},
-            metadata=_task_event_metadata(user=user, workspace_id=workspace_id, project_id=project.id, task_id=task_id),
+        task_service.mark_automation_completed(
+            task_id,
+            completed_at=timestamp,
+            summary="Doctor fixture automation completed.",
         )
 
     lead_task = task_by_code["lead-a"]
@@ -486,13 +485,10 @@ def _seed_doctor_delivery_fixture(
         },
         metadata=_task_event_metadata(user=user, workspace_id=workspace_id, project_id=project.id, task_id=lead_task_id),
     )
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=lead_task_id,
-        event_type=EVENT_AUTOMATION_COMPLETED,
-        payload={"completed_at": timestamp},
-        metadata=_task_event_metadata(user=user, workspace_id=workspace_id, project_id=project.id, task_id=lead_task_id),
+    task_service.mark_automation_completed(
+        lead_task_id,
+        completed_at=timestamp,
+        summary="Doctor fixture automation completed.",
     )
 
     qa_task = task_by_code["qa-a"]
@@ -513,55 +509,35 @@ def _seed_doctor_delivery_fixture(
         payload={
             "status": "Completed",
             "external_refs": qa_refs,
-            "last_requested_source": "lead_handoff",
-            "last_requested_source_task_id": lead_task_id,
-            "last_requested_reason": "lead_handoff",
-            "last_requested_workflow_scope": "team_mode",
-            "last_requested_correlation_id": qa_handoff_token,
-            "last_requested_trigger_task_id": lead_task_id,
-            "last_requested_from_status": "Completed",
-            "last_requested_to_status": "Completed",
-            "last_requested_triggered_at": timestamp,
-            "last_lead_handoff_token": qa_handoff_token,
-            "last_lead_handoff_at": timestamp,
-            "last_lead_handoff_refs_json": lead_refs,
-            "last_lead_handoff_deploy_execution": deploy_snapshot,
             "team_mode_phase": "qa_validation",
         },
         metadata=_task_event_metadata(user=user, workspace_id=workspace_id, project_id=project.id, task_id=qa_task_id),
     )
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=qa_task_id,
-        event_type=EVENT_AUTOMATION_REQUESTED,
-        payload={
-            "requested_at": timestamp,
-            "instruction": "Validate the Doctor fixture deployment evidence.",
-            "source": "lead_handoff",
-            "source_task_id": lead_task_id,
-            "reason": "lead_handoff",
-            "workflow_scope": "team_mode",
-            "trigger_link": f"{lead_task_id}->{qa_task_id}:QA",
-            "correlation_id": qa_handoff_token,
-            "trigger_task_id": lead_task_id,
-            "from_status": "Completed",
-            "to_status": "Completed",
-            "triggered_at": timestamp,
-            "lead_handoff_token": qa_handoff_token,
-            "lead_handoff_at": timestamp,
-            "lead_handoff_refs": lead_refs,
-            "lead_handoff_deploy_execution": deploy_snapshot,
-        },
-        metadata=_task_event_metadata(user=user, workspace_id=workspace_id, project_id=project.id, task_id=qa_task_id),
-    )
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=qa_task_id,
-        event_type=EVENT_AUTOMATION_COMPLETED,
-        payload={"completed_at": timestamp},
-        metadata=_task_event_metadata(user=user, workspace_id=workspace_id, project_id=project.id, task_id=qa_task_id),
+    RequestAutomationRunInternalHandler(
+        TaskCommandContext(db=db, user=user),
+        task_id=qa_task_id,
+        requested_at=timestamp,
+        instruction="Validate the Doctor fixture deployment evidence.",
+        source="lead_handoff",
+        source_task_id=lead_task_id,
+        reason="lead_handoff",
+        workflow_scope="team_mode",
+        trigger_link=f"{lead_task_id}->{qa_task_id}:QA",
+        correlation_id=qa_handoff_token,
+        trigger_task_id=lead_task_id,
+        from_status="Completed",
+        to_status="Completed",
+        triggered_at=timestamp,
+        lead_handoff_token=qa_handoff_token,
+        lead_handoff_at=timestamp,
+        lead_handoff_refs=lead_refs,
+        lead_handoff_deploy_execution=deploy_snapshot,
+        commit=False,
+    )()
+    task_service.mark_automation_completed(
+        qa_task_id,
+        completed_at=timestamp,
+        summary="Doctor fixture automation completed.",
     )
 
     db.commit()
