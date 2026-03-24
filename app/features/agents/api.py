@@ -35,6 +35,7 @@ from shared.core import (
     get_db,
 )
 from shared.classification_cache import ClassificationCache, build_classification_cache_key
+from shared.command_ids import derive_child_command_id
 from shared.models import (
     ActivityLog,
     ChatMessage,
@@ -824,11 +825,7 @@ def _resolve_chat_session_id(raw: str | None) -> str:
 
 
 def _command_id_with_suffix(command_id: str | None, suffix: str) -> str | None:
-    normalized = str(command_id or "").strip()
-    if not normalized:
-        return None
-    full = f"{normalized}:{suffix}"
-    return full[:64]
+    return derive_child_command_id(command_id, suffix, max_length=64)
 
 
 def _assistant_text(summary: str | None, comment: str | None) -> str:

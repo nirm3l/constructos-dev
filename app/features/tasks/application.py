@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-
 from sqlalchemy.orm import Session
 
 from shared.commanding import execute_command
@@ -22,6 +20,7 @@ from .command_handlers import (
     MarkAutomationCompletedHandler,
     MarkAutomationFailedHandler,
     MarkAutomationStartedHandler,
+    PatchTaskInternalFieldsHandler,
     RequestAutomationRunHandler,
     RestoreTaskHandler,
     ToggleWatchHandler,
@@ -99,31 +98,25 @@ class TaskApplicationService:
         )
 
     def bulk_action(self, payload: BulkAction) -> dict:
-        updated = 0
-        per_task_handler = BulkTaskActionHandler(self.ctx, payload)
-        for task_id in payload.task_ids:
-            if execute_command(
-                self.db,
-                command_name=f"Task.Bulk.{payload.action}",
-                user_id=self.user.id,
-                command_id=_derive_child_command_id(self.command_id, task_id),
-                handler=lambda task_id=task_id: per_task_handler(task_id),
-            ):
-                updated += 1
-        return {"updated": updated}
+        normalized_action = str(payload.action or "").strip().lower()
+        normalized_payload = payload.model_copy(update={"action": normalized_action})
+        return execute_command(
+            self.db,
+            command_name=f"Task.Bulk.{normalized_action}",
+            user_id=self.user.id,
+            command_id=self.command_id,
+            handler=BulkTaskActionHandler(self.ctx, normalized_payload),
+        )
 
     def reorder_tasks(self, workspace_id: str, project_id: str, payload: ReorderPayload) -> dict:
         ensure_project_access(self.db, workspace_id, project_id, self.user.id, {"Owner", "Admin", "Member"})
-        handler = ReorderTasksHandler(self.ctx, workspace_id, project_id, payload)
-        for idx, task_id in enumerate(payload.ordered_ids):
-            execute_command(
-                self.db,
-                command_name="Task.Reorder",
-                user_id=self.user.id,
-                command_id=_derive_child_command_id(self.command_id, task_id),
-                handler=lambda task_id=task_id, idx=idx: handler(task_id, idx + 1),
-            )
-        return {"ok": True}
+        return execute_command(
+            self.db,
+            command_name="Task.Reorder",
+            user_id=self.user.id,
+            command_id=self.command_id,
+            handler=ReorderTasksHandler(self.ctx, workspace_id, project_id, payload),
+        )
 
     def add_comment(self, task_id: str, payload: CommentCreate) -> dict:
         return execute_command(
@@ -254,19 +247,28 @@ class TaskApplicationService:
             ),
         )
 
-
-def _derive_child_command_id(command_id: str | None, child_key: str) -> str | None:
-    if not command_id:
-        return None
-    base = str(command_id or "").strip()
-    if not base:
-        return None
-    suffix = str(child_key or "").strip()
-    if not suffix:
-        return base
-    candidate = f"{base}:{suffix}"
-    if len(candidate) <= 64:
-        return candidate
-    suffix_digest = hashlib.sha1(suffix.encode("utf-8")).hexdigest()[:12]
-    keep = max(1, 64 - len(suffix_digest) - 1)
-    return f"{base[:keep]}:{suffix_digest}"
+    def mark_automation_stream_progress(
+        self,
+        task_id: str,
+        *,
+        progress_text: str,
+        status_text: str | None,
+        updated_at: str,
+        run_id: str,
+    ) -> dict:
+        return execute_command(
+            self.db,
+            command_name="Task.Automation.MarkStreamProgress",
+            user_id=self.user.id,
+            command_id=None,
+            handler=PatchTaskInternalFieldsHandler(
+                self.ctx,
+                task_id=task_id,
+                changes={
+                    "last_agent_progress": progress_text,
+                    "last_agent_stream_status": status_text,
+                    "last_agent_stream_updated_at": updated_at,
+                    "last_agent_run_id": run_id,
+                },
+            ),
+        )

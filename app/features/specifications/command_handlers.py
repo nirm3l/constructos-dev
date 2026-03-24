@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import uuid
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from features.notes.application import NoteApplicationService
+from features.tasks.application import TaskApplicationService
 from shared.core import (
     AggregateEventRepository,
+    NoteCreate,
     Project,
     SpecificationCreate,
     SpecificationPatch,
+    TaskCreate,
     User,
     coerce_originator_id,
     ensure_project_access,
@@ -22,7 +27,7 @@ from shared.core import (
 
 from .domain import SpecificationAggregate
 
-ALLOWED_SPEC_STATUSES = {"Draft", "Ready", "In Progress", "Implemented", "Archived"}
+ALLOWED_SPEC_STATUSES = {"Draft", "Ready", "In progress", "Implemented", "Archived"}
 SPEC_STATUS_ALIASES = {
     "draft": "Draft",
     "todo": "Draft",
@@ -30,9 +35,9 @@ SPEC_STATUS_ALIASES = {
     "planned": "Draft",
     "plan": "Draft",
     "ready": "Ready",
-    "in progress": "In Progress",
-    "inprogress": "In Progress",
-    "wip": "In Progress",
+    "in progress": "In progress",
+    "inprogress": "In progress",
+    "wip": "In progress",
     "implemented": "Implemented",
     "done": "Implemented",
     "complete": "Implemented",
@@ -426,3 +431,121 @@ class DeleteSpecificationHandler:
         )
         self.ctx.db.commit()
         return {"ok": True}
+
+
+@dataclass(frozen=True, slots=True)
+class CreateTaskFromSpecificationHandler:
+    ctx: CommandContext
+    workspace_id: str
+    project_id: str
+    specification_id: str
+    title: str
+    description: str
+    priority: str
+    due_date: datetime | None
+    assignee_id: str | None
+    labels: list[str]
+    external_refs: list[dict]
+    attachment_refs: list[dict]
+    recurring_rule: str | None
+    task_type: str
+    scheduled_instruction: str | None
+    scheduled_at_utc: datetime | None
+    schedule_timezone: str | None
+
+    def __call__(self) -> dict:
+        payload = TaskCreate(
+            **{
+                "workspace_id": self.workspace_id,
+                "project_id": self.project_id,
+                "specification_id": self.specification_id,
+                "title": self.title,
+                "description": self.description,
+                "priority": self.priority,
+                "due_date": self.due_date,
+                "assignee_id": self.assignee_id,
+                "labels": self.labels,
+                "external_refs": self.external_refs,
+                "attachment_refs": self.attachment_refs,
+                **({"recurring_rule": self.recurring_rule} if self.recurring_rule is not None else {}),
+                **({"task_type": self.task_type} if str(self.task_type or "").strip().lower() != "manual" else {}),
+                **({"scheduled_instruction": self.scheduled_instruction} if self.scheduled_instruction is not None else {}),
+                **({"scheduled_at_utc": self.scheduled_at_utc} if self.scheduled_at_utc is not None else {}),
+                **({"schedule_timezone": self.schedule_timezone} if self.schedule_timezone is not None else {}),
+            }
+        )
+        return TaskApplicationService(self.ctx.db, self.ctx.user, command_id=None).create_task(payload)
+
+
+@dataclass(frozen=True, slots=True)
+class CreateNoteFromSpecificationHandler:
+    ctx: CommandContext
+    workspace_id: str
+    project_id: str
+    specification_id: str
+    title: str
+    body: str
+    tags: list[str]
+    pinned: bool
+    external_refs: list[dict]
+    attachment_refs: list[dict]
+
+    def __call__(self) -> dict:
+        payload = NoteCreate(
+            workspace_id=self.workspace_id,
+            project_id=self.project_id,
+            specification_id=self.specification_id,
+            title=self.title,
+            body=self.body,
+            tags=self.tags,
+            pinned=self.pinned,
+            external_refs=self.external_refs,
+            attachment_refs=self.attachment_refs,
+        )
+        return NoteApplicationService(self.ctx.db, self.ctx.user, command_id=None).create_note(payload)
+
+
+@dataclass(frozen=True, slots=True)
+class CreateTasksFromSpecificationBatchHandler:
+    ctx: CommandContext
+    workspace_id: str
+    project_id: str
+    specification_id: str
+    titles: list[str]
+    description: str
+    priority: str
+    due_date: datetime | None
+    assignee_id: str | None
+    labels: list[str]
+
+    def __call__(self) -> dict:
+        items: list[dict] = []
+        results: list[dict] = []
+        task_service = TaskApplicationService(self.ctx.db, self.ctx.user, command_id=None)
+        for idx, title in enumerate(self.titles):
+            payload = TaskCreate(
+                workspace_id=self.workspace_id,
+                project_id=self.project_id,
+                specification_id=self.specification_id,
+                title=title,
+                description=self.description,
+                priority=self.priority,
+                due_date=self.due_date,
+                assignee_id=self.assignee_id,
+                labels=self.labels,
+            )
+            try:
+                task = task_service.create_task(payload)
+                items.append(task)
+                results.append({"index": idx, "title": title, "ok": True, "task_id": task["id"]})
+            except HTTPException as exc:
+                results.append({"index": idx, "title": title, "ok": False, "error": str(exc.detail)})
+
+        failed = sum(1 for item in results if not item["ok"])
+        return {
+            "items": items,
+            "results": results,
+            "created": len(items),
+            "failed": failed,
+            "total": len(results),
+        }

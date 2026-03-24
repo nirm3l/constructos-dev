@@ -424,6 +424,64 @@ class ArchiveNoteHandler:
 
 
 @dataclass(frozen=True, slots=True)
+class ArchiveNotesBatchHandler:
+    ctx: CommandContext
+    note_ids: list[str]
+
+    def __call__(self) -> dict:
+        updated = 0
+        repo = AggregateEventRepository(self.ctx.db)
+        unique_note_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for note_id in self.note_ids:
+            normalized_note_id = str(note_id or "").strip()
+            if not normalized_note_id:
+                continue
+            dedupe_key = normalized_note_id.casefold()
+            if dedupe_key in seen_ids:
+                continue
+            seen_ids.add(dedupe_key)
+            unique_note_ids.append(normalized_note_id)
+
+        for note_id in unique_note_ids:
+            state = load_note_command_state(self.ctx.db, note_id)
+            if not state or state.is_deleted or state.archived:
+                continue
+            if state.project_id:
+                ensure_project_access(
+                    self.ctx.db,
+                    state.workspace_id,
+                    state.project_id,
+                    self.ctx.user.id,
+                    {"Owner", "Admin", "Member"},
+                )
+            else:
+                ensure_role(self.ctx.db, state.workspace_id, self.ctx.user.id, {"Owner", "Admin", "Member"})
+            aggregate = repo.load_with_class(
+                aggregate_type="Note",
+                aggregate_id=note_id,
+                aggregate_cls=NoteAggregate,
+            )
+            if bool(getattr(aggregate, "is_deleted", False)) or bool(getattr(aggregate, "archived", False)):
+                continue
+            aggregate.archive(updated_by=self.ctx.user.id)
+            repo.persist(
+                aggregate,
+                base_metadata={
+                    "actor_id": self.ctx.user.id,
+                    "workspace_id": state.workspace_id,
+                    "project_id": state.project_id,
+                    "task_id": state.task_id,
+                    "note_id": note_id,
+                },
+            )
+            updated += 1
+
+        self.ctx.db.commit()
+        return {"updated": updated}
+
+
+@dataclass(frozen=True, slots=True)
 class RestoreNoteHandler:
     ctx: CommandContext
     note_id: str

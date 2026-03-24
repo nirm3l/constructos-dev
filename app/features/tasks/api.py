@@ -43,13 +43,10 @@ from shared.core import (
     serialize_task,
     to_iso_utc,
 )
-from shared.eventing import append_event, rebuild_state
+from shared.eventing import rebuild_state
 from shared.in_memory_stream_broker import InMemoryStreamBroker
 from shared.models import CommandExecution, SessionLocal
 from .application import TaskApplicationService
-from .domain import (
-    EVENT_UPDATED as TASK_EVENT_UPDATED,
-)
 from .read_models import TaskListQuery, list_tasks_read_model
 
 router = APIRouter()
@@ -97,6 +94,34 @@ def _coerce_bool(value: object) -> bool | None:
         if normalized in {"0", "false", "no", "off"}:
             return False
     return None
+
+
+def _automation_stream_replay_response(*, replay_payload: dict[str, object], task_id: str) -> dict[str, str | bool]:
+    return {
+        "ok": bool(replay_payload.get("ok", True)),
+        "task_id": str(replay_payload.get("task_id") or task_id),
+        "automation_state": str(replay_payload.get("automation_state") or "completed"),
+        "summary": str(replay_payload.get("summary") or "Automation run replayed from command idempotency."),
+        "comment": str(replay_payload.get("comment") or ""),
+    }
+
+
+def _assert_command_execution_scope(
+    *,
+    existing: CommandExecution,
+    expected_command_name: str,
+    expected_user_id: str,
+) -> None:
+    existing_command_name = str(getattr(existing, "command_name", "") or "").strip()
+    existing_user_id = str(getattr(existing, "user_id", "") or "").strip()
+    if existing_command_name != expected_command_name or existing_user_id != expected_user_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "command_id already used for different command intent; "
+                "use a unique command_id per command_name and user"
+            ),
+        )
 
 
 @router.get("/api/tasks")
@@ -439,6 +464,8 @@ def run_automation_stream(
     user: User = Depends(get_current_user_detached),
     command_id: str | None = Depends(get_command_id),
 ):
+    command_name = "Task.AutomationStream"
+
     def _single_final_stream(response: dict[str, Any]) -> StreamingResponse:
         body = json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
         return StreamingResponse(iter([body]), media_type="application/x-ndjson", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
@@ -450,19 +477,18 @@ def run_automation_stream(
                 select(CommandExecution).where(CommandExecution.command_id == normalized_command_id)
             ).scalar_one_or_none()
             if existing is not None:
+                _assert_command_execution_scope(
+                    existing=existing,
+                    expected_command_name=command_name,
+                    expected_user_id=str(user.id or "").strip(),
+                )
                 try:
                     replay_payload = json.loads(existing.response_json or "{}")
                 except Exception:
                     replay_payload = {}
                 if not isinstance(replay_payload, dict):
                     replay_payload = {}
-                replay_response = {
-                    "ok": bool(replay_payload.get("ok", True)),
-                    "task_id": str(replay_payload.get("task_id") or task_id),
-                    "automation_state": str(replay_payload.get("automation_state") or "completed"),
-                    "summary": str(replay_payload.get("summary") or "Automation run replayed from command idempotency."),
-                    "comment": str(replay_payload.get("comment") or ""),
-                }
+                replay_response = _automation_stream_replay_response(replay_payload=replay_payload, task_id=task_id)
                 return _single_final_stream(replay_response)
 
         task_row = db.get(Task, task_id)
@@ -542,14 +568,13 @@ def run_automation_stream(
             run_id=run_id,
             stream_status="Automation run started.",
         )
-        db.commit()
         _publish_stream_event(task_id, {"type": "status", "message": "Automation run started."})
         if normalized_command_id:
             try:
                 db.add(
                     CommandExecution(
                         command_id=normalized_command_id,
-                        command_name="Task.AutomationStream",
+                        command_name=command_name,
                         user_id=user.id,
                         response_json=json.dumps(
                             {
@@ -570,19 +595,18 @@ def run_automation_stream(
                     select(CommandExecution).where(CommandExecution.command_id == normalized_command_id)
                 ).scalar_one_or_none()
                 if existing is not None:
+                    _assert_command_execution_scope(
+                        existing=existing,
+                        expected_command_name=command_name,
+                        expected_user_id=str(user.id or "").strip(),
+                    )
                     try:
                         replay_payload = json.loads(existing.response_json or "{}")
                     except Exception:
                         replay_payload = {}
                     if not isinstance(replay_payload, dict):
                         replay_payload = {}
-                    replay_response = {
-                        "ok": bool(replay_payload.get("ok", True)),
-                        "task_id": str(replay_payload.get("task_id") or task_id),
-                        "automation_state": str(replay_payload.get("automation_state") or "completed"),
-                        "summary": str(replay_payload.get("summary") or "Automation run replayed from command idempotency."),
-                        "comment": str(replay_payload.get("comment") or ""),
-                    }
+                    replay_response = _automation_stream_replay_response(replay_payload=replay_payload, task_id=task_id)
                     return _single_final_stream(replay_response)
                 raise
 
@@ -616,25 +640,14 @@ def run_automation_stream(
                 status_text = stream_status or None
             now_iso = to_iso_utc(datetime.now(timezone.utc))
             with SessionLocal() as local_db:
-                append_event(
-                    local_db,
-                    aggregate_type="Task",
-                    aggregate_id=task_id,
-                    event_type=TASK_EVENT_UPDATED,
-                    payload={
-                        "last_agent_progress": progress_text,
-                        "last_agent_stream_status": status_text,
-                        "last_agent_stream_updated_at": now_iso,
-                        "last_agent_run_id": run_id,
-                    },
-                    metadata={
-                        "actor_id": user.id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": task_id,
-                    },
+                app_service = TaskApplicationService(local_db, user)
+                app_service.mark_automation_stream_progress(
+                    task_id,
+                    progress_text=progress_text,
+                    status_text=status_text,
+                    updated_at=now_iso,
+                    run_id=run_id,
                 )
-                local_db.commit()
 
         def _on_event(event: dict[str, object]) -> None:
             nonlocal stream_text, stream_status
@@ -703,7 +716,6 @@ def run_automation_stream(
                             summary="Automation runner failed.",
                             run_id=run_id,
                         )
-                        local_db.commit()
                         if normalized_command_id:
                             command_row = local_db.execute(
                                 select(CommandExecution).where(CommandExecution.command_id == normalized_command_id)
@@ -759,7 +771,6 @@ def run_automation_stream(
                         usage_metadata=usage_metadata,
                         run_id=run_id,
                     )
-                    local_db.commit()
                     if normalized_command_id:
                         command_row = local_db.execute(
                             select(CommandExecution).where(CommandExecution.command_id == normalized_command_id)

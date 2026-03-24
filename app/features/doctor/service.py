@@ -16,13 +16,13 @@ from sqlalchemy.orm import Session
 from features.attachments.api import AttachmentDeletePayload, delete_attachment, download_attachment, upload_attachment
 from features.agents.gateway import build_ui_gateway
 from features.tasks.command_handlers import CommandContext as TaskCommandContext, RequestAutomationRunInternalHandler
-from features.tasks.domain import EVENT_UPDATED as TASK_EVENT_UPDATED
 from features.tasks.api import list_comments as list_task_comments
 from features.tasks.application import TaskApplicationService
-from shared.core import CommentCreate, TaskCreate, User, append_event, ensure_role, load_note_view, load_specification_view, load_task_view
+from shared.core import CommentCreate, TaskCreate, User, ensure_role, load_note_view, load_specification_view, load_task_view
 from shared.models import DoctorRun, Note, Project, ProjectPluginConfig, SessionLocal, Specification, Task, TaskComment, WorkspaceDoctorConfig
+from shared.command_ids import derive_child_command_id
 from shared.project_repository import ensure_project_repository_initialized
-from shared.settings import AGENT_ENABLED_PLUGINS, AGENT_RUNNER_ENABLED, AGENT_SYSTEM_USER_ID
+from shared.settings import AGENT_ENABLED_PLUGINS, AGENT_RUNNER_ENABLED
 
 DOCTOR_PLUGIN_KEY = "doctor"
 DOCTOR_FIXTURE_VERSION = "2"
@@ -114,6 +114,20 @@ def _doctor_command_id(kind: str, scope_id: str, suffix: str | None = None) -> s
     return f"{base}:{compact}"
 
 
+def _doctor_effective_command_id(
+    *,
+    command_id: str | None,
+    kind: str,
+    scope_id: str,
+    suffix: str,
+) -> str:
+    normalized_suffix = str(suffix or "").strip()
+    if not str(command_id or "").strip():
+        return _doctor_command_id(kind, scope_id, normalized_suffix)
+    derived = derive_child_command_id(command_id, normalized_suffix, max_length=64)
+    return str(derived or _doctor_command_id(kind, scope_id, normalized_suffix))
+
+
 def _merge_external_refs(existing: object, desired: list[dict[str, str]]) -> list[dict[str, str]]:
     merged: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -167,15 +181,6 @@ def _write_doctor_compose_manifest(*, project: Project) -> str:
         encoding="utf-8",
     )
     return str(Path("docker-compose.yml"))
-
-
-def _task_event_metadata(*, user: User, workspace_id: str, project_id: str, task_id: str) -> dict[str, str]:
-    return {
-        "actor_id": str(user.id or "").strip() or AGENT_SYSTEM_USER_ID,
-        "workspace_id": workspace_id,
-        "project_id": project_id,
-        "task_id": task_id,
-    }
 
 
 def _upload_fixture_attachment(
@@ -402,7 +407,12 @@ def _seed_doctor_delivery_fixture(
     project_payload = gateway.update_project(
         project_id=project.id,
         patch={"external_refs": _merge_external_refs(existing_project_refs, _repo_context_refs(project_id=project.id))},
-        command_id=(f"{command_id}:project-refs" if command_id else _doctor_command_id("fx", project.id, "project-refs")),
+        command_id=_doctor_effective_command_id(
+            command_id=command_id,
+            kind="fx",
+            scope_id=project.id,
+            suffix="project-refs",
+        ),
     )
     manifest_path = _write_doctor_compose_manifest(project=project)
 
@@ -446,16 +456,17 @@ def _seed_doctor_delivery_fixture(
             {"url": f"commit:{commit_sha}", "title": f"Doctor fixture commit {idx}", "source": "doctor_fixture"},
             {"url": f"branch:task/{task_id[:8]}-doctor-slice-{idx}", "title": "Doctor task branch", "source": "doctor_fixture"},
         ]
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=task_id,
-            event_type=TASK_EVENT_UPDATED,
-            payload={
-                "status": "Completed",
+        gateway.update_task(
+            task_id=task_id,
+            patch={
                 "external_refs": refs,
             },
-            metadata=_task_event_metadata(user=user, workspace_id=workspace_id, project_id=project.id, task_id=task_id),
+            command_id=_doctor_effective_command_id(
+                command_id=command_id,
+                kind="fx",
+                scope_id=project.id,
+                suffix=f"delivery-{code}-completed",
+            ),
         )
         task_service.mark_automation_completed(
             task_id,
@@ -473,17 +484,18 @@ def _seed_doctor_delivery_fixture(
         {"url": f"deploy:runtime:{deploy_snapshot['runtime_type']}", "title": "Doctor runtime decision", "source": "doctor_fixture"},
         {"url": f"deploy:health:{deploy_snapshot['http_url']}:http_200:{timestamp}", "title": "Doctor deploy health", "source": "doctor_fixture"},
     ]
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=lead_task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={
-            "status": "Completed",
+    gateway.update_task(
+        task_id=lead_task_id,
+        patch={
             "external_refs": lead_refs,
             "last_deploy_execution": deploy_snapshot,
         },
-        metadata=_task_event_metadata(user=user, workspace_id=workspace_id, project_id=project.id, task_id=lead_task_id),
+        command_id=_doctor_effective_command_id(
+            command_id=command_id,
+            kind="fx",
+            scope_id=project.id,
+            suffix="delivery-lead-completed",
+        ),
     )
     task_service.mark_automation_completed(
         lead_task_id,
@@ -501,17 +513,18 @@ def _seed_doctor_delivery_fixture(
         },
     ]
     qa_handoff_token = f"lead:{lead_task_id}:{timestamp}"
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=qa_task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={
-            "status": "Completed",
+    gateway.update_task(
+        task_id=qa_task_id,
+        patch={
             "external_refs": qa_refs,
             "team_mode_phase": "qa_validation",
         },
-        metadata=_task_event_metadata(user=user, workspace_id=workspace_id, project_id=project.id, task_id=qa_task_id),
+        command_id=_doctor_effective_command_id(
+            command_id=command_id,
+            kind="fx",
+            scope_id=project.id,
+            suffix="delivery-qa-completed",
+        ),
     )
     RequestAutomationRunInternalHandler(
         TaskCommandContext(db=db, user=user),
@@ -607,13 +620,23 @@ def _seed_doctor_product_surface_fixture(
             external_refs=specification_patch["external_refs"],
             attachment_refs=specification_patch["attachment_refs"],
             force_new=False,
-            command_id=(f"{command_id}:spec-create" if command_id else _doctor_command_id("fx", project.id, "spec-create")),
+            command_id=_doctor_effective_command_id(
+                command_id=command_id,
+                kind="fx",
+                scope_id=project.id,
+                suffix="spec-create",
+            ),
         )
     else:
         specification_view = gateway.update_specification(
             specification_id=str(specification.id),
             patch=specification_patch,
-            command_id=(f"{command_id}:spec-update" if command_id else _doctor_command_id("fx", project.id, "spec-update")),
+            command_id=_doctor_effective_command_id(
+                command_id=command_id,
+                kind="fx",
+                scope_id=project.id,
+                suffix="spec-update",
+            ),
         )
     specification_id = str(specification_view.get("id") or "").strip()
     if not specification_id:
@@ -628,7 +651,12 @@ def _seed_doctor_product_surface_fixture(
             workspace_id=workspace_id,
             project_id=project.id,
             user_id=str(user.id),
-            command_id=(f"{command_id}:spec-task-create" if command_id else _doctor_command_id("fx", project.id, "spec-task-create")),
+            command_id=_doctor_effective_command_id(
+                command_id=command_id,
+                kind="fx",
+                scope_id=project.id,
+                suffix="spec-task-create",
+            ),
         )
     else:
         try:
@@ -644,7 +672,12 @@ def _seed_doctor_product_surface_fixture(
                         {"url": "https://example.com/doctor/spec-task", "title": "Doctor spec task reference", "source": "doctor_fixture"},
                     ],
                 },
-                command_id=(f"{command_id}:spec-task-update" if command_id else _doctor_command_id("fx", project.id, "spec-task-update")),
+                command_id=_doctor_effective_command_id(
+                    command_id=command_id,
+                    kind="fx",
+                    scope_id=project.id,
+                    suffix="spec-task-update",
+                ),
             )
         except HTTPException as exc:
             if exc.status_code != 404:
@@ -654,7 +687,12 @@ def _seed_doctor_product_surface_fixture(
                 workspace_id=workspace_id,
                 project_id=project.id,
                 user_id=str(user.id),
-                command_id=(f"{command_id}:spec-task-create-recover" if command_id else _doctor_command_id("fx", project.id, "spec-task-create-recover")),
+                command_id=_doctor_effective_command_id(
+                    command_id=command_id,
+                    kind="fx",
+                    scope_id=project.id,
+                    suffix="spec-task-create-recover",
+                ),
             )
     spec_task_id = str(spec_task_view.get("id") or "").strip()
     if not spec_task_id:
@@ -687,7 +725,12 @@ def _seed_doctor_product_surface_fixture(
                 ],
                 "specification_id": specification_id,
             },
-            command_id=(f"{command_id}:spec-task-attach" if command_id else _doctor_command_id("fx", project.id, "spec-task-attach")),
+            command_id=_doctor_effective_command_id(
+                command_id=command_id,
+                kind="fx",
+                scope_id=project.id,
+                suffix="spec-task-attach",
+            ),
         )
     except HTTPException as exc:
         if exc.status_code != 404:
@@ -697,7 +740,12 @@ def _seed_doctor_product_surface_fixture(
             workspace_id=workspace_id,
             project_id=project.id,
             user_id=str(user.id),
-            command_id=(f"{command_id}:spec-task-create-retry" if command_id else _doctor_command_id("fx", project.id, "spec-task-create-retry")),
+            command_id=_doctor_effective_command_id(
+                command_id=command_id,
+                kind="fx",
+                scope_id=project.id,
+                suffix="spec-task-create-retry",
+            ),
         )
         spec_task_id = str(spec_task_view.get("id") or "").strip()
         spec_task_view = _wait_for_task_visibility(
@@ -726,7 +774,12 @@ def _seed_doctor_product_surface_fixture(
                 ],
                 "specification_id": specification_id,
             },
-            command_id=(f"{command_id}:spec-task-attach-retry" if command_id else _doctor_command_id("fx", project.id, "spec-task-attach-retry")),
+            command_id=_doctor_effective_command_id(
+                command_id=command_id,
+                kind="fx",
+                scope_id=project.id,
+                suffix="spec-task-attach-retry",
+            ),
         )
 
     spec_note = _find_note_by_title(db, project_id=project.id, title=DOCTOR_SPEC_NOTE_TITLE)
@@ -745,7 +798,12 @@ def _seed_doctor_product_surface_fixture(
             attachment_refs=[note_attachment],
             pinned=True,
             force_new=False,
-            command_id=(f"{command_id}:spec-note-create" if command_id else _doctor_command_id("fx", project.id, "spec-note-create")),
+            command_id=_doctor_effective_command_id(
+                command_id=command_id,
+                kind="fx",
+                scope_id=project.id,
+                suffix="spec-note-create",
+            ),
         )
     else:
         spec_note_view = gateway.update_note(
@@ -762,7 +820,12 @@ def _seed_doctor_product_surface_fixture(
                     {"url": "https://example.com/doctor/spec-note/evidence", "title": "Doctor note evidence", "source": "doctor_fixture"},
                 ],
             },
-            command_id=(f"{command_id}:spec-note-update" if command_id else _doctor_command_id("fx", project.id, "spec-note-update")),
+            command_id=_doctor_effective_command_id(
+                command_id=command_id,
+                kind="fx",
+                scope_id=project.id,
+                suffix="spec-note-update",
+            ),
         )
     spec_note_id = str(spec_note_view.get("id") or "").strip()
     if not spec_note_id:
@@ -792,13 +855,23 @@ def _seed_doctor_product_surface_fixture(
             attachment_refs=[],
             pinned=False,
             force_new=False,
-            command_id=(f"{command_id}:task-note-create" if command_id else _doctor_command_id("fx", project.id, "task-note-create")),
+            command_id=_doctor_effective_command_id(
+                command_id=command_id,
+                kind="fx",
+                scope_id=project.id,
+                suffix="task-note-create",
+            ),
         )
     else:
         task_note_view = gateway.update_note(
             note_id=str(task_note.id),
             patch=task_note_patch,
-            command_id=(f"{command_id}:task-note-update" if command_id else _doctor_command_id("fx", project.id, "task-note-update")),
+            command_id=_doctor_effective_command_id(
+                command_id=command_id,
+                kind="fx",
+                scope_id=project.id,
+                suffix="task-note-update",
+            ),
         )
     task_note_id = str(task_note_view.get("id") or "").strip()
     if not task_note_id:
@@ -815,7 +888,12 @@ def _seed_doctor_product_surface_fixture(
         comment_result = TaskApplicationService(
             db,
             user,
-            command_id=(f"{command_id}:task-comment-add" if command_id else _doctor_command_id("fx", project.id, "task-comment-add")),
+            command_id=_doctor_effective_command_id(
+                command_id=command_id,
+                kind="fx",
+                scope_id=project.id,
+                suffix="task-comment-add",
+            ),
         ).add_comment(spec_task_id, CommentCreate(body=DOCTOR_TASK_COMMENT_BODY))
         db.commit()
         db.expire_all()
@@ -1087,7 +1165,12 @@ def _ensure_doctor_team_tasks(*, gateway: Any, workspace_id: str, project_id: st
             status=str(blueprint["status"]),
             instruction=str(blueprint["instruction"]),
             assigned_agent_code=code,
-            command_id=(f"{command_id}:task:{idx}" if command_id else _doctor_command_id("task", project_id, code)),
+            command_id=_doctor_effective_command_id(
+                command_id=command_id,
+                kind="task",
+                scope_id=project_id,
+                suffix=f"task:{idx}",
+            ),
         )
         created_task_ids[code] = str(created.get("id") or "").strip()
     refreshed = gateway.list_tasks(

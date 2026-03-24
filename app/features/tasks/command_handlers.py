@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -25,6 +25,7 @@ from plugins.team_mode.task_roles import (
 from plugins.team_mode.state_machine import evaluate_team_mode_transition
 from plugins.team_mode.gates import evaluate_team_mode_gates
 from plugins.team_mode.semantics import REQUIRED_SEMANTIC_STATUSES, normalize_review_policy, normalize_status_semantics, semantic_status_key
+from features.task_groups.domain import TaskGroupAggregate
 from shared.core import (
     AggregateEventRepository,
     BulkAction,
@@ -553,6 +554,7 @@ def _maybe_reorder_task_groups_by_first_task_created_at(
     *,
     workspace_id: str,
     project_id: str | None,
+    actor_user_id: str,
 ) -> None:
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
@@ -621,11 +623,27 @@ def _maybe_reorder_task_groups_by_first_task_created_at(
     ]
     if ordered_ids == current_ids:
         return
+    repo = AggregateEventRepository(db)
     for index, group_id in enumerate(ordered_ids, start=1):
-        db.execute(
-            update(TaskGroup)
-            .where(TaskGroup.id == group_id)
-            .values(order_index=index)
+        aggregate = repo.load_with_class(
+            aggregate_type="TaskGroup",
+            aggregate_id=group_id,
+            aggregate_cls=TaskGroupAggregate,
+        )
+        if bool(getattr(aggregate, "is_deleted", False)):
+            continue
+        current_order_index = int(getattr(aggregate, "order_index", 0) or 0)
+        if current_order_index == index:
+            continue
+        aggregate.reorder(order_index=index)
+        repo.persist(
+            aggregate,
+            base_metadata={
+                "actor_id": actor_user_id,
+                "workspace_id": workspace_id,
+                "project_id": normalized_project_id,
+                "task_group_id": group_id,
+            },
         )
 
 
@@ -2047,6 +2065,7 @@ class CreateTaskHandler:
             self.ctx.db,
             workspace_id=self.payload.workspace_id,
             project_id=self.payload.project_id,
+            actor_user_id=str(self.ctx.user.id),
         )
         self.ctx.db.commit()
         task_view = load_task_view(self.ctx.db, tid)
@@ -2762,7 +2781,8 @@ class BulkTaskActionHandler:
     ctx: CommandContext
     payload: BulkAction
 
-    def __call__(self, task_id: str) -> bool:
+    def _apply_to_task(self, task_id: str) -> bool:
+        normalized_action = str(self.payload.action or "").strip().lower()
         workspace_id, project_id, status, archived = require_task_command_state(self.ctx.db, self.ctx.user, task_id, allowed={"Owner", "Admin", "Member"})
         repo = AggregateEventRepository(self.ctx.db)
         aggregate = _load_task_aggregate(repo, task_id)
@@ -2771,7 +2791,7 @@ class BulkTaskActionHandler:
             workspace_id=workspace_id,
             project_id=project_id,
         )
-        if self.payload.action == "complete":
+        if normalized_action == "complete":
             if _is_completed_status(status, completed_status=completed_status):
                 return False
             _enforce_team_mode_transition_policy(
@@ -2787,14 +2807,16 @@ class BulkTaskActionHandler:
                 completed_at=to_iso_utc(datetime.now(timezone.utc)),
                 status=completed_status,
             )
-        elif self.payload.action == "archive":
+        elif normalized_action == "archive":
             if archived:
                 return False
             aggregate.archive()
-        elif self.payload.action == "delete":
+        elif normalized_action == "delete":
             aggregate.delete()
-        elif self.payload.action == "set_status":
+        elif normalized_action == "set_status":
             target_status = str(self.payload.payload.get("status", status) or "").strip() or str(status or "").strip()
+            if str(status or "").strip() == target_status:
+                return False
             _enforce_team_mode_transition_policy(
                 db=self.ctx.db,
                 workspace_id=workspace_id,
@@ -2805,7 +2827,7 @@ class BulkTaskActionHandler:
                 task_id=task_id,
             )
             aggregate.update(changes={"status": target_status})
-        elif self.payload.action == "reopen":
+        elif normalized_action == "reopen":
             if not _is_completed_status(status, completed_status=completed_status):
                 return False
             reopen_status = str(self.payload.payload.get("status", "To Do") or "").strip() or "To Do"
@@ -2829,17 +2851,41 @@ class BulkTaskActionHandler:
             project_id=project_id,
             task_id=task_id,
         )
-        self.ctx.db.commit()
-        task_view = load_task_view(self.ctx.db, task_id)
-        if task_view:
-            _maybe_cleanup_plugin_worktree(
-                db=self.ctx.db,
-                task_id=task_id,
-                project_id=str(task_view.get("project_id") or "").strip() or None,
-                assignee_id=str(task_view.get("assignee_id") or "").strip() or None,
-                status=str(task_view.get("status") or "").strip(),
-            )
         return True
+
+    def __call__(self) -> dict:
+        updated = 0
+        unique_task_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for task_id in self.payload.task_ids:
+            normalized_task_id = str(task_id or "").strip()
+            if not normalized_task_id:
+                continue
+            dedupe_key = normalized_task_id.casefold()
+            if dedupe_key in seen_ids:
+                continue
+            seen_ids.add(dedupe_key)
+            unique_task_ids.append(normalized_task_id)
+
+        cleanup_candidates: list[str] = []
+        for task_id in unique_task_ids:
+            if self._apply_to_task(task_id):
+                updated += 1
+                cleanup_candidates.append(task_id)
+
+        self.ctx.db.commit()
+
+        for task_id in cleanup_candidates:
+            task_view = load_task_view(self.ctx.db, task_id)
+            if task_view:
+                _maybe_cleanup_plugin_worktree(
+                    db=self.ctx.db,
+                    task_id=task_id,
+                    project_id=str(task_view.get("project_id") or "").strip() or None,
+                    assignee_id=str(task_view.get("assignee_id") or "").strip() or None,
+                    status=str(task_view.get("status") or "").strip(),
+                )
+        return {"updated": updated}
 
 
 @dataclass(frozen=True, slots=True)
@@ -2849,39 +2895,59 @@ class ReorderTasksHandler:
     project_id: str
     payload: ReorderPayload
 
-    def __call__(self, task_id: str, order_index: int) -> bool:
-        state = load_task_command_state(self.ctx.db, task_id)
-        if (
-            not state
-            or state.is_deleted
-            or state.workspace_id != self.workspace_id
-            or state.project_id != self.project_id
-        ):
-            return False
+    def __call__(self) -> dict:
+        updated = 0
         repo = AggregateEventRepository(self.ctx.db)
-        aggregate = _load_task_aggregate(repo, task_id)
+        unique_ordered_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for task_id in self.payload.ordered_ids:
+            normalized_task_id = str(task_id or "").strip()
+            if not normalized_task_id:
+                continue
+            dedupe_key = normalized_task_id.casefold()
+            if dedupe_key in seen_ids:
+                continue
+            seen_ids.add(dedupe_key)
+            unique_ordered_ids.append(normalized_task_id)
+
         target_status = str(self.payload.status or "").strip()
-        if target_status:
-            _enforce_team_mode_transition_policy(
-                db=self.ctx.db,
+        for order_index, task_id in enumerate(unique_ordered_ids, start=1):
+            state = load_task_command_state(self.ctx.db, task_id)
+            if (
+                not state
+                or state.is_deleted
+                or state.workspace_id != self.workspace_id
+                or state.project_id != self.project_id
+            ):
+                continue
+            if target_status:
+                _enforce_team_mode_transition_policy(
+                    db=self.ctx.db,
+                    workspace_id=self.workspace_id,
+                    project_id=state.project_id,
+                    actor_user_id=str(self.ctx.user.id),
+                    from_status=str(state.status or "").strip(),
+                    to_status=target_status,
+                    task_id=task_id,
+                )
+            current_order_index = int(getattr(state, "order_index", 0) or 0)
+            current_status = str(getattr(state, "status", "") or "").strip()
+            if current_order_index == order_index and (not target_status or current_status == target_status):
+                updated += 1
+                continue
+            aggregate = _load_task_aggregate(repo, task_id)
+            aggregate.reorder(order_index=order_index, status=self.payload.status)
+            _persist_task_aggregate(
+                repo,
+                aggregate,
+                actor_id=self.ctx.user.id,
                 workspace_id=self.workspace_id,
                 project_id=state.project_id,
-                actor_user_id=str(self.ctx.user.id),
-                from_status=str(state.status or "").strip(),
-                to_status=target_status,
                 task_id=task_id,
             )
-        aggregate.reorder(order_index=order_index, status=self.payload.status)
-        _persist_task_aggregate(
-            repo,
-            aggregate,
-            actor_id=self.ctx.user.id,
-            workspace_id=self.workspace_id,
-            project_id=state.project_id,
-            task_id=task_id,
-        )
+            updated += 1
         self.ctx.db.commit()
-        return True
+        return {"ok": True, "updated": updated}
 
 
 @dataclass(frozen=True, slots=True)
@@ -3425,6 +3491,214 @@ class RequestAutomationRunInternalHandler:
         if self.commit:
             self.ctx.db.commit()
         return {"ok": True, "task_id": self.task_id, "automation_state": "queued", "requested_at": requested_at}
+
+
+@dataclass(frozen=True, slots=True)
+class PatchTaskInternalFieldsHandler:
+    ctx: CommandContext
+    task_id: str
+    changes: dict[str, Any]
+    expected_version: int | None = None
+    commit: bool = True
+
+    def __call__(self) -> dict:
+        workspace_id, project_id, _, _ = _resolve_task_scope_for_internal_or_user_actor(self.ctx, self.task_id)
+        normalized_changes = dict(self.changes or {})
+        if not normalized_changes:
+            return {"ok": True, "task_id": self.task_id}
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.update(changes=normalized_changes)
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
+            expected_version=self.expected_version,
+        )
+        if self.commit:
+            self.ctx.db.commit()
+        return {"ok": True, "task_id": self.task_id}
+
+
+@dataclass(frozen=True, slots=True)
+class CompleteTaskInternalHandler:
+    ctx: CommandContext
+    task_id: str
+    completed_at: str
+    status: str | None = None
+    expected_version: int | None = None
+    commit: bool = True
+
+    def __call__(self) -> dict:
+        workspace_id, project_id, _, _ = _resolve_task_scope_for_internal_or_user_actor(self.ctx, self.task_id)
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.complete(
+            completed_at=str(self.completed_at or ""),
+            status=str(self.status or "").strip() or "Completed",
+        )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
+            expected_version=self.expected_version,
+        )
+        if self.commit:
+            self.ctx.db.commit()
+        return {"ok": True, "task_id": self.task_id}
+
+
+@dataclass(frozen=True, slots=True)
+class AddTaskCommentInternalHandler:
+    ctx: CommandContext
+    task_id: str
+    comment_user_id: str
+    body: str
+    expected_version: int | None = None
+    commit: bool = True
+
+    def __call__(self) -> dict:
+        workspace_id, project_id, _, _ = _resolve_task_scope_for_internal_or_user_actor(self.ctx, self.task_id)
+        normalized_body = str(self.body or "").strip()
+        if not normalized_body:
+            raise HTTPException(status_code=422, detail="comment body is required")
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.add_comment(
+            task_id=self.task_id,
+            user_id=str(self.comment_user_id or "").strip() or str(self.ctx.user.id),
+            body=normalized_body,
+        )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
+            expected_version=self.expected_version,
+        )
+        if self.commit:
+            self.ctx.db.commit()
+        return {"ok": True, "task_id": self.task_id}
+
+
+@dataclass(frozen=True, slots=True)
+class MarkScheduleQueuedInternalHandler:
+    ctx: CommandContext
+    task_id: str
+    queued_at: str | None = None
+    expected_version: int | None = None
+    commit: bool = True
+
+    def __call__(self) -> dict:
+        workspace_id, project_id, _, _ = _resolve_task_scope_for_internal_or_user_actor(self.ctx, self.task_id)
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.mark_schedule_queued(queued_at=str(self.queued_at or "").strip() or None)
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
+            expected_version=self.expected_version,
+        )
+        if self.commit:
+            self.ctx.db.commit()
+        return {"ok": True, "task_id": self.task_id}
+
+
+@dataclass(frozen=True, slots=True)
+class MarkScheduleStartedInternalHandler:
+    ctx: CommandContext
+    task_id: str
+    started_at: str | None = None
+    expected_version: int | None = None
+    commit: bool = True
+
+    def __call__(self) -> dict:
+        workspace_id, project_id, _, _ = _resolve_task_scope_for_internal_or_user_actor(self.ctx, self.task_id)
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.mark_schedule_started(started_at=str(self.started_at or "").strip() or None)
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
+            expected_version=self.expected_version,
+        )
+        if self.commit:
+            self.ctx.db.commit()
+        return {"ok": True, "task_id": self.task_id}
+
+
+@dataclass(frozen=True, slots=True)
+class MarkScheduleCompletedInternalHandler:
+    ctx: CommandContext
+    task_id: str
+    completed_at: str | None = None
+    expected_version: int | None = None
+    commit: bool = True
+
+    def __call__(self) -> dict:
+        workspace_id, project_id, _, _ = _resolve_task_scope_for_internal_or_user_actor(self.ctx, self.task_id)
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.mark_schedule_completed(completed_at=str(self.completed_at or "").strip() or None)
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
+            expected_version=self.expected_version,
+        )
+        if self.commit:
+            self.ctx.db.commit()
+        return {"ok": True, "task_id": self.task_id}
+
+
+@dataclass(frozen=True, slots=True)
+class MarkScheduleFailedInternalHandler:
+    ctx: CommandContext
+    task_id: str
+    failed_at: str | None = None
+    error: str | None = None
+    expected_version: int | None = None
+    commit: bool = True
+
+    def __call__(self) -> dict:
+        workspace_id, project_id, _, _ = _resolve_task_scope_for_internal_or_user_actor(self.ctx, self.task_id)
+        repo = AggregateEventRepository(self.ctx.db)
+        aggregate = _load_task_aggregate(repo, self.task_id)
+        aggregate.mark_schedule_failed(
+            error=str(self.error or "").strip() or None,
+            failed_at=str(self.failed_at or "").strip() or None,
+        )
+        _persist_task_aggregate(
+            repo,
+            aggregate,
+            actor_id=self.ctx.user.id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            task_id=self.task_id,
+            expected_version=self.expected_version,
+        )
+        if self.commit:
+            self.ctx.db.commit()
+        return {"ok": True, "task_id": self.task_id}
 
 
 @dataclass(frozen=True, slots=True)

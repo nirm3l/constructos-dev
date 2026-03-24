@@ -86,3 +86,37 @@ def test_workspace_doctor_status_seed_and_run(tmp_path: Path):
     assert reset_payload['project'] is not None
     assert reset_payload['project']['id'] == seeded_payload['project']['id']
     assert reset_payload['last_run_status'] == 'reset'
+
+
+def test_workspace_doctor_seed_and_run_accept_long_command_id(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    workspace_id = bootstrap['workspaces'][0]['id']
+
+    from shared.models import CommandExecution, SessionLocal
+
+    seed_command_id = "doctor-seed-" + ("x" * 52)
+    run_command_id = "doctor-run-" + ("y" * 53)
+
+    seeded = client.post(
+        f'/api/workspaces/{workspace_id}/doctor/seed',
+        headers={"X-Command-Id": seed_command_id},
+    )
+    assert seeded.status_code == 200
+    assert seeded.json()['seeded'] is True
+
+    ran = client.post(
+        f'/api/workspaces/{workspace_id}/doctor/run',
+        headers={"X-Command-Id": run_command_id},
+    )
+    assert ran.status_code == 200
+    assert ran.json()['run']['status'] in {'passed', 'failed'}
+
+    with SessionLocal() as db:
+        command_rows = (
+            db.query(CommandExecution)
+            .filter(CommandExecution.command_id.like('doctor-%'))
+            .all()
+        )
+    assert command_rows
+    assert all(len(str(row.command_id or "")) <= 64 for row in command_rows)

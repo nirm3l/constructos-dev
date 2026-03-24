@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -12,16 +12,12 @@ from shared.core import (
     SpecificationCreate,
     SpecificationPatch,
     User,
-    ensure_project_access,
-    ensure_role,
     get_command_id,
     get_current_user,
     get_db,
-    load_specification_view,
 )
 
 from .application import SpecificationApplicationService
-from .read_models import SpecificationListQuery, list_specifications_read_model
 
 router = APIRouter()
 
@@ -93,19 +89,7 @@ def create_specification(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    gateway = build_ui_gateway(actor_user_id=user.id)
-    return gateway.create_specification(
-        title=payload.title,
-        project_id=payload.project_id,
-        workspace_id=payload.workspace_id,
-        body=payload.body,
-        status=payload.status,
-        tags=payload.tags,
-        external_refs=[item.model_dump() for item in payload.external_refs],
-        attachment_refs=[item.model_dump() for item in payload.attachment_refs],
-        force_new=bool(payload.force_new),
-        command_id=command_id,
-    )
+    return SpecificationApplicationService(db, user, command_id=command_id).create_specification(payload)
 
 
 @router.get("/api/specifications/{specification_id}")
@@ -122,11 +106,9 @@ def patch_specification(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    gateway = build_ui_gateway(actor_user_id=user.id)
-    return gateway.update_specification(
-        specification_id=specification_id,
-        patch=payload.model_dump(exclude_unset=True),
-        command_id=command_id,
+    return SpecificationApplicationService(db, user, command_id=command_id).patch_specification(
+        specification_id,
+        payload,
     )
 
 
@@ -164,16 +146,14 @@ def create_specification_tasks_bulk(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    gateway = build_ui_gateway(actor_user_id=user.id)
-    return gateway.create_tasks_from_spec(
+    return SpecificationApplicationService(db, user, command_id=command_id).create_tasks_from_specification(
         specification_id=specification_id,
         titles=payload.titles,
         description=payload.description,
         priority=payload.priority,
-        due_date=payload.due_date.isoformat() if payload.due_date else None,
+        due_date=payload.due_date,
         assignee_id=payload.assignee_id,
         labels=payload.labels,
-        command_id=command_id,
     )
 
 
@@ -204,8 +184,10 @@ def link_task_to_specification(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    gateway = build_ui_gateway(actor_user_id=user.id)
-    return gateway.link_task_to_spec(specification_id=specification_id, task_id=task_id, command_id=command_id)
+    return SpecificationApplicationService(db, user, command_id=command_id).link_task_to_specification(
+        specification_id,
+        task_id,
+    )
 
 
 @router.post("/api/specifications/{specification_id}/tasks/{task_id}/unlink")
@@ -216,8 +198,10 @@ def unlink_task_from_specification(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    gateway = build_ui_gateway(actor_user_id=user.id)
-    return gateway.unlink_task_from_spec(specification_id=specification_id, task_id=task_id, command_id=command_id)
+    return SpecificationApplicationService(db, user, command_id=command_id).unlink_task_from_specification(
+        specification_id,
+        task_id,
+    )
 
 
 @router.post("/api/specifications/{specification_id}/notes/{note_id}/link")
@@ -228,8 +212,10 @@ def link_note_to_specification(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    gateway = build_ui_gateway(actor_user_id=user.id)
-    return gateway.link_note_to_spec(specification_id=specification_id, note_id=note_id, command_id=command_id)
+    return SpecificationApplicationService(db, user, command_id=command_id).link_note_to_specification(
+        specification_id,
+        note_id,
+    )
 
 
 @router.post("/api/specifications/{specification_id}/notes/{note_id}/unlink")
@@ -240,8 +226,10 @@ def unlink_note_from_specification(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    gateway = build_ui_gateway(actor_user_id=user.id)
-    return gateway.unlink_note_from_spec(specification_id=specification_id, note_id=note_id, command_id=command_id)
+    return SpecificationApplicationService(db, user, command_id=command_id).unlink_note_from_specification(
+        specification_id,
+        note_id,
+    )
 
 
 @router.post("/api/specifications/{specification_id}/archive")
@@ -251,8 +239,7 @@ def archive_specification(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    gateway = build_ui_gateway(actor_user_id=user.id)
-    return gateway.archive_specification(specification_id=specification_id, command_id=command_id)
+    return SpecificationApplicationService(db, user, command_id=command_id).archive_specification(specification_id)
 
 
 @router.post("/api/specifications/{specification_id}/restore")
@@ -262,8 +249,7 @@ def restore_specification(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    gateway = build_ui_gateway(actor_user_id=user.id)
-    return gateway.restore_specification(specification_id=specification_id, command_id=command_id)
+    return SpecificationApplicationService(db, user, command_id=command_id).restore_specification(specification_id)
 
 
 @router.post("/api/specifications/{specification_id}/delete")
@@ -273,5 +259,4 @@ def delete_specification(
     user: User = Depends(get_current_user),
     command_id: str | None = Depends(get_command_id),
 ):
-    gateway = build_ui_gateway(actor_user_id=user.id)
-    return gateway.delete_specification(specification_id=specification_id, command_id=command_id)
+    return SpecificationApplicationService(db, user, command_id=command_id).delete_specification(specification_id)

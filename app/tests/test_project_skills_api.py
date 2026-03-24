@@ -826,3 +826,25 @@ def test_agent_task_service_supports_project_skill_lifecycle(tmp_path: Path, mon
 
     deleted = service.delete_project_skill(skill_id=imported["id"])
     assert deleted["ok"] is True
+
+
+def test_project_skill_service_child_command_id_is_overflow_safe_and_deterministic(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    user_id = bootstrap["current_user"]["id"]
+
+    from features.project_skills.application import ProjectSkillApplicationService
+    from shared.models import SessionLocal, User
+
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        assert user is not None
+        service = ProjectSkillApplicationService(db, user, command_id="x" * 64)
+        first = service._derive_command_id("apply-team_mode_dependency_with_extra_long_suffix")
+        second = service._derive_command_id("apply-team_mode_dependency_with_extra_long_suffix")
+        different = service._derive_command_id("apply-git_delivery_dependency_with_extra_long_suffix")
+
+    assert isinstance(first, str) and first
+    assert len(first) <= 64
+    assert first == second
+    assert first != different

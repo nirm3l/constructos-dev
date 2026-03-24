@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from features.rules.application import ProjectRuleApplicationService
 from plugins import skill_policy as plugin_skill_policy
+from shared.command_ids import derive_child_command_id
 from shared.core import Project, ProjectRuleCreate, ProjectRulePatch, User, ensure_project_access, ensure_role
 from shared.models import ProjectRule, ProjectSkill, WorkspaceSkill
 
@@ -401,8 +402,7 @@ class ProjectSkillApplicationService:
         if not base:
             return None
         normalized_suffix = _normalize_skill_key(str(suffix or "").strip() or "op", max_length=40)
-        derived = f"{base}:{normalized_suffix}"
-        return derived[:64]
+        return derive_child_command_id(base, normalized_suffix, max_length=64)
 
     def _get_workspace_skill_by_key(self, *, workspace_id: str, skill_key: str) -> WorkspaceSkill | None:
         normalized_key = str(skill_key or "").strip().lower()

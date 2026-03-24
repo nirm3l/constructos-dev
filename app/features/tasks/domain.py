@@ -265,23 +265,38 @@ class TaskAggregate(Aggregate):
         self.last_schedule_error = last_schedule_error
 
     @event("ScheduleQueued")
-    def mark_schedule_queued(self, schedule_state: str = "queued") -> None:
+    def mark_schedule_queued(self, schedule_state: str = "queued", queued_at: str | None = None) -> None:
+        _ = queued_at
         self.schedule_state = schedule_state
 
     @event("ScheduleStarted")
-    def mark_schedule_started(self, schedule_state: str = "running") -> None:
+    def mark_schedule_started(self, schedule_state: str = "running", started_at: str | None = None) -> None:
         self.schedule_state = schedule_state
+        if started_at is not None:
+            self.last_schedule_run_at = started_at
 
     @event("ScheduleCompleted")
-    def mark_schedule_completed(self, schedule_state: str = "idle", last_schedule_run_at: str | None = None) -> None:
+    def mark_schedule_completed(
+        self,
+        schedule_state: str = "idle",
+        completed_at: str | None = None,
+        last_schedule_run_at: str | None = None,
+    ) -> None:
         self.schedule_state = schedule_state
-        self.last_schedule_run_at = last_schedule_run_at
+        self.last_schedule_run_at = completed_at if completed_at is not None else last_schedule_run_at
         self.last_schedule_error = None
 
     @event("ScheduleFailed")
-    def mark_schedule_failed(self, schedule_state: str = "error", error: str | None = None) -> None:
+    def mark_schedule_failed(
+        self,
+        schedule_state: str = "error",
+        error: str | None = None,
+        failed_at: str | None = None,
+    ) -> None:
         self.schedule_state = schedule_state
         self.last_schedule_error = error
+        if failed_at is not None:
+            self.last_schedule_run_at = failed_at
 
     @event("ScheduleDisabled")
     def disable_schedule(self, schedule_state: str = "idle") -> None:

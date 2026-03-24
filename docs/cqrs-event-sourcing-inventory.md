@@ -47,7 +47,11 @@ Core infrastructure:
   - `Task.ToggleWatch`
   - `Task.Automation.RequestRun`
   - `Task.Automation.RequestInternal` (runner/system-facing lifecycle queueing)
-  - `Task.AutomationStream` (special API path, progress-oriented direct event append kept intentionally)
+  - `Task.PatchInternalFields` (runner/system-facing metadata mutations via internal handler)
+  - `Task.CompleteInternal` (runner/system-facing completion emit through aggregate)
+  - `Task.CommentAddInternal` (runner/system-facing comment emit through aggregate)
+  - `Task.ScheduleQueuedInternal`, `Task.ScheduleStartedInternal`, `Task.ScheduleCompletedInternal`, `Task.ScheduleFailedInternal`
+  - `Task.AutomationStream` (special API path, command-id replay envelope + progress/state updates routed through `TaskApplicationService` internal command handlers)
 - Events:
   - `TaskCreated`, `TaskUpdated`, `TaskReordered`, `TaskCompleted`, `TaskReopened`
   - `TaskArchived`, `TaskRestored`, `TaskDeleted`, `TaskMovedToInbox`
@@ -56,7 +60,10 @@ Core infrastructure:
   - `TaskScheduleConfigured`, `TaskScheduleQueued`, `TaskScheduleStarted`, `TaskScheduleCompleted`, `TaskScheduleFailed`, `TaskScheduleDisabled`
 - Handler style:
   - Mostly aggregate-first command handlers with event persistence through `AggregateEventRepository`.
-  - High-throughput progress updates still append directly where needed, while requested/started/failed/completed lifecycle paths are now available through handlers.
+  - Runner/runtime lifecycle and progress/state updates are routed through internal handlers (`Task.PatchInternalFields`, `Task.Automation.RequestInternal`, and schedule/comment/complete internal handlers).
+  - `Task.Reorder` now executes as one batch command/transaction per request with duplicate ID normalization and no-op reorder-event suppression.
+  - `Task.Bulk.*` executes as one command/transaction per request, normalizes duplicate task IDs, and suppresses no-op `set_status` updates.
+  - Agent-side `archive_all_tasks` orchestration now always passes through one `Task.Bulk.archive` command execution (no pre-executor early return), preserving replay semantics for repeated `command_id`.
 
 ### 2) `Project` Aggregate
 - Domain: `app/features/projects/domain.py`
@@ -72,6 +79,7 @@ Core infrastructure:
   - `ProjectCreated`, `ProjectDeleted`, `ProjectUpdated`, `ProjectMemberUpserted`, `ProjectMemberRemoved`
 - Handler style:
   - Aggregate-first command handlers.
+  - Agent-side `archive_all_notes` uses one batch command execution (`Note.Archive` with batch handler) and keeps replay semantics by routing through `execute_command(...)` even when later calls see an empty active-note set.
   - `DeleteProjectHandler` cascades through multiple aggregates (tasks, notes, rules, specs) by emitting delete events for each.
 
 ### 3) `Note` Aggregate
@@ -94,7 +102,10 @@ Core infrastructure:
 - Events:
   - `TaskGroupCreated`, `TaskGroupUpdated`, `TaskGroupReordered`, `TaskGroupDeleted`
 - Handler style:
-  - Aggregate-first command handlers, reorder implemented as fan-out command loop.
+  - Aggregate-first command handlers, reorder implemented as one batch command/transaction (single idempotent command execution per request).
+  - Reorder batch normalizes duplicate `ordered_ids` entries (first occurrence wins) to avoid redundant reorder events.
+  - Reorder batch skips no-op reorder event emission when `order_index` is unchanged.
+  - Task-create side effect that reorders groups by first-task-created timestamp is now emitted as `TaskGroupReordered` events (no direct SQL `TaskGroup` row mutation in task handlers).
 
 ### 5) `NoteGroup` Aggregate
 - Domain: `app/features/note_groups/domain.py`
@@ -105,7 +116,9 @@ Core infrastructure:
 - Events:
   - `NoteGroupCreated`, `NoteGroupUpdated`, `NoteGroupReordered`, `NoteGroupDeleted`
 - Handler style:
-  - Aggregate-first command handlers, reorder implemented as fan-out command loop.
+  - Aggregate-first command handlers, reorder implemented as one batch command/transaction (single idempotent command execution per request).
+  - Reorder batch normalizes duplicate `ordered_ids` entries (first occurrence wins) to avoid redundant reorder events.
+  - Reorder batch skips no-op reorder event emission when `order_index` is unchanged.
 
 ### 6) `ProjectRule` Aggregate
 - Domain: `app/features/rules/domain.py`
@@ -124,12 +137,16 @@ Core infrastructure:
 - Handler implementation: `app/features/specifications/command_handlers.py`
 - Commands:
   - `Specification.Create`, `Specification.Patch`, `Specification.Archive`, `Specification.Restore`, `Specification.Delete`
+  - `Specification.TaskCreate`, `Specification.TaskCreateBatch`, `Specification.NoteCreate` (wrapper orchestration envelopes)
   - Orchestration methods in app service that delegate to `TaskApplicationService` and `NoteApplicationService`.
 - Events:
   - `SpecificationCreated`, `SpecificationUpdated`, `SpecificationArchived`, `SpecificationRestored`, `SpecificationDeleted`
 - Handler style:
   - Aggregate-first command handlers.
-  - Cross-aggregate operations are delegated at application service layer.
+  - Wrapper task/note creation orchestration is now executed through dedicated specification command handlers (`Specification.TaskCreate`, `Specification.TaskCreateBatch`, `Specification.NoteCreate`) under `execute_command(...)`.
+  - `create_tasks_from_specification` executes as one idempotent command envelope (`Specification.TaskCreateBatch`) instead of per-item child command-id fan-out.
+  - Canonical specification status string for active work is `In progress` (aliases like `in_progress`, `inprogress`, and `wip` normalize to this value).
+  - Specification mutation API routes now call `SpecificationApplicationService` directly (read routes may still use gateway/read-model wrappers).
 
 ### 8) `ChatSession` Aggregate
 - Domain: `app/features/chat/domain.py`
@@ -204,11 +221,8 @@ Used by most business aggregates.
 - API -> Application service -> `execute_command` idempotency -> command handler -> aggregate method -> `repo.persist` -> projection.
 
 ### Pattern B: ES append outside aggregate handler
-Used where streaming/async progress is required and strict aggregate command overhead is intentionally avoided.
-- Direct `append_event(...)` in API/runtime code, especially task automation streams and agent runner internals.
-- Example hotspots:
-  - `app/features/tasks/api.py`
-  - `app/features/agents/service.py`
+Used only in bootstrapping/seed setup and controlled fallback paths when task internal handlers are unavailable.
+- Runtime mutation paths in features now prefer handler-first internal command routes.
 
 ### Pattern C: Read model / service-oriented modules without aggregate roots
 Modules centered on orchestration, integrations, retrieval, or admin flows, not aggregate command models.
@@ -225,12 +239,12 @@ Modules centered on orchestration, integrations, retrieval, or admin flows, not 
 - Resolved: `rebuild_state(...)` now supports `User`, `Notification`, and `SavedView`.
 
 2. Parallel command path for Task automation stream.
-- `Task.AutomationStream` still appends high-frequency progress updates directly for throughput.
-- Lifecycle state transitions now have dedicated handlers and are increasingly routed through command handlers.
+- `Task.AutomationStream` now persists progress/state via `Task.PatchInternalFields`.
+- Lifecycle state transitions have dedicated internal handlers and are routed through command handlers.
+- Runner metadata patches and lifecycle emits (dispatch/deploy-lock/team-mode transition payload updates, retry/deferred stream state, task completion, task comments, and schedule queued/started/completed/failed) use internal handler paths.
 
 3. Event emission spread across runtime modules.
-- `agents/service.py` and selected progress/runtime paths still emit direct Task events.
-- `agents/runner.py` now routes automation request/started/failure/completion lifecycle transitions through handlers.
+- Runtime modules now route Task mutation events through internal handlers by default (`tasks/api.py`, `agents/runner.py`, `shared/eventing_task_automation_triggers.py`).
 - `AutomationStarted` claim keeps optimistic concurrency semantics through handler support for `expected_version`.
 
 4. Mixed consistency model.
@@ -239,6 +253,7 @@ Modules centered on orchestration, integrations, retrieval, or admin flows, not 
 
 ## Recommended Refactor Direction
 1. Continue shrinking direct runtime event emission by migrating remaining runner/service mutation paths to dedicated handlers.
+1. Keep runtime mutation paths handler-first and remove remaining legacy fallback append paths where safe.
 2. Keep `AutomationStarted` claim semantics concurrency-safe (`expected_version`) through the aggregate-backed handler path.
 3. Keep `execute_command` idempotency at all public mutation entry points.
 4. Preserve high-throughput append-only progress paths only where strictly needed, but route state transitions through domain command facades.

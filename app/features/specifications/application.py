@@ -9,11 +9,9 @@ from features.notes.application import NoteApplicationService
 from features.tasks.application import TaskApplicationService
 from shared.commanding import execute_command
 from shared.core import (
-    NoteCreate,
     NotePatch,
     SpecificationCreate,
     SpecificationPatch,
-    TaskCreate,
     TaskPatch,
     User,
     ensure_project_access,
@@ -27,6 +25,9 @@ from shared.core import (
 from .command_handlers import (
     ArchiveSpecificationHandler,
     CommandContext,
+    CreateNoteFromSpecificationHandler,
+    CreateTaskFromSpecificationHandler,
+    CreateTasksFromSpecificationBatchHandler,
     CreateSpecificationHandler,
     DeleteSpecificationHandler,
     PatchSpecificationHandler,
@@ -44,11 +45,6 @@ class SpecificationApplicationService:
         self.user = user
         self.command_id = command_id
         self.ctx = CommandContext(db=db, user=user)
-
-    def _child_command_id(self, suffix: str | int) -> str | None:
-        if not self.command_id:
-            return None
-        return f"{self.command_id}:{suffix}"
 
     def _require_specification_scope(self, specification_id: str, *, require_active: bool) -> tuple[str, str]:
         workspace_id, project_id, _, archived = require_specification_command_state(
@@ -128,27 +124,31 @@ class SpecificationApplicationService:
         normalized_title = str(title or "").strip()
         if not normalized_title:
             raise HTTPException(status_code=422, detail="title cannot be empty")
-        payload = TaskCreate(
-            **{
-                "workspace_id": workspace_id,
-                "project_id": project_id,
-                "specification_id": specification_id,
-                "title": normalized_title,
-                "description": description or "",
-                "priority": priority or "Med",
-                "due_date": due_date,
-                "assignee_id": assignee_id,
-                "labels": labels or [],
-                "external_refs": external_refs or [],
-                "attachment_refs": attachment_refs or [],
-                **({"recurring_rule": recurring_rule} if recurring_rule is not None else {}),
-                **({"task_type": task_type} if str(task_type or "").strip().lower() != "manual" else {}),
-                **({"scheduled_instruction": scheduled_instruction} if scheduled_instruction is not None else {}),
-                **({"scheduled_at_utc": scheduled_at_utc} if scheduled_at_utc is not None else {}),
-                **({"schedule_timezone": schedule_timezone} if schedule_timezone is not None else {}),
-            }
+        return execute_command(
+            self.db,
+            command_name="Specification.TaskCreate",
+            user_id=self.user.id,
+            command_id=self.command_id,
+            handler=CreateTaskFromSpecificationHandler(
+                self.ctx,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                specification_id=specification_id,
+                title=normalized_title,
+                description=description or "",
+                priority=priority or "Med",
+                due_date=due_date,
+                assignee_id=assignee_id,
+                labels=labels or [],
+                external_refs=external_refs or [],
+                attachment_refs=attachment_refs or [],
+                recurring_rule=recurring_rule,
+                task_type=task_type,
+                scheduled_instruction=scheduled_instruction,
+                scheduled_at_utc=scheduled_at_utc,
+                schedule_timezone=schedule_timezone,
+            ),
         )
-        return TaskApplicationService(self.db, self.user, command_id=self.command_id).create_task(payload)
 
     def create_tasks_from_specification(
         self,
@@ -166,39 +166,24 @@ class SpecificationApplicationService:
         if not normalized_titles:
             raise HTTPException(status_code=422, detail="titles must contain at least one non-empty item")
 
-        items: list[dict] = []
-        results: list[dict] = []
-        for idx, title in enumerate(normalized_titles):
-            payload = TaskCreate(
+        return execute_command(
+            self.db,
+            command_name="Specification.TaskCreateBatch",
+            user_id=self.user.id,
+            command_id=self.command_id,
+            handler=CreateTasksFromSpecificationBatchHandler(
+                self.ctx,
                 workspace_id=workspace_id,
                 project_id=project_id,
                 specification_id=specification_id,
-                title=title,
+                titles=normalized_titles,
                 description=description or "",
                 priority=priority or "Med",
                 due_date=due_date,
                 assignee_id=assignee_id,
                 labels=labels or [],
-            )
-            try:
-                task = TaskApplicationService(
-                    self.db,
-                    self.user,
-                    command_id=self._child_command_id(f"task-{idx}"),
-                ).create_task(payload)
-                items.append(task)
-                results.append({"index": idx, "title": title, "ok": True, "task_id": task["id"]})
-            except HTTPException as exc:
-                results.append({"index": idx, "title": title, "ok": False, "error": str(exc.detail)})
-
-        failed = sum(1 for item in results if not item["ok"])
-        return {
-            "items": items,
-            "results": results,
-            "created": len(items),
-            "failed": failed,
-            "total": len(results),
-        }
+            ),
+        )
 
     def create_note_from_specification(
         self,
@@ -215,18 +200,24 @@ class SpecificationApplicationService:
         normalized_title = str(title or "").strip()
         if not normalized_title:
             raise HTTPException(status_code=422, detail="title cannot be empty")
-        payload = NoteCreate(
-            workspace_id=workspace_id,
-            project_id=project_id,
-            specification_id=specification_id,
-            title=normalized_title,
-            body=body or "",
-            tags=tags or [],
-            pinned=bool(pinned),
-            external_refs=external_refs or [],
-            attachment_refs=attachment_refs or [],
+        return execute_command(
+            self.db,
+            command_name="Specification.NoteCreate",
+            user_id=self.user.id,
+            command_id=self.command_id,
+            handler=CreateNoteFromSpecificationHandler(
+                self.ctx,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                specification_id=specification_id,
+                title=normalized_title,
+                body=body or "",
+                tags=tags or [],
+                pinned=bool(pinned),
+                external_refs=external_refs or [],
+                attachment_refs=attachment_refs or [],
+            ),
         )
-        return NoteApplicationService(self.db, self.user, command_id=self.command_id).create_note(payload)
 
     def link_task_to_specification(self, specification_id: str, task_id: str) -> dict:
         self._require_specification_scope(specification_id, require_active=True)

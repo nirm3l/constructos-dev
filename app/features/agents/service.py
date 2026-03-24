@@ -41,6 +41,7 @@ from features.task_groups.application import TaskGroupApplicationService
 from features.task_groups.read_models import TaskGroupListQuery, list_task_groups_read_model
 from shared.chat_indexing import CHAT_INDEX_MODE_KG_AND_VECTOR
 from shared.classification_cache import ClassificationCache, build_classification_cache_key
+from shared.command_ids import derive_child_command_id
 from shared.core import (
     BulkAction,
     CommentCreate,
@@ -1602,18 +1603,7 @@ class AgentTaskService:
 
     @staticmethod
     def _derive_child_command_id(command_id: str | None, child_key: str) -> str | None:
-        normalized = str(command_id or "").strip()
-        if not normalized:
-            return None
-        suffix = str(child_key or "").strip()
-        if not suffix:
-            return normalized
-        candidate = f"{normalized}:{suffix}"
-        if len(candidate) <= 64:
-            return candidate
-        suffix_digest = hashlib.sha1(suffix.encode("utf-8")).hexdigest()[:12]
-        keep = max(1, 64 - len(suffix_digest) - 1)
-        return f"{normalized[:keep]}:{suffix_digest}"
+        return derive_child_command_id(command_id, child_key, max_length=64)
 
     def _normalize_project_name(self, value: str) -> str:
         return " ".join(str(value or "").split())
@@ -4496,7 +4486,10 @@ class AgentTaskService:
                 task_id=task_id,
                 patch={"task_relationships": relationships},
                 auth_token=auth_token,
-                command_id=f"{command_id or 'tm-structural'}:depends-on:{task_id[:8]}",
+                command_id=self._derive_child_command_id(
+                    command_id or "tm-structural",
+                    f"depends-on:{task_id[:8]}",
+                ),
             )
 
         final_relationships_by_task_id: dict[str, list[dict[str, Any]]] = {
@@ -4560,7 +4553,10 @@ class AgentTaskService:
                 task_id=task_id,
                 patch={"delivery_mode": target_delivery_mode},
                 auth_token=auth_token,
-                command_id=f"{command_id or 'tm-structural'}:delivery-mode:{task_id[:8]}",
+                command_id=self._derive_child_command_id(
+                    command_id or "tm-structural",
+                    f"delivery-mode:{task_id[:8]}",
+                ),
             )
         return
 
@@ -4591,12 +4587,6 @@ class AgentTaskService:
         auth_token: str | None,
         command_id: str | None,
     ) -> None:
-        def _command_id_with_suffix(base: str | None, suffix: str) -> str | None:
-            normalized = str(base or "").strip()
-            if not normalized:
-                return None
-            return f"{normalized}:{suffix}"[:64]
-
         with SessionLocal() as db:
             status_semantics = _effective_team_mode_status_semantics_for_project(
                 db,
@@ -4635,7 +4625,7 @@ class AgentTaskService:
                     "execution_triggers": normalized_execution_triggers,
                 },
                 auth_token=auth_token,
-                command_id=_command_id_with_suffix(command_id, f"tm-schedule-{lead_task_id[:8]}"),
+                command_id=self._derive_child_command_id(command_id, f"tm-schedule-{lead_task_id[:8]}"),
             )
 
     @staticmethod
@@ -4706,7 +4696,7 @@ class AgentTaskService:
             project_id=project_id,
             patch={"external_refs": refs},
             auth_token=auth_token,
-            command_id=(f"{str(command_id or '').strip()}:repo-context"[:64] if str(command_id or "").strip() else None),
+            command_id=self._derive_child_command_id(command_id, "repo-context"),
         )
         return {"updated": True, "repository_url": repo_url}
 
@@ -5186,7 +5176,7 @@ class AgentTaskService:
                 project_id=resolved_project_id,
                 patch={"custom_statuses": next_statuses},
                 auth_token=auth_token,
-                command_id=(f"{command_id}:align-team-mode-statuses" if command_id else None),
+                command_id=self._derive_child_command_id(command_id, "align-team-mode-statuses"),
             )
             adjustments.append(
                 "Project board statuses were aligned to the required Team Mode lifecycle: "
@@ -5930,12 +5920,6 @@ class AgentTaskService:
             f"If unresolved after one cycle, assign to human and notify requester user_id={str(user.id)}."
         )
 
-        def _command_id_with_suffix(base: str | None, suffix: str) -> str | None:
-            normalized = str(base or "").strip()
-            if not normalized:
-                return None
-            return f"{normalized}:{str(suffix or '').strip()}"[:64]
-
         with SessionLocal() as db:
             from plugins.team_mode.api_kickoff import maybe_dispatch_execution_kickoff
 
@@ -5955,7 +5939,7 @@ class AgentTaskService:
                 command_id=command_id,
                 promote_plugin_policy_to_execution_mode_if_needed=lambda **_kwargs: None,
                 build_team_lead_kickoff_instruction=lambda **_kwargs: kickoff_instruction,
-                command_id_with_suffix=_command_id_with_suffix,
+                command_id_with_suffix=self._derive_child_command_id,
             )
             if not isinstance(result, dict):
                 raise HTTPException(status_code=409, detail="Team Mode kickoff could not be dispatched")
@@ -7740,8 +7724,10 @@ class AgentTaskService:
     ) -> dict:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
+        normalized_action = str(action or "").strip().lower()
         payload = payload or {}
         cleaned: list[str] = []
+        seen_ids: set[str] = set()
         with SessionLocal() as db:
             for task_id in task_ids:
                 try:
@@ -7752,13 +7738,18 @@ class AgentTaskService:
                     continue
                 self._assert_workspace_allowed(state.workspace_id)
                 self._assert_project_allowed(state.project_id)
-                cleaned.append(task_id)
-            if not cleaned:
-                return {"updated": 0}
-            bulk = BulkAction(task_ids=cleaned, action=str(action), payload=payload)
+                normalized_id = str(state.id or task_id or "").strip()
+                if not normalized_id:
+                    continue
+                dedupe_key = normalized_id.casefold()
+                if dedupe_key in seen_ids:
+                    continue
+                seen_ids.add(dedupe_key)
+                cleaned.append(normalized_id)
+            bulk = BulkAction(task_ids=cleaned, action=normalized_action, payload=payload)
             effective_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-task-bulk",
-                payload={"task_ids": cleaned, "action": str(action), "payload": payload},
+                payload={"task_ids": cleaned, "action": normalized_action, "payload": payload},
             )
             return TaskApplicationService(db, user, command_id=effective_command_id).bulk_action(bulk)
 
@@ -7795,9 +7786,18 @@ class AgentTaskService:
                     offset=0,
                 ),
             )
-            ids = [t["id"] for t in (page.get("items") or []) if t.get("id")]
-            if not ids:
-                return {"updated": 0}
+            raw_ids = [t["id"] for t in (page.get("items") or []) if t.get("id")]
+            ids: list[str] = []
+            seen_ids: set[str] = set()
+            for raw_id in raw_ids:
+                normalized_id = str(raw_id or "").strip()
+                if not normalized_id:
+                    continue
+                dedupe_key = normalized_id.casefold()
+                if dedupe_key in seen_ids:
+                    continue
+                seen_ids.add(dedupe_key)
+                ids.append(normalized_id)
             bulk = BulkAction(task_ids=ids, action="archive", payload={})
             effective_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-task-archive-all",
@@ -7822,7 +7822,6 @@ class AgentTaskService:
     ) -> dict:
         self._require_token(auth_token)
         user = self._resolve_actor_user()
-        updated = 0
         with SessionLocal() as db:
             resolved_workspace_id, resolved_project_id = self._resolve_workspace_for_read(
                 db=db,
@@ -7844,7 +7843,18 @@ class AgentTaskService:
                     offset=0,
                 ),
             )
-            ids = [n["id"] for n in (page.get("items") or []) if n.get("id")]
+            raw_ids = [n["id"] for n in (page.get("items") or []) if n.get("id")]
+            ids: list[str] = []
+            seen_ids: set[str] = set()
+            for raw_id in raw_ids:
+                normalized_id = str(raw_id or "").strip()
+                if not normalized_id:
+                    continue
+                dedupe_key = normalized_id.casefold()
+                if dedupe_key in seen_ids:
+                    continue
+                seen_ids.add(dedupe_key)
+                ids.append(normalized_id)
             batch_command_id = command_id or self._fallback_command_id(
                 prefix="mcp-archive-notes",
                 payload={
@@ -7854,17 +7864,23 @@ class AgentTaskService:
                     "ids": ids,
                 },
             )
+            validated_ids: list[str] = []
+            seen_ids: set[str] = set()
             for note_id in ids:
-                # Re-validate scope per note to be safe.
                 state = load_note_command_state(db, note_id)
                 if not state or state.is_deleted or state.archived:
                     continue
                 self._assert_workspace_allowed(state.workspace_id)
                 self._assert_project_allowed(state.project_id)
-                note_command_id = self._derive_child_command_id(batch_command_id, note_id)
-                NoteApplicationService(db, user, command_id=note_command_id).archive_note(note_id)
-                updated += 1
-            return {"updated": updated}
+                normalized_id = str(state.id or note_id or "").strip()
+                if not normalized_id:
+                    continue
+                dedupe_key = normalized_id.casefold()
+                if dedupe_key in seen_ids:
+                    continue
+                seen_ids.add(dedupe_key)
+                validated_ids.append(normalized_id)
+            return NoteApplicationService(db, user, command_id=batch_command_id).archive_notes(validated_ids)
 
     def send_in_app_notification(
         self,

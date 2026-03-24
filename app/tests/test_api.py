@@ -3418,6 +3418,81 @@ def test_task_automation_stream_prefers_provided_intent_envelope_without_reclass
     assert stats["resolve_reused_envelope"] >= 1
 
 
+def test_task_automation_stream_persists_progress_metadata(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    created = client.post('/api/tasks', json={'title': 'Stream progress metadata', 'workspace_id': ws_id, 'project_id': project_id}).json()
+    task_id = created['id']
+
+    from features.tasks import api as tasks_api
+    from features.agents.executor import AutomationOutcome
+
+    def _fake_execute_task_automation_stream(**kwargs):
+        on_event = kwargs.get("on_event")
+        assert callable(on_event)
+        on_event({"type": "assistant_text", "delta": "Implementing changes..."})
+        on_event({"type": "status", "message": "Applying migration..."})
+        return AutomationOutcome(action='comment', summary='ok', comment='done', usage={})
+
+    monkeypatch.setattr(tasks_api, "execute_task_automation_stream", _fake_execute_task_automation_stream)
+
+    run = client.post(
+        f'/api/tasks/{task_id}/automation/stream',
+        json={'instruction': 'Run and stream progress updates.'},
+    )
+    assert run.status_code == 200
+
+    status = client.get(f"/api/tasks/{task_id}/automation")
+    assert status.status_code == 200
+    payload = status.json()
+    assert payload["automation_state"] == "completed"
+    assert isinstance(payload.get("last_agent_progress"), str) and str(payload.get("last_agent_progress") or "").strip()
+    assert isinstance(payload.get("last_agent_stream_status"), str) and str(payload.get("last_agent_stream_status") or "").strip()
+    assert isinstance(payload.get("last_agent_run_id"), str) and str(payload.get("last_agent_run_id") or "").strip()
+    assert isinstance(payload.get("last_agent_stream_updated_at"), str) and str(payload.get("last_agent_stream_updated_at") or "").strip()
+
+
+def test_task_automation_stream_rejects_reused_command_id_for_different_intent(tmp_path, monkeypatch):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+    created_task = client.post(
+        '/api/tasks',
+        json={'title': 'Stream command conflict guard', 'workspace_id': ws_id, 'project_id': project_id},
+    )
+    assert created_task.status_code == 200
+    task_id = created_task.json()['id']
+
+    from features.tasks import api as tasks_api
+    from features.agents.executor import AutomationOutcome
+
+    # Ensure the endpoint does not run automation when command intent conflicts.
+    monkeypatch.setattr(
+        tasks_api,
+        "execute_task_automation_stream",
+        lambda **_kwargs: AutomationOutcome(action='comment', summary='ok', comment='done', usage={}),
+    )
+
+    command_id = 'task-stream-command-intent-conflict-001'
+    note_created = client.post(
+        '/api/notes',
+        json={'title': 'Command scope seed', 'workspace_id': ws_id, 'project_id': project_id},
+        headers={'X-Command-Id': command_id},
+    )
+    assert note_created.status_code == 200
+
+    run = client.post(
+        f'/api/tasks/{task_id}/automation/stream',
+        json={'instruction': 'Run stream'},
+        headers={'X-Command-Id': command_id},
+    )
+    assert run.status_code == 409
+    assert 'command_id already used for different command intent' in str(run.json().get('detail') or '')
+
+
 def test_agent_service_request_automation_run_classifies_team_mode_kickoff(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -9244,6 +9319,390 @@ def test_agent_service_long_command_id_does_not_overflow_bulk_and_archive_all(tm
     assert archived_notes['updated'] >= 1
 
 
+def test_agent_service_bulk_action_replay_with_same_command_id_is_idempotent(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+    from shared.models import SessionLocal, StoredEvent
+    from features.tasks.domain import EVENT_COMPLETED as TASK_EVENT_COMPLETED
+    from sqlalchemy import func
+
+    service = AgentTaskService()
+    task_a = service.create_task(
+        title='Bulk replay A',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    task_b = service.create_task(
+        title='Bulk replay B',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    bulk_command_id = 'bulk-replay-command-id-001'
+    first = service.bulk_task_action(
+        task_ids=[task_a['id'], task_b['id']],
+        action='complete',
+        command_id=bulk_command_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert first['updated'] == 2
+
+    with SessionLocal() as db:
+        completed_before_replay = (
+            db.query(func.count(StoredEvent.id))
+            .filter(
+                StoredEvent.aggregate_type == 'Task',
+                StoredEvent.event_type == TASK_EVENT_COMPLETED,
+                StoredEvent.aggregate_id.in_([task_a['id'], task_b['id']]),
+            )
+            .scalar()
+        ) or 0
+
+    second = service.bulk_task_action(
+        task_ids=[task_a['id'], task_b['id']],
+        action='complete',
+        command_id=bulk_command_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert second['updated'] == 2
+
+    with SessionLocal() as db:
+        completed_after_replay = (
+            db.query(func.count(StoredEvent.id))
+            .filter(
+                StoredEvent.aggregate_type == 'Task',
+                StoredEvent.event_type == TASK_EVENT_COMPLETED,
+                StoredEvent.aggregate_id.in_([task_a['id'], task_b['id']]),
+            )
+            .scalar()
+        ) or 0
+
+    assert completed_after_replay == completed_before_replay
+
+
+def test_agent_service_archive_all_tasks_replay_with_same_command_id_is_idempotent(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+    from shared.models import SessionLocal, StoredEvent
+    from features.tasks.domain import EVENT_ARCHIVED as TASK_EVENT_ARCHIVED
+    from sqlalchemy import func
+
+    service = AgentTaskService()
+    task_a = service.create_task(
+        title='Archive tasks replay A',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    task_b = service.create_task(
+        title='Archive tasks replay B',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    command_id = 'archive-tasks-replay-001'
+    first = service.archive_all_tasks(
+        workspace_id=ws_id,
+        project_id=project_id,
+        q='Archive tasks replay',
+        command_id=command_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert first['updated'] >= 2
+
+    with SessionLocal() as db:
+        archived_before_replay = (
+            db.query(func.count(StoredEvent.id))
+            .filter(
+                StoredEvent.aggregate_type == 'Task',
+                StoredEvent.event_type == TASK_EVENT_ARCHIVED,
+                StoredEvent.aggregate_id.in_([task_a['id'], task_b['id']]),
+            )
+            .scalar()
+        ) or 0
+
+    second = service.archive_all_tasks(
+        workspace_id=ws_id,
+        project_id=project_id,
+        q='Archive tasks replay',
+        command_id=command_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert second['updated'] >= 2
+
+    with SessionLocal() as db:
+        archived_after_replay = (
+            db.query(func.count(StoredEvent.id))
+            .filter(
+                StoredEvent.aggregate_type == 'Task',
+                StoredEvent.event_type == TASK_EVENT_ARCHIVED,
+                StoredEvent.aggregate_id.in_([task_a['id'], task_b['id']]),
+            )
+            .scalar()
+        ) or 0
+    assert archived_after_replay == archived_before_replay
+
+
+def test_agent_service_archive_all_notes_replay_with_same_command_id_is_idempotent(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+    from shared.models import SessionLocal, StoredEvent
+    from features.notes.domain import EVENT_ARCHIVED as NOTE_EVENT_ARCHIVED
+    from sqlalchemy import func
+
+    service = AgentTaskService()
+    note_a = service.create_note(
+        title='Archive replay note A',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    note_b = service.create_note(
+        title='Archive replay note B',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    command_id = 'archive-notes-replay-001'
+    first = service.archive_all_notes(
+        workspace_id=ws_id,
+        project_id=project_id,
+        q='Archive replay note',
+        command_id=command_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert first['updated'] >= 2
+
+    with SessionLocal() as db:
+        archived_before_replay = (
+            db.query(func.count(StoredEvent.id))
+            .filter(
+                StoredEvent.aggregate_type == 'Note',
+                StoredEvent.event_type == NOTE_EVENT_ARCHIVED,
+                StoredEvent.aggregate_id.in_([note_a['id'], note_b['id']]),
+            )
+            .scalar()
+        ) or 0
+
+    second = service.archive_all_notes(
+        workspace_id=ws_id,
+        project_id=project_id,
+        q='Archive replay note',
+        command_id=command_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert second['updated'] >= 2
+
+    with SessionLocal() as db:
+        archived_after_replay = (
+            db.query(func.count(StoredEvent.id))
+            .filter(
+                StoredEvent.aggregate_type == 'Note',
+                StoredEvent.event_type == NOTE_EVENT_ARCHIVED,
+                StoredEvent.aggregate_id.in_([note_a['id'], note_b['id']]),
+            )
+            .scalar()
+        ) or 0
+    assert archived_after_replay == archived_before_replay
+
+
+def test_agent_service_note_archive_and_archive_all_do_not_collide_on_command_name(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+    from shared.core import load_note_command_state
+    from shared.models import CommandExecution, SessionLocal
+
+    service = AgentTaskService()
+    note_single = service.create_note(
+        title='Archive collision single',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    note_batch = service.create_note(
+        title='Archive collision batch',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+
+    single_command_id = 'note-archive-single-001'
+    archive_single = service.archive_note(
+        note_id=note_single['id'],
+        command_id=single_command_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert archive_single.get('ok') is True
+
+    batch_command_id = 'note-archive-batch-001'
+    archive_batch = service.archive_all_notes(
+        workspace_id=ws_id,
+        project_id=project_id,
+        q='Archive collision batch',
+        command_id=batch_command_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert archive_batch['updated'] >= 1
+
+    with SessionLocal() as db:
+        single_state = load_note_command_state(db, note_single['id'])
+        batch_state = load_note_command_state(db, note_batch['id'])
+        batch_execution = (
+            db.query(CommandExecution)
+            .filter(CommandExecution.command_id == batch_command_id)
+            .one_or_none()
+        )
+    assert single_state is not None and bool(single_state.archived) is True
+    assert batch_state is not None and bool(batch_state.archived) is True
+    assert batch_execution is not None
+    assert batch_execution.command_name == 'Note.Bulk.Archive'
+
+
+def test_agent_service_bulk_action_deduplicates_task_ids(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    created = service.create_task(
+        title='Bulk dedupe target',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    result = service.bulk_task_action(
+        task_ids=[created['id'], created['id'], created['id']],
+        action='complete',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert result['updated'] == 1
+
+    refreshed = service.get_task(task_id=created['id'], auth_token=svc_module.MCP_AUTH_TOKEN or None)
+    assert str(refreshed.get('status') or '').strip().lower() in {'done', 'completed'}
+
+
+def test_agent_service_bulk_set_status_noop_is_not_counted_as_update(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    created = service.create_task(
+        title='Bulk set_status noop target',
+        workspace_id=ws_id,
+        project_id=project_id,
+        status='In Progress',
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    result = service.bulk_task_action(
+        task_ids=[created['id']],
+        action='set_status',
+        payload={'status': 'In Progress'},
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert result['updated'] == 0
+
+
+def test_agent_service_bulk_action_is_case_insensitive_for_action_key(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+    from shared.models import CommandExecution, SessionLocal
+
+    service = AgentTaskService()
+    created = service.create_task(
+        title='Bulk action uppercase key',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    command_id = 'bulk-action-case-insensitive-001'
+    result = service.bulk_task_action(
+        task_ids=[created['id']],
+        action='Complete',
+        command_id=command_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert result['updated'] == 1
+
+    with SessionLocal() as db:
+        command_row = (
+            db.query(CommandExecution)
+            .filter(CommandExecution.command_id == command_id)
+            .one_or_none()
+        )
+    assert command_row is not None
+    assert command_row.command_name == 'Task.Bulk.complete'
+
+
+def test_api_tasks_bulk_action_is_case_insensitive_for_action_key(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    created = client.post(
+        '/api/tasks',
+        json={
+            'title': 'API bulk uppercase action',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+        },
+    )
+    assert created.status_code == 200
+    task_id = created.json()['id']
+
+    bulk = client.post(
+        '/api/tasks/bulk',
+        json={
+            'task_ids': [task_id],
+            'action': 'Complete',
+            'payload': {},
+        },
+        headers={'X-Command-Id': 'api-bulk-case-insensitive-001'},
+    )
+    assert bulk.status_code == 200
+    assert bulk.json()['updated'] == 1
+
+    refreshed = client.get(f'/api/tasks/{task_id}')
+    assert refreshed.status_code == 200
+    assert str(refreshed.json().get('status') or '').strip().lower() in {'done', 'completed'}
+
+
 def test_agent_service_create_task_accepts_status_on_create(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -10072,6 +10531,40 @@ def test_agent_service_set_my_theme_does_not_replay_stale_llm_command_id(tmp_pat
     assert refreshed['theme'] == 'dark'
 
 
+def test_agent_service_rejects_reusing_command_id_for_different_command_intent(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+    project_id = bootstrap['projects'][0]['id']
+
+    from fastapi import HTTPException
+    from features.agents.service import AgentTaskService
+    import features.agents.service as svc_module
+
+    service = AgentTaskService()
+    command_id = 'shared-command-intent-conflict-001'
+    created = service.create_note(
+        title='Command intent conflict note',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+        command_id=command_id,
+    )
+    try:
+        service.archive_note(
+            note_id=created['id'],
+            auth_token=svc_module.MCP_AUTH_TOKEN or None,
+            command_id=command_id,
+        )
+        assert False, 'Expected HTTPException'
+    except HTTPException as exc:
+        assert exc.status_code == 409
+        assert 'command_id already used for different command intent' in str(exc.detail)
+
+    refreshed = service.get_note(note_id=created['id'], auth_token=svc_module.MCP_AUTH_TOKEN or None)
+    assert bool(refreshed.get('archived')) is False
+
+
 def test_agent_service_send_in_app_notification_creates_notification(tmp_path):
     client = build_client(tmp_path)
     bootstrap = client.get('/api/bootstrap').json()
@@ -10207,7 +10700,34 @@ def test_agent_service_task_note_group_lifecycle_and_filters(tmp_path):
         project_id=project_id,
         auth_token=svc_module.MCP_AUTH_TOKEN or None,
     )['items']
-    assert [item['id'] for item in task_groups[:2]] == [second_task_group['id'], task_group['id']]
+    task_group_order = [item['id'] for item in task_groups]
+    assert second_task_group['id'] in task_group_order
+    assert task_group['id'] in task_group_order
+    assert task_group_order.index(second_task_group['id']) < task_group_order.index(task_group['id'])
+
+    second_note_group = service.create_note_group(
+        name='MCP Note Group B',
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    reordered_notes = service.reorder_note_groups(
+        ordered_ids=[second_note_group['id'], note_group['id']],
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )
+    assert reordered_notes['ok'] is True
+
+    note_groups = service.list_note_groups(
+        workspace_id=ws_id,
+        project_id=project_id,
+        auth_token=svc_module.MCP_AUTH_TOKEN or None,
+    )['items']
+    note_group_order = [item['id'] for item in note_groups]
+    assert second_note_group['id'] in note_group_order
+    assert note_group['id'] in note_group_order
+    assert note_group_order.index(second_note_group['id']) < note_group_order.index(note_group['id'])
 
     deleted = service.delete_task_group(group_id=task_group['id'], auth_token=svc_module.MCP_AUTH_TOKEN or None)
     assert deleted['ok'] is True
@@ -22807,6 +23327,66 @@ def test_create_task_group_returns_aggregate_fallback_when_view_unavailable(tmp_
     assert payload['name'] == 'Fallback Task Group'
     assert payload['workspace_id'] == ws_id
     assert payload['project_id'] == project_id
+
+
+def test_create_task_reorders_task_groups_via_eventsourcing(tmp_path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    ws_id = bootstrap['workspaces'][0]['id']
+
+    project = client.post(
+        '/api/projects',
+        json={'workspace_id': ws_id, 'name': 'Task Group Reorder ES'},
+    )
+    assert project.status_code == 200
+    project_id = project.json()['id']
+
+    group_a = client.post(
+        '/api/task-groups',
+        json={'workspace_id': ws_id, 'project_id': project_id, 'name': 'Group A'},
+    )
+    group_b = client.post(
+        '/api/task-groups',
+        json={'workspace_id': ws_id, 'project_id': project_id, 'name': 'Group B'},
+    )
+    assert group_a.status_code == 200
+    assert group_b.status_code == 200
+    group_b_id = group_b.json()['id']
+
+    created_task = client.post(
+        '/api/tasks',
+        json={
+            'title': 'Task in group B',
+            'workspace_id': ws_id,
+            'project_id': project_id,
+            'task_group_id': group_b_id,
+        },
+    )
+    assert created_task.status_code == 200
+
+    from shared.models import SessionLocal, StoredEvent
+    from features.task_groups.domain import EVENT_REORDERED as TASK_GROUP_EVENT_REORDERED
+    import json
+
+    with SessionLocal() as db:
+        rows = (
+            db.query(StoredEvent)
+            .filter(
+                StoredEvent.aggregate_type == 'TaskGroup',
+                StoredEvent.aggregate_id == group_b_id,
+                StoredEvent.event_type == TASK_GROUP_EVENT_REORDERED,
+            )
+            .order_by(StoredEvent.id.asc())
+            .all()
+        )
+    assert rows, 'Expected TaskGroupReordered event for the target group'
+    payloads = [json.loads(str(row.payload or '{}')) for row in rows]
+    assert any(int(payload.get('order_index') or 0) == 1 for payload in payloads)
+
+    list_groups = client.get(f'/api/task-groups?workspace_id={ws_id}&project_id={project_id}')
+    assert list_groups.status_code == 200
+    items = list_groups.json()['items']
+    assert items and items[0]['id'] == group_b_id
 
 
 def test_create_note_group_returns_aggregate_fallback_when_view_unavailable(tmp_path, monkeypatch):

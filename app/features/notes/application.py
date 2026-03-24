@@ -7,6 +7,7 @@ from shared.core import NoteCreate, NotePatch, User
 
 from .command_handlers import (
     ArchiveNoteHandler,
+    ArchiveNotesBatchHandler,
     CommandContext,
     CreateNoteHandler,
     DeleteNoteHandler,
@@ -51,6 +52,15 @@ class NoteApplicationService:
             handler=ArchiveNoteHandler(self.ctx, note_id),
         )
 
+    def archive_notes(self, note_ids: list[str]) -> dict:
+        return execute_command(
+            self.db,
+            command_name="Note.Bulk.Archive",
+            user_id=self.user.id,
+            command_id=self.command_id,
+            handler=ArchiveNotesBatchHandler(self.ctx, note_ids),
+        )
+
     def restore_note(self, note_id: str) -> dict:
         return execute_command(
             self.db,
@@ -86,4 +96,3 @@ class NoteApplicationService:
             command_id=self.command_id,
             handler=DeleteNoteHandler(self.ctx, note_id),
         )
-

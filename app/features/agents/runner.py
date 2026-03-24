@@ -53,26 +53,27 @@ from plugins.team_mode.semantics import (
 from .executor import AutomationOutcome, build_automation_usage_metadata, execute_task_automation_stream
 from .service import AgentTaskService
 from .gates import run_runtime_deploy_health_check
-from features.notes.domain import EVENT_CREATED as NOTE_EVENT_CREATED
-from features.projects.domain import EVENT_UPDATED as PROJECT_EVENT_UPDATED
+from features.notes.application import NoteApplicationService
+from features.projects.application import ProjectApplicationService
 from features.tasks.domain import (
-    EVENT_UPDATED as TASK_EVENT_UPDATED,
-    EVENT_COMPLETED as TASK_EVENT_COMPLETED,
     EVENT_AUTOMATION_REQUESTED,
-    EVENT_COMMENT_ADDED,
-    EVENT_SCHEDULE_COMPLETED,
-    EVENT_SCHEDULE_FAILED,
-    EVENT_SCHEDULE_QUEUED,
-    EVENT_SCHEDULE_STARTED,
 )
 from features.tasks.command_handlers import (
+    AddTaskCommentInternalHandler,
     CommandContext as TaskCommandContext,
+    CompleteTaskInternalHandler,
     MarkAutomationCompletedHandler,
     MarkAutomationFailedHandler,
     MarkAutomationStartedHandler,
+    MarkScheduleCompletedInternalHandler,
+    MarkScheduleFailedInternalHandler,
+    MarkScheduleQueuedInternalHandler,
+    MarkScheduleStartedInternalHandler,
+    PatchTaskInternalFieldsHandler,
     RequestAutomationRunInternalHandler,
 )
 from shared.contracts import ConcurrencyConflictError
+from shared.command_ids import derive_scoped_command_id
 from shared.eventing import append_event, rebuild_state
 from shared.models import Note, Project, ProjectMember, ProjectPluginConfig, ProjectRule, SessionLocal, Task, User as UserModel, WorkspaceMember
 from shared.serializers import to_iso_utc
@@ -102,7 +103,7 @@ from shared.settings import (
     MCP_AUTH_TOKEN,
     logger,
 )
-from shared.core import TaskAutomationRun, TaskCreate
+from shared.core import NoteCreate, ProjectPatch, TaskAutomationRun, TaskCreate
 from shared.task_automation import (
     STATUS_MATCH_ALL,
     STATUS_SCOPE_EXTERNAL,
@@ -203,6 +204,10 @@ _PATCH_MARKER_LINES = {
     "*** End Patch",
     "*** End of File",
 }
+
+
+def _derive_runner_command_id(base: str, *parts: object) -> str:
+    return derive_scoped_command_id(base, *parts, max_length=64)
 
 
 def _probe_runtime_health_with_retry(
@@ -711,6 +716,71 @@ def _resolve_actor_user_model(*, db, actor_user_id: str | None) -> UserModel:
     return fallback
 
 
+def _user_has_project_mutation_access(*, db, user_id: str, workspace_id: str, project_id: str | None) -> bool:
+    normalized_user_id = str(user_id or "").strip()
+    normalized_workspace_id = str(workspace_id or "").strip()
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_user_id or not normalized_workspace_id:
+        return False
+    membership = db.execute(
+        select(WorkspaceMember.role).where(
+            WorkspaceMember.workspace_id == normalized_workspace_id,
+            WorkspaceMember.user_id == normalized_user_id,
+        )
+    ).scalar_one_or_none()
+    if str(membership or "") not in {"Owner", "Admin", "Member"}:
+        return False
+    if str(membership or "") in {"Owner", "Admin"}:
+        return True
+    if not normalized_project_id:
+        return False
+    assigned = db.execute(
+        select(ProjectMember.id).where(
+            ProjectMember.workspace_id == normalized_workspace_id,
+            ProjectMember.project_id == normalized_project_id,
+            ProjectMember.user_id == normalized_user_id,
+        )
+    ).scalar_one_or_none()
+    return assigned is not None
+
+
+def _resolve_project_mutation_user(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    preferred_user_id: str | None,
+) -> UserModel:
+    candidates: list[str] = []
+    for raw_user_id in (preferred_user_id, AGENT_SYSTEM_USER_ID, DEFAULT_USER_ID):
+        normalized_user_id = str(raw_user_id or "").strip()
+        if not normalized_user_id or normalized_user_id in candidates:
+            continue
+        candidates.append(normalized_user_id)
+    for candidate_user_id in candidates:
+        candidate_user = db.get(UserModel, candidate_user_id)
+        if candidate_user is None or not bool(getattr(candidate_user, "is_active", False)):
+            continue
+        if _user_has_project_mutation_access(
+            db=db,
+            user_id=candidate_user_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+        ):
+            return candidate_user
+    owner_or_admin_user_id = db.execute(
+        select(WorkspaceMember.user_id).where(
+            WorkspaceMember.workspace_id == str(workspace_id or "").strip(),
+            WorkspaceMember.role.in_(["Owner", "Admin"]),
+        )
+    ).scalar_one_or_none()
+    if owner_or_admin_user_id:
+        candidate_user = db.get(UserModel, str(owner_or_admin_user_id))
+        if candidate_user is not None and bool(getattr(candidate_user, "is_active", False)):
+            return candidate_user
+    return _resolve_actor_user_model(db=db, actor_user_id=preferred_user_id)
+
+
 def _emit_task_automation_completed_via_handler(
     *,
     db,
@@ -830,6 +900,133 @@ def _emit_task_automation_started_via_handler(
         progress_text=progress_text,
         additional_changes=dict(additional_changes or {}),
         expected_version=expected_version,
+        commit=False,
+    )
+    handler()
+
+
+def _emit_task_patch_via_handler(
+    *,
+    db,
+    actor_user_id: str,
+    task_id: str,
+    changes: dict[str, object],
+    expected_version: int | None = None,
+) -> None:
+    actor_user = _resolve_actor_user_model(db=db, actor_user_id=actor_user_id)
+    handler = PatchTaskInternalFieldsHandler(
+        TaskCommandContext(db=db, user=actor_user),
+        task_id=task_id,
+        changes=dict(changes or {}),
+        expected_version=expected_version,
+        commit=False,
+    )
+    handler()
+
+
+def _emit_task_completed_via_handler(
+    *,
+    db,
+    actor_user_id: str,
+    task_id: str,
+    completed_at: str,
+    status: str | None = None,
+) -> None:
+    actor_user = _resolve_actor_user_model(db=db, actor_user_id=actor_user_id)
+    handler = CompleteTaskInternalHandler(
+        TaskCommandContext(db=db, user=actor_user),
+        task_id=task_id,
+        completed_at=completed_at,
+        status=status,
+        commit=False,
+    )
+    handler()
+
+
+def _emit_task_comment_added_via_handler(
+    *,
+    db,
+    actor_user_id: str,
+    task_id: str,
+    comment_user_id: str,
+    body: str,
+) -> None:
+    actor_user = _resolve_actor_user_model(db=db, actor_user_id=actor_user_id)
+    handler = AddTaskCommentInternalHandler(
+        TaskCommandContext(db=db, user=actor_user),
+        task_id=task_id,
+        comment_user_id=comment_user_id,
+        body=body,
+        commit=False,
+    )
+    handler()
+
+
+def _emit_task_schedule_queued_via_handler(
+    *,
+    db,
+    actor_user_id: str,
+    task_id: str,
+    queued_at: str | None = None,
+) -> None:
+    actor_user = _resolve_actor_user_model(db=db, actor_user_id=actor_user_id)
+    handler = MarkScheduleQueuedInternalHandler(
+        TaskCommandContext(db=db, user=actor_user),
+        task_id=task_id,
+        queued_at=queued_at,
+        commit=False,
+    )
+    handler()
+
+
+def _emit_task_schedule_started_via_handler(
+    *,
+    db,
+    actor_user_id: str,
+    task_id: str,
+    started_at: str | None = None,
+) -> None:
+    actor_user = _resolve_actor_user_model(db=db, actor_user_id=actor_user_id)
+    handler = MarkScheduleStartedInternalHandler(
+        TaskCommandContext(db=db, user=actor_user),
+        task_id=task_id,
+        started_at=started_at,
+        commit=False,
+    )
+    handler()
+
+
+def _emit_task_schedule_completed_via_handler(
+    *,
+    db,
+    actor_user_id: str,
+    task_id: str,
+    completed_at: str | None = None,
+) -> None:
+    actor_user = _resolve_actor_user_model(db=db, actor_user_id=actor_user_id)
+    handler = MarkScheduleCompletedInternalHandler(
+        TaskCommandContext(db=db, user=actor_user),
+        task_id=task_id,
+        completed_at=completed_at,
+        commit=False,
+    )
+    handler()
+
+
+def _emit_task_schedule_failed_via_handler(
+    *,
+    db,
+    actor_user_id: str,
+    task_id: str,
+    failed_at: str | None = None,
+    error: str | None = None,
+) -> None:
+    actor_user = _resolve_actor_user_model(db=db, actor_user_id=actor_user_id)
+    handler = MarkScheduleFailedInternalHandler(
+        TaskCommandContext(db=db, user=actor_user),
+        task_id=task_id,
+        failed_at=failed_at,
+        error=error,
         commit=False,
     )
     handler()
@@ -1368,7 +1565,12 @@ def _queue_team_mode_dispatches(
         actor = db.get(UserModel, actor_user_id)
         if actor is None or not bool(getattr(actor, "is_active", False)):
             continue
-        command_id = f"tm-kickoff-dev-{normalized_project_id[:8]}-{task_id[:8]}-{int(now_utc.timestamp())}"
+        command_id = _derive_runner_command_id(
+            "tm-kickoff-dev",
+            normalized_project_id[:8],
+            task_id[:8],
+            int(now_utc.timestamp()),
+        )
         try:
             TaskApplicationService(db, actor, command_id=command_id).request_automation_run(
                 task_id,
@@ -1381,12 +1583,11 @@ def _queue_team_mode_dispatches(
             )
         except Exception:
             continue
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=task_id,
-            event_type=TASK_EVENT_UPDATED,
-            payload={
+        _emit_task_patch_via_handler(
+            db=db,
+            actor_user_id=AGENT_SYSTEM_USER_ID,
+            task_id=task_id,
+            changes={
                 "last_dispatch_decision": {
                     "source": source,
                     "mode": str(plan.get("mode") or "").strip() or None,
@@ -1405,12 +1606,6 @@ def _queue_team_mode_dispatches(
                     "available_slots": int((plan.get("counts") or {}).get("available_slots") or 0),
                     "source_task_id": normalized_source_task_id or None,
                 },
-            },
-            metadata={
-                "actor_id": AGENT_SYSTEM_USER_ID,
-                "workspace_id": workspace_id,
-                "project_id": normalized_project_id,
-                "task_id": task_id,
             },
         )
         queued += 1
@@ -1491,18 +1686,11 @@ def _rearm_blocked_team_mode_lead_tasks(
         )
         if not transitioned:
             continue
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=task_id,
-            event_type=TASK_EVENT_UPDATED,
-            payload={"last_agent_error": None},
-            metadata={
-                "actor_id": actor_user_id,
-                "workspace_id": workspace_id,
-                "project_id": normalized_project_id,
-                "task_id": task_id,
-            },
+        _emit_task_patch_via_handler(
+            db=db,
+            actor_user_id=actor_user_id,
+            task_id=task_id,
+            changes={"last_agent_error": None},
         )
         rearmed += 1
     return rearmed
@@ -1961,22 +2149,15 @@ def _acquire_project_deploy_lock(
         }
     lock_id = f"deploy-lock:{uuid.uuid4()}"
     deploy_cycle_id = f"deploy-cycle:{task_id[:8]}:{uuid.uuid4().hex[:10]}"
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={
+    _emit_task_patch_via_handler(
+        db=db,
+        actor_user_id=actor_user_id,
+        task_id=task_id,
+        changes={
             "deploy_lock_id": lock_id,
             "deploy_lock_acquired_at": acquired_at_iso,
             "deploy_lock_released_at": None,
             "last_deploy_cycle_id": deploy_cycle_id,
-        },
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": str(project_id or "").strip() or None,
-            "task_id": task_id,
         },
     )
     return {
@@ -2000,20 +2181,13 @@ def _release_project_deploy_lock(
     normalized_lock_id = str(lock_id or "").strip()
     if not normalized_lock_id:
         return
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={
+    _emit_task_patch_via_handler(
+        db=db,
+        actor_user_id=actor_user_id,
+        task_id=task_id,
+        changes={
             "deploy_lock_id": normalized_lock_id,
             "deploy_lock_released_at": released_at_iso,
-        },
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": str(project_id or "").strip() or None,
-            "task_id": task_id,
         },
     )
 
@@ -2101,22 +2275,15 @@ def _merge_current_task_branch_to_main(
 
     merged_at = to_iso_utc(datetime.now(timezone.utc))
     merged_refs = _append_merge_to_main_ref(refs=refs, merge_sha=out_main_sha)
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={
+    _emit_task_patch_via_handler(
+        db=db,
+        actor_user_id=actor_user_id,
+        task_id=task_id,
+        changes={
             "external_refs": merged_refs,
             "last_merged_at": merged_at,
             "last_merged_commit_sha": out_main_sha,
             **_team_mode_progress_payload(phase="deploy_ready"),
-        },
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": project_id,
-            "task_id": task_id,
         },
     )
     return {
@@ -2978,18 +3145,11 @@ def _append_task_status_transition_if_allowed(
             )
         ),
     }
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload=payload,
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": project_id,
-            "task_id": task_id,
-        },
+    _emit_task_patch_via_handler(
+        db=db,
+        actor_user_id=actor_user_id,
+        task_id=task_id,
+        changes=payload,
     )
     return True
 
@@ -3570,20 +3730,13 @@ def _ensure_team_mode_lead_assignment(
     )
     if not str(lead_agent_code or "").strip():
         return
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={
+    _emit_task_patch_via_handler(
+        db=db,
+        actor_user_id=actor_user_id,
+        task_id=task_id,
+        changes={
             "assignee_id": lead_assignee_id or current_assignee_id or None,
             "assigned_agent_code": lead_agent_code,
-        },
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": normalized_project_id,
-            "task_id": task_id,
         },
     )
 
@@ -3648,12 +3801,11 @@ def _requeue_developer_main_reconciliation(
         "5) Commit the reconciliation on the task branch and leave the task merge-ready.\n"
         "Do not commit directly to `main`."
     )
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={
+    _emit_task_patch_via_handler(
+        db=db,
+        actor_user_id=actor_user_id,
+        task_id=task_id,
+        changes={
             "assignee_id": developer_assignee_id,
             "assigned_agent_code": developer_agent_code or None,
             "status": REQUIRED_SEMANTIC_STATUSES["active"],
@@ -3665,14 +3817,12 @@ def _requeue_developer_main_reconciliation(
                 blocked_at=failed_at_iso,
             ),
         },
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": normalized_project_id,
-            "task_id": task_id,
-        },
     )
-    TaskApplicationService(db, actor, command_id=f"tm-dev-sync-{task_id[:8]}").request_automation_run(
+    TaskApplicationService(
+        db,
+        actor,
+        command_id=_derive_runner_command_id("tm-dev-sync", task_id[:8]),
+    ).request_automation_run(
         task_id,
         TaskAutomationRun(
             instruction=instruction,
@@ -3731,12 +3881,11 @@ def _requeue_developer_committed_handoff(
         "5) Record commit + task branch evidence and leave the task merge-ready.\n"
         "Do not commit directly to `main`."
     )
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={
+    _emit_task_patch_via_handler(
+        db=db,
+        actor_user_id=actor_user_id,
+        task_id=task_id,
+        changes={
             "assignee_id": developer_assignee_id,
             "assigned_agent_code": developer_agent_code or None,
             "status": REQUIRED_SEMANTIC_STATUSES["active"],
@@ -3748,14 +3897,12 @@ def _requeue_developer_committed_handoff(
                 blocked_at=failed_at_iso,
             ),
         },
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": normalized_project_id,
-            "task_id": task_id,
-        },
     )
-    TaskApplicationService(db, actor, command_id=f"tm-dev-handoff-{task_id[:8]}").request_automation_run(
+    TaskApplicationService(
+        db,
+        actor,
+        command_id=_derive_runner_command_id("tm-dev-handoff", task_id[:8]),
+    ).request_automation_run(
         task_id,
         TaskAutomationRun(
             instruction=instruction,
@@ -3797,12 +3944,11 @@ def _requeue_developer_after_deploy_lock(
         )
     ) != "Developer":
         return False
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={
+    _emit_task_patch_via_handler(
+        db=db,
+        actor_user_id=actor_user_id,
+        task_id=task_id,
+        changes={
             "assignee_id": developer_assignee_id,
             "assigned_agent_code": developer_agent_code or None,
             "status": REQUIRED_SEMANTIC_STATUSES["active"],
@@ -3812,12 +3958,6 @@ def _requeue_developer_after_deploy_lock(
                 blocked_reason=str(failure_reason or "").strip() or None,
                 blocked_at=failed_at_iso,
             ),
-        },
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": normalized_project_id,
-            "task_id": task_id,
         },
     )
     return True
@@ -4043,18 +4183,11 @@ def _queue_qa_handoff_requests(
         if same_task:
             update_payload["assignee_id"] = qa_assignee_id
             update_payload["assigned_agent_code"] = qa_agent_code
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=qa_task_id,
-            event_type=TASK_EVENT_UPDATED,
-            payload=update_payload,
-            metadata={
-                "actor_id": actor_user_id,
-                "workspace_id": workspace_id,
-                "project_id": normalized_project_id,
-                "task_id": qa_task_id,
-            },
+        _emit_task_patch_via_handler(
+            db=db,
+            actor_user_id=actor_user_id,
+            task_id=qa_task_id,
+            changes=update_payload,
         )
         _emit_task_automation_requested_via_handler(
             db=db,
@@ -4259,22 +4392,15 @@ def _merge_ready_developer_branches_to_main(
             code_main_sha, out_main_sha, _err_main_sha = _run_git_command_with_error(cwd=repo_root, args=["rev-parse", "main"])
             if code_main_sha == 0 and out_main_sha:
                 merged_refs = _append_merge_to_main_ref(refs=refs, merge_sha=out_main_sha)
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=task_id_text,
-                    event_type=TASK_EVENT_UPDATED,
-                    payload={
+                _emit_task_patch_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=task_id_text,
+                    changes={
                         "external_refs": merged_refs,
                         "last_merged_at": merged_at,
                         "last_merged_commit_sha": out_main_sha,
                         **_team_mode_progress_payload(phase="deploy_ready"),
-                    },
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": task_id_text,
                     },
                 )
                 merged_task_ids.append(task_id_text)
@@ -4292,22 +4418,15 @@ def _merge_ready_developer_branches_to_main(
         if code_main_sha != 0 or not out_main_sha:
             return {"ok": False, "error": f"Runner error: merged branch {branch} but could not resolve main HEAD: {err_main_sha[:220]}"}
         merged_refs = _append_merge_to_main_ref(refs=refs, merge_sha=out_main_sha)
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=task_id_text,
-            event_type=TASK_EVENT_UPDATED,
-            payload={
+        _emit_task_patch_via_handler(
+            db=db,
+            actor_user_id=actor_user_id,
+            task_id=task_id_text,
+            changes={
                 "external_refs": merged_refs,
                 "last_merged_at": merged_at,
                 "last_merged_commit_sha": out_main_sha,
                 **_team_mode_progress_payload(phase="deploy_ready"),
-            },
-            metadata={
-                "actor_id": actor_user_id,
-                "workspace_id": workspace_id,
-                "project_id": project_id,
-                "task_id": task_id_text,
             },
         )
         merged_task_ids.append(task_id_text)
@@ -4582,20 +4701,13 @@ def _handoff_failed_task_to_human(
     if not target_human_id or target_human_id == current_assignee_id:
         return None
 
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={
+    _emit_task_patch_via_handler(
+        db=db,
+        actor_user_id=actor_user_id,
+        task_id=task_id,
+        changes={
             "assignee_id": target_human_id,
             "assigned_agent_code": current_assigned_agent_code or None,
-        },
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": normalized_project_id,
-            "task_id": task_id,
         },
     )
 
@@ -4656,12 +4768,11 @@ def _handoff_failed_team_mode_task_to_lead(
     )
     if not str(lead_agent_code or "").strip():
         return None
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={
+    _emit_task_patch_via_handler(
+        db=db,
+        actor_user_id=actor_user_id,
+        task_id=task_id,
+        changes={
             "assignee_id": lead_assignee_id,
             "assigned_agent_code": lead_agent_code,
             "status": REQUIRED_SEMANTIC_STATUSES["blocked"],
@@ -4674,12 +4785,6 @@ def _handoff_failed_team_mode_task_to_lead(
                 blocked_reason=str(failure_reason or "").strip() or None,
                 blocked_at=failed_at_iso,
             ),
-        },
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": normalized_project_id,
-            "task_id": task_id,
         },
     )
     return str(lead_agent_code or "").strip() or None
@@ -4800,26 +4905,23 @@ def _handoff_failed_team_mode_lead_task_to_developer(
         "6) Commit the remediation on the task branch and leave the same task ready for another Lead deploy cycle.\n"
         f"Lead triage finding: {str(failure_reason or '').strip()[:500]}"
     )
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={
+    _emit_task_patch_via_handler(
+        db=db,
+        actor_user_id=actor_user_id,
+        task_id=task_id,
+        changes={
             "assignee_id": developer_assignee_id,
             "assigned_agent_code": developer_agent_code or None,
             "status": REQUIRED_SEMANTIC_STATUSES["active"],
             "instruction": instruction,
             **_team_mode_progress_payload(phase="implementation"),
         },
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": normalized_project_id,
-            "task_id": task_id,
-        },
     )
-    TaskApplicationService(db, actor, command_id=f"lead-dev-triage-{task_id[:8]}").request_automation_run(
+    TaskApplicationService(
+        db,
+        actor,
+        command_id=_derive_runner_command_id("lead-dev-triage", task_id[:8]),
+    ).request_automation_run(
         task_id,
         TaskAutomationRun(
             instruction=instruction,
@@ -5363,64 +5465,48 @@ def _finalize_project_completion(
         existing_refs=existing_project_refs,
         deployment_url=deployment_url,
     )
+    command_user = _resolve_project_mutation_user(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        preferred_user_id=actor_user_id,
+    )
+    completion_command_seed = f"{normalized_project_id}:{completion_digest}"
     if merged_project_refs != existing_project_refs:
-        append_event(
+        ProjectApplicationService(
             db,
-            aggregate_type="Project",
-            aggregate_id=normalized_project_id,
-            event_type=PROJECT_EVENT_UPDATED,
-            payload={
-                "external_refs": merged_project_refs,
-                "updated_fields": ["external_refs"],
-            },
-            metadata={
-                "actor_id": actor_user_id,
-                "workspace_id": workspace_id,
-                "project_id": normalized_project_id,
-            },
+            command_user,
+            command_id=_derive_runner_command_id("runner-completion-project-refs", completion_command_seed),
+        ).patch_project(
+            normalized_project_id,
+            ProjectPatch(external_refs=merged_project_refs),
         )
     for task_snapshot in task_snapshots:
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=str(task_snapshot.get("id") or "").strip(),
-            event_type=TASK_EVENT_UPDATED,
-            payload={"project_completion_finalized_at": finalized_at},
-            metadata={
-                "actor_id": actor_user_id,
-                "workspace_id": workspace_id,
-                "project_id": normalized_project_id,
-                "task_id": str(task_snapshot.get("id") or "").strip(),
-            },
+        _emit_task_patch_via_handler(
+            db=db,
+            actor_user_id=actor_user_id,
+            task_id=str(task_snapshot.get("id") or "").strip(),
+            changes={"project_completion_finalized_at": finalized_at},
         )
-    append_event(
+    NoteApplicationService(
         db,
-        aggregate_type="Note",
-        aggregate_id=note_id,
-        event_type=NOTE_EVENT_CREATED,
-        payload={
-            "workspace_id": workspace_id,
-            "project_id": normalized_project_id,
-            "note_group_id": None,
-            "task_id": None,
-            "specification_id": None,
-            "title": note_title,
-            "body": report_body,
-            "tags": ["completion-report", "team-mode"],
-            "external_refs": _merge_completion_external_ref(existing_refs=[], deployment_url=deployment_url),
-            "attachment_refs": [],
-            "pinned": False,
-            "archived": False,
-            "created_by": actor_user_id,
-            "updated_by": actor_user_id,
-            "created_at": finalized_at,
-        },
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": normalized_project_id,
-            "note_id": note_id,
-        },
+        command_user,
+        command_id=_derive_runner_command_id("runner-completion-note-create", completion_command_seed),
+    ).create_note(
+        NoteCreate(
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+            note_group_id=None,
+            task_id=None,
+            specification_id=None,
+            title=note_title,
+            body=report_body,
+            tags=["completion-report", "team-mode"],
+            external_refs=_merge_completion_external_ref(existing_refs=[], deployment_url=deployment_url),
+            attachment_refs=[],
+            pinned=False,
+            force_new=False,
+        )
     )
     human_ids = _resolve_notification_human_user_ids(
         db=db,
@@ -5564,12 +5650,11 @@ def _enqueue_team_lead_blocker_escalation(
             to_status=blocked_status or effective_blocked_status,
             triggered_at=requested_at,
         )
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=lead_task.id,
-            event_type=TASK_EVENT_UPDATED,
-            payload={
+        _emit_task_patch_via_handler(
+            db=db,
+            actor_user_id=str(lead_task.assignee_id or AGENT_SYSTEM_USER_ID),
+            task_id=str(lead_task.id),
+            changes={
                 "last_dispatch_decision": {
                     "source": "blocker_escalation",
                     "mode": "lead_dispatch",
@@ -5582,12 +5667,6 @@ def _enqueue_team_lead_blocker_escalation(
                     "blocked_task_id": blocked_task_id,
                     "blocked_status": blocked_status or effective_blocked_status,
                 },
-            },
-            metadata={
-                "actor_id": str(lead_task.assignee_id or AGENT_SYSTEM_USER_ID),
-                "workspace_id": workspace_id,
-                "project_id": normalized_project_id,
-                "task_id": lead_task.id,
             },
         )
         queued += 1
@@ -5664,21 +5743,14 @@ def _append_schedule_rearm_update(
     )
     if not next_due:
         return
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={
+    _emit_task_patch_via_handler(
+        db=db,
+        actor_user_id=actor_user_id,
+        task_id=task_id,
+        changes={
             "execution_triggers": updated_triggers,
             "scheduled_at_utc": next_due,
             "schedule_state": "idle",
-        },
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": project_id,
-            "task_id": task_id,
         },
     )
 
@@ -5696,18 +5768,11 @@ def _requeue_pending_status_change_request(
     pending_requests = _normalize_nonnegative_int(state.get("automation_pending_requests"))
     if pending_requests <= 0:
         return
-    append_event(
-        db,
-        aggregate_type="Task",
-        aggregate_id=run.task_id,
-        event_type=TASK_EVENT_UPDATED,
-        payload={"automation_pending_requests": pending_requests - 1},
-        metadata={
-            "actor_id": actor_user_id,
-            "workspace_id": workspace_id,
-            "project_id": project_id,
-            "task_id": run.task_id,
-        },
+    _emit_task_patch_via_handler(
+        db=db,
+        actor_user_id=actor_user_id,
+        task_id=run.task_id,
+        changes={"automation_pending_requests": pending_requests - 1},
     )
     instruction = run.instruction or str(state.get("instruction") or state.get("scheduled_instruction") or "").strip()
     if not instruction:
@@ -5806,30 +5871,22 @@ def _claim_queued_task(task_id: str, *, allow_fresh_kickoff: bool = False) -> Qu
                 expected_version=version,
             )
             if is_scheduled_run and schedule_state in {"queued", "idle"}:
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=task_id,
-                    event_type=EVENT_SCHEDULE_STARTED,
-                    payload={"started_at": now_iso},
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": task_id,
-                    },
+                _emit_task_schedule_started_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=task_id,
+                    started_at=now_iso,
                 )
             if _should_resume_team_mode_agent_task_as_active(
                 assignee_role=claim_assignee_role,
                 status=str(state.get("status") or ""),
             ):
                 resumed_status = REQUIRED_SEMANTIC_STATUSES["active"]
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=task_id,
-                    event_type=TASK_EVENT_UPDATED,
-                    payload={
+                _emit_task_patch_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=task_id,
+                    changes={
                         "status": resumed_status,
                         **_team_mode_progress_payload(
                             phase=_derive_team_mode_phase(
@@ -5837,12 +5894,6 @@ def _claim_queued_task(task_id: str, *, allow_fresh_kickoff: bool = False) -> Qu
                                 status=resumed_status,
                             )
                         ),
-                    },
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": task_id,
                     },
                 )
             db.commit()
@@ -6079,18 +6130,11 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                     commit_sha=after_head_sha,
                     task_branch=task_branch,
                 )
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=run.task_id,
-                    event_type=TASK_EVENT_UPDATED,
-                    payload={"external_refs": promoted_refs},
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": run.task_id,
-                    },
+                _emit_task_patch_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=run.task_id,
+                    changes={"external_refs": promoted_refs},
                 )
                 state = dict(state)
                 state["external_refs"] = promoted_refs
@@ -6129,18 +6173,11 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                         commit_sha=commit_candidate,
                         task_branch=branch_candidate,
                     )
-                    append_event(
-                        db,
-                        aggregate_type="Task",
-                        aggregate_id=run.task_id,
-                        event_type=TASK_EVENT_UPDATED,
-                        payload={"external_refs": promoted_refs},
-                        metadata={
-                            "actor_id": actor_user_id,
-                            "workspace_id": workspace_id,
-                            "project_id": project_id,
-                            "task_id": run.task_id,
-                        },
+                    _emit_task_patch_via_handler(
+                        db=db,
+                        actor_user_id=actor_user_id,
+                        task_id=run.task_id,
+                        changes={"external_refs": promoted_refs},
                     )
                     state = dict(state)
                     state["external_refs"] = promoted_refs
@@ -6210,18 +6247,11 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
             action = "complete"
 
         if _normalize_nonnegative_int(state.get("runner_recover_retry_count")) > 0:
-            append_event(
-                db,
-                aggregate_type="Task",
-                aggregate_id=run.task_id,
-                event_type=TASK_EVENT_UPDATED,
-                payload={"runner_recover_retry_count": 0},
-                metadata={
-                    "actor_id": actor_user_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": run.task_id,
-                },
+            _emit_task_patch_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=run.task_id,
+                changes={"runner_recover_retry_count": 0},
             )
 
         persist_comment = bool(comment)
@@ -6238,48 +6268,28 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
 
         if AGENT_RUNNER_APPLY_OUTCOME_MUTATIONS:
             if action == "complete" and semantic_status_key(status=state.get("status")) != "completed":
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=run.task_id,
-                    event_type=TASK_EVENT_COMPLETED,
-                    payload={"completed_at": completed_at},
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": run.task_id,
-                    },
+                _emit_task_completed_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=run.task_id,
+                    completed_at=completed_at,
                 )
             if persist_comment and comment:
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=run.task_id,
-                    event_type=EVENT_COMMENT_ADDED,
-                    payload={"task_id": run.task_id, "user_id": actor_user_id, "body": comment},
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": run.task_id,
-                    },
+                _emit_task_comment_added_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=run.task_id,
+                    comment_user_id=actor_user_id,
+                    body=comment,
                 )
             if progress_comment_fingerprint:
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=run.task_id,
-                    event_type=TASK_EVENT_UPDATED,
-                    payload={
+                _emit_task_patch_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=run.task_id,
+                    changes={
                         "last_progress_comment_fingerprint": progress_comment_fingerprint,
                         "last_progress_comment_at": completed_at,
-                    },
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": run.task_id,
                     },
                 )
 
@@ -6292,12 +6302,11 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
             comment=comment,
             usage_metadata=usage_metadata,
         )
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=run.task_id,
-            event_type=TASK_EVENT_UPDATED,
-            payload={
+        _emit_task_patch_via_handler(
+            db=db,
+            actor_user_id=actor_user_id,
+            task_id=run.task_id,
+            changes={
                 "last_agent_stream_status": "Automation run completed.",
                 "last_agent_stream_updated_at": completed_at,
                 **_team_mode_progress_payload(
@@ -6309,26 +6318,13 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 ),
                 **usage_metadata,
             },
-            metadata={
-                "actor_id": actor_user_id,
-                "workspace_id": workspace_id,
-                "project_id": project_id,
-                "task_id": run.task_id,
-            },
         )
         if run.is_scheduled_run:
-            append_event(
-                db,
-                aggregate_type="Task",
-                aggregate_id=run.task_id,
-                event_type=EVENT_SCHEDULE_COMPLETED,
-                payload={"completed_at": completed_at, "summary": summary},
-                metadata={
-                    "actor_id": actor_user_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": run.task_id,
-                },
+            _emit_task_schedule_completed_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=run.task_id,
+                completed_at=completed_at,
             )
             _append_schedule_rearm_update(
                 db=db,
@@ -6441,12 +6437,11 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                     workspace_id=workspace_id,
                     project_id=project_id,
                 ) or DEFAULT_USER_ID
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=run.task_id,
-                    event_type=TASK_EVENT_UPDATED,
-                    payload={
+                _emit_task_patch_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=run.task_id,
+                    changes={
                         "assignee_id": reviewer_user_id,
                         "assigned_agent_code": None,
                         "status": REQUIRED_SEMANTIC_STATUSES["in_review"],
@@ -6458,12 +6453,6 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                         "review_next_lead_assignee_id": lead_assignee_id,
                         "review_next_lead_assigned_agent_code": lead_agent_code,
                         **_team_mode_progress_payload(phase="in_review"),
-                    },
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": run.task_id,
                     },
                 )
                 state = dict(state)
@@ -6479,38 +6468,22 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 state["review_next_lead_assigned_agent_code"] = lead_agent_code
                 state["team_mode_phase"] = "in_review"
             elif bool(transition.get("terminal")):
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=run.task_id,
-                    event_type=TASK_EVENT_UPDATED,
-                    payload={
+                _emit_task_patch_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=run.task_id,
+                    changes={
                         "last_merged_at": str((merge_result or {}).get("merged_at") or "").strip() or completed_at,
                         "last_merged_commit_sha": str((merge_result or {}).get("merge_sha") or "").strip() or None,
                         **_team_mode_progress_payload(phase="completed"),
                     },
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": run.task_id,
-                    },
                 )
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=run.task_id,
-                    event_type=TASK_EVENT_COMPLETED,
-                    payload={
-                        "completed_at": completed_at,
-                        "status": str(transition.get("status") or completed_status),
-                    },
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": run.task_id,
-                    },
+                _emit_task_completed_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=run.task_id,
+                    completed_at=completed_at,
+                    status=str(transition.get("status") or completed_status),
                 )
                 state = dict(state)
                 state["status"] = str(transition.get("status") or completed_status)
@@ -6528,24 +6501,17 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                     allowed_roles={"Developer"},
                 )
             elif lead_agent_code:
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=run.task_id,
-                    event_type=TASK_EVENT_UPDATED,
-                    payload={
+                _emit_task_patch_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=run.task_id,
+                    changes={
                         "assignee_id": lead_assignee_id,
                         "assigned_agent_code": lead_agent_code,
                         "status": str(transition.get("status") or REQUIRED_SEMANTIC_STATUSES["awaiting_decision"]),
                         "last_merged_at": str((merge_result or {}).get("merged_at") or "").strip() or completed_at,
                         "last_merged_commit_sha": str((merge_result or {}).get("merge_sha") or "").strip() or None,
                         **_team_mode_progress_payload(phase=str(transition.get("phase") or "deploy_ready")),
-                    },
-                    metadata={
-                        "actor_id": actor_user_id,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": run.task_id,
                     },
                 )
                 state = dict(state)
@@ -6746,18 +6712,11 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                                 "deploy_lock_acquired_at": completed_at,
                             }
                         )
-                        append_event(
-                            db,
-                            aggregate_type="Task",
-                            aggregate_id=run.task_id,
-                            event_type=TASK_EVENT_UPDATED,
-                            payload={"last_deploy_execution": deploy_snapshot},
-                            metadata={
-                                "actor_id": actor_user_id,
-                                "workspace_id": workspace_id,
-                                "project_id": project_id,
-                                "task_id": run.task_id,
-                            },
+                        _emit_task_patch_via_handler(
+                            db=db,
+                            actor_user_id=actor_user_id,
+                            task_id=run.task_id,
+                            changes={"last_deploy_execution": deploy_snapshot},
                         )
                         state = dict(state)
                         state["last_deploy_execution"] = deploy_snapshot
@@ -6819,18 +6778,11 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                             "deploy_lock_acquired_at": completed_at,
                         }
                     )
-                    append_event(
-                        db,
-                        aggregate_type="Task",
-                        aggregate_id=run.task_id,
-                        event_type=TASK_EVENT_UPDATED,
-                        payload={"external_refs": deploy_refs, "last_deploy_execution": deploy_snapshot},
-                        metadata={
-                            "actor_id": actor_user_id,
-                            "workspace_id": workspace_id,
-                            "project_id": project_id,
-                            "task_id": run.task_id,
-                        },
+                    _emit_task_patch_via_handler(
+                        db=db,
+                        actor_user_id=actor_user_id,
+                        task_id=run.task_id,
+                        changes={"external_refs": deploy_refs, "last_deploy_execution": deploy_snapshot},
                     )
                     state = dict(state)
                     state["external_refs"] = deploy_refs
@@ -6884,12 +6836,11 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                     "Lead handoff failed: no runnable QA task was queued after merge/deploy cycle."
                 )
             lead_transition = lead_deploy_success_transition()
-            append_event(
-                db,
-                aggregate_type="Task",
-                aggregate_id=run.task_id,
-                event_type=TASK_EVENT_UPDATED,
-                payload={
+            _emit_task_patch_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=run.task_id,
+                changes={
                     **_team_mode_progress_payload(phase=str(lead_transition.get("phase") or "qa_validation")),
                     "last_deploy_execution": state.get("last_deploy_execution"),
                     "last_deploy_cycle_id": deploy_cycle_id,
@@ -6900,12 +6851,6 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                     "last_lead_handoff_at": lead_handoff_at,
                     "last_lead_handoff_refs_json": handoff_refs,
                     "last_lead_handoff_deploy_execution": state.get("last_deploy_execution"),
-                },
-                metadata={
-                    "actor_id": actor_user_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": run.task_id,
                 },
             )
             state = dict(state)
@@ -6953,36 +6898,20 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 project_id=project_id,
             )
             qa_transition = qa_success_transition(completed_status=completed_status)
-            append_event(
-                db,
-                aggregate_type="Task",
-                aggregate_id=run.task_id,
-                event_type=TASK_EVENT_UPDATED,
-                payload={
+            _emit_task_patch_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=run.task_id,
+                changes={
                     **_team_mode_progress_payload(phase=str(qa_transition.get("phase") or "completed")),
                 },
-                metadata={
-                    "actor_id": actor_user_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": run.task_id,
-                },
             )
-            append_event(
-                db,
-                    aggregate_type="Task",
-                    aggregate_id=run.task_id,
-                    event_type=TASK_EVENT_COMPLETED,
-                    payload={
-                        "completed_at": completed_at,
-                        "status": str(qa_transition.get("status") or completed_status),
-                    },
-                metadata={
-                    "actor_id": actor_user_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": run.task_id,
-                },
+            _emit_task_completed_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=run.task_id,
+                completed_at=completed_at,
+                status=str(qa_transition.get("status") or completed_status),
             )
             state = dict(state)
             state["status"] = str(qa_transition.get("status") or completed_status)
@@ -7150,12 +7079,11 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 completed_at=failed_at,
                 summary="Automation deferred by workflow gate.",
             )
-            append_event(
-                db,
-                aggregate_type="Task",
-                aggregate_id=run.task_id,
-                event_type=TASK_EVENT_UPDATED,
-                payload={
+            _emit_task_patch_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=run.task_id,
+                changes={
                     "last_agent_stream_status": "Automation deferred: waiting for workflow handoff.",
                     "last_agent_stream_updated_at": failed_at,
                     **_team_mode_progress_payload(
@@ -7167,12 +7095,6 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                         blocked_reason=str(error),
                         blocked_at=failed_at,
                     ),
-                },
-                metadata={
-                    "actor_id": actor_user_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": run.task_id,
                 },
             )
             db.commit()
@@ -7269,18 +7191,12 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             failure_gate = "lead_runtime_health_failed"
         schedule_state = str(state.get("schedule_state") or "").strip().lower()
         if run.is_scheduled_run or schedule_state in {"queued", "running"}:
-            append_event(
-                db,
-                aggregate_type="Task",
-                aggregate_id=run.task_id,
-                event_type=EVENT_SCHEDULE_FAILED,
-                payload={"failed_at": failed_at, "error": str(error)},
-                metadata={
-                    "actor_id": actor_user_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": run.task_id,
-                },
+            _emit_task_schedule_failed_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=run.task_id,
+                failed_at=failed_at,
+                error=str(error),
             )
             _append_schedule_rearm_update(
                 db=db,
@@ -7293,18 +7209,11 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             )
         retry_requeued = False
         if should_retry:
-            append_event(
-                db,
-                aggregate_type="Task",
-                aggregate_id=run.task_id,
-                event_type=TASK_EVENT_UPDATED,
-                payload={"runner_recover_retry_count": retry_count + 1},
-                metadata={
-                    "actor_id": actor_user_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": run.task_id,
-                },
+            _emit_task_patch_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=run.task_id,
+                changes={"runner_recover_retry_count": retry_count + 1},
             )
             retry_instruction = (
                 str(run.instruction or "").strip()
@@ -7326,12 +7235,11 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 )
                 retry_requeued = True
         if retry_exhausted:
-            append_event(
-                db,
-                aggregate_type="Task",
-                aggregate_id=run.task_id,
-                event_type=TASK_EVENT_UPDATED,
-                payload={
+            _emit_task_patch_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=run.task_id,
+                changes={
                     "status": REQUIRED_SEMANTIC_STATUSES["awaiting_decision"],
                     **_team_mode_progress_payload(
                         phase="blocked",
@@ -7339,12 +7247,6 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                         blocked_reason=str(error),
                         blocked_at=failed_at,
                     ),
-                },
-                metadata={
-                    "actor_id": actor_user_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": run.task_id,
                 },
             )
             state = dict(state)
@@ -7446,12 +7348,11 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 error=str(error),
                 summary="Automation runner failed.",
             )
-        append_event(
-            db,
-            aggregate_type="Task",
-            aggregate_id=run.task_id,
-            event_type=TASK_EVENT_UPDATED,
-            payload={
+        _emit_task_patch_via_handler(
+            db=db,
+            actor_user_id=actor_user_id,
+            task_id=run.task_id,
+            changes={
                 "last_agent_stream_status": (
                     "Automation retry queued after transient failure."
                     if retry_requeued
@@ -7478,12 +7379,6 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                     blocked_at=None if (lead_developer_triage_queued or retry_requeued) else failed_at,
                 ),
             },
-            metadata={
-                "actor_id": actor_user_id,
-                "workspace_id": workspace_id,
-                "project_id": project_id,
-                "task_id": run.task_id,
-            },
         )
         rerun_source: str | None = None
         if developer_main_reconciliation_queued:
@@ -7498,7 +7393,11 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
             if actor is not None and bool(getattr(actor, "is_active", False)):
                 from features.tasks.application import TaskApplicationService
 
-                TaskApplicationService(db, actor, command_id=f"retry-{rerun_source}-{run.task_id[:8]}").request_automation_run(
+                TaskApplicationService(
+                    db,
+                    actor,
+                    command_id=_derive_runner_command_id("retry", rerun_source, run.task_id[:8]),
+                ).request_automation_run(
                     run.task_id,
                     TaskAutomationRun(
                         instruction=str(state.get("instruction") or run.instruction or "").strip() or None,
@@ -7768,21 +7667,14 @@ def _execute_claimed_automation(run: QueuedAutomationRun) -> None:
                 state=state,
                 fallback_actor_user_id=run.actor_user_id,
             )
-            append_event(
-                db,
-                aggregate_type="Task",
-                aggregate_id=run.task_id,
-                event_type=TASK_EVENT_UPDATED,
-                payload={
+            _emit_task_patch_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=run.task_id,
+                changes={
                     "last_agent_progress": progress,
                     "last_agent_stream_status": status_text or None,
                     "last_agent_stream_updated_at": now_iso,
-                },
-                metadata={
-                    "actor_id": actor_user_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": run.task_id,
                 },
             )
             db.commit()
@@ -8160,7 +8052,12 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                 )
                 if not instruction:
                     continue
-                command_id = f"tm-orch-{project_id[:8]}-{task_id[:8]}-{int(now_utc.timestamp())}"
+                command_id = _derive_runner_command_id(
+                    "tm-orch",
+                    project_id[:8],
+                    task_id[:8],
+                    int(now_utc.timestamp()),
+                )
                 normalized_role = _resolve_assignee_project_role(
                     db=db,
                     workspace_id=workspace_id,
@@ -8198,12 +8095,11 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                     )
                 except Exception:
                     continue
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=task_id,
-                    event_type=TASK_EVENT_UPDATED,
-                    payload={
+                _emit_task_patch_via_handler(
+                    db=db,
+                    actor_user_id=AGENT_SYSTEM_USER_ID,
+                    task_id=task_id,
+                    changes={
                         "last_dispatch_decision": {
                             "source": "runner_orchestrator",
                             "mode": str(plan.get("mode") or "").strip() or None,
@@ -8214,12 +8110,6 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                             "available_slots": int((plan.get("counts") or {}).get("available_slots") or 0),
                             "source_task_id": str(inferred_source_task_id or "").strip() or None,
                         },
-                    },
-                    metadata={
-                        "actor_id": AGENT_SYSTEM_USER_ID,
-                        "workspace_id": workspace_id,
-                        "project_id": project_id,
-                        "task_id": task_id,
                     },
                 )
                 queued += 1
@@ -8334,7 +8224,12 @@ def closeout_team_mode_tasks_once(limit: int = 20) -> int:
                 actor = db.get(UserModel, actor_user_id)
                 if actor is None or not bool(getattr(actor, "is_active", False)):
                     continue
-                command_id = f"tm-close-{project_id[:8]}-{task_id[:8]}-{int(now_utc.timestamp())}"
+                command_id = _derive_runner_command_id(
+                    "tm-close",
+                    project_id[:8],
+                    task_id[:8],
+                    int(now_utc.timestamp()),
+                )
                 try:
                     AgentTaskService(
                         require_token=False,
@@ -8428,34 +8323,26 @@ def recover_stale_running_automation_once(limit: int = 20, stale_after_seconds_o
             request_source = str(state.get("last_requested_source") or "").strip().lower()
             schedule_state = str(state.get("schedule_state") or "").strip().lower()
             if request_source == "schedule" or schedule_state in {"queued", "running"}:
-                append_event(
-                    db,
-                    aggregate_type="Task",
-                    aggregate_id=task_id,
-                    event_type=EVENT_SCHEDULE_FAILED,
-                    payload={"failed_at": failed_at, "error": error},
-                        metadata={"actor_id": actor_user_id, "workspace_id": workspace_id, "project_id": project_id, "task_id": task_id},
+                _emit_task_schedule_failed_via_handler(
+                    db=db,
+                    actor_user_id=actor_user_id,
+                    task_id=task_id,
+                    failed_at=failed_at,
+                    error=error,
                 )
                 updated_triggers, next_due = rearm_first_schedule_trigger(
                     execution_triggers=state.get("execution_triggers"),
                     now_utc=now,
                 )
                 if next_due:
-                    append_event(
-                        db,
-                        aggregate_type="Task",
-                        aggregate_id=task_id,
-                        event_type=TASK_EVENT_UPDATED,
-                        payload={
+                    _emit_task_patch_via_handler(
+                        db=db,
+                        actor_user_id=actor_user_id,
+                        task_id=task_id,
+                        changes={
                             "execution_triggers": updated_triggers,
                             "scheduled_at_utc": next_due,
                             "schedule_state": "idle",
-                        },
-                        metadata={
-                            "actor_id": actor_user_id,
-                            "workspace_id": workspace_id,
-                            "project_id": project_id,
-                            "task_id": task_id,
                         },
                     )
             db.commit()
@@ -8516,18 +8403,11 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
             # Guard in-memory record so the same task is not re-queued while handling this batch.
             task.schedule_state = "queued"
             db.flush()
-            append_event(
-                db,
-                aggregate_type="Task",
-                aggregate_id=task.id,
-                event_type=EVENT_SCHEDULE_QUEUED,
-                payload={"queued_at": now_iso},
-                metadata={
-                    "actor_id": actor_user_id,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": task.id,
-                },
+            _emit_task_schedule_queued_via_handler(
+                db=db,
+                actor_user_id=actor_user_id,
+                task_id=str(task.id),
+                queued_at=now_iso,
             )
             _emit_task_automation_requested_via_handler(
                 db=db,

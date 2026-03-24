@@ -17,7 +17,7 @@ from features.tasks.domain import (
 
 from .contracts import EventEnvelope
 from .eventing_rebuild import rebuild_state
-from .models import Task
+from .models import Task, User as UserModel
 from .serializers import to_iso_utc
 from .settings import AGENT_SYSTEM_USER_ID
 from .task_automation import (
@@ -258,6 +258,86 @@ def emit_task_automation_triggers_for_event(
     workspace_task_cache: dict[str, list[dict[str, Any]]] = {}
     requested_task_ids: set[str] = set()
 
+    def _patch_task_internal_fields_via_handler(
+        *,
+        task_id: str,
+        changes: dict[str, Any],
+    ) -> bool:
+        try:
+            # Local import avoids startup-time circular dependencies between shared eventing
+            # and task command handler modules.
+            from features.tasks.command_handlers import (
+                CommandContext as TaskCommandContext,
+                PatchTaskInternalFieldsHandler,
+            )
+        except Exception:
+            return False
+        actor_user = db.get(UserModel, AGENT_SYSTEM_USER_ID)
+        if actor_user is None or not bool(getattr(actor_user, "is_active", False)):
+            return False
+        PatchTaskInternalFieldsHandler(
+            TaskCommandContext(db=db, user=actor_user),
+            task_id=task_id,
+            changes=dict(changes or {}),
+            commit=False,
+        )()
+        return True
+
+    def _queue_automation_request_via_handler(
+        *,
+        task_id: str,
+        workspace_id: str,
+        project_id: str | None,
+        instruction: str,
+        requested_at: str,
+        source_task_id: str | None,
+        trigger_from_status: str | None,
+        trigger_to_status: str | None,
+        triggered_at: str,
+    ) -> bool:
+        try:
+            # Local import avoids startup-time circular dependencies between shared eventing
+            # and task command handler modules.
+            from features.tasks.command_handlers import (
+                CommandContext as TaskCommandContext,
+                RequestAutomationRunInternalHandler,
+            )
+        except Exception:
+            return False
+        actor_user = db.get(UserModel, AGENT_SYSTEM_USER_ID)
+        if actor_user is None or not bool(getattr(actor_user, "is_active", False)):
+            return False
+        trigger_link = (
+            f"{str(source_task_id or '').strip()}->{task_id}:"
+            f"{str(trigger_to_status or '').strip() or 'unknown'}"
+        )
+        correlation_id = (
+            f"status-change:{str(source_task_id or '').strip()}:{task_id}:"
+            f"{str(trigger_to_status or '').strip() or 'unknown'}:{str(triggered_at or requested_at).strip()}"
+        )
+        RequestAutomationRunInternalHandler(
+            TaskCommandContext(db=db, user=actor_user),
+            task_id=task_id,
+            requested_at=requested_at,
+            instruction=instruction,
+            source="status_change",
+            source_task_id=source_task_id,
+            reason="status_change_trigger",
+            trigger_link=trigger_link,
+            correlation_id=correlation_id,
+            trigger_task_id=source_task_id,
+            from_status=trigger_from_status,
+            to_status=trigger_to_status,
+            triggered_at=triggered_at,
+            lead_handoff_token=(
+                f"lead:{str(source_task_id or '').strip()}:{str(triggered_at or requested_at).strip()}"
+                if str(trigger_to_status or "").strip() == "QA"
+                else None
+            ),
+            commit=False,
+        )()
+        return True
+
     def _workspace_tasks(workspace_id: str) -> list[dict[str, Any]]:
         if workspace_id not in workspace_task_cache:
             rows = db.execute(
@@ -319,12 +399,7 @@ def emit_task_automation_triggers_for_event(
                 f"status-change:{str(trigger_task_id or '').strip()}:{task_id}:"
                 f"{str(trigger_to_status or '').strip() or 'unknown'}:{str(triggered_at or now_iso).strip()}"
             )
-            append_event_fn(
-                db,
-                aggregate_type="Task",
-                aggregate_id=task_id,
-                event_type=TASK_EVENT_UPDATED,
-                payload={
+            ignored_changes = {
                     "last_ignored_request_source": "status_change",
                     "last_ignored_request_source_task_id": trigger_task_id,
                     "last_ignored_request_reason": "ignored_due_to_direct_request",
@@ -334,28 +409,34 @@ def emit_task_automation_triggers_for_event(
                     "last_ignored_request_from_status": trigger_from_status,
                     "last_ignored_request_to_status": trigger_to_status,
                     "last_ignored_request_triggered_at": triggered_at,
-                },
-                metadata={
-                    "actor_id": AGENT_SYSTEM_USER_ID,
-                    "workspace_id": workspace_id,
-                    "project_id": project_id,
-                    "task_id": task_id,
-                    "trigger_task_id": trigger_task_id,
-                    "trigger_from_status": trigger_from_status,
-                    "trigger_to_status": trigger_to_status,
-                    "triggered_at": triggered_at,
-                },
+            }
+            patched_via_handler = _patch_task_internal_fields_via_handler(
+                task_id=task_id,
+                changes=ignored_changes,
             )
+            if not patched_via_handler:
+                append_event_fn(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=task_id,
+                    event_type=TASK_EVENT_UPDATED,
+                    payload=ignored_changes,
+                    metadata={
+                        "actor_id": AGENT_SYSTEM_USER_ID,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": task_id,
+                        "trigger_task_id": trigger_task_id,
+                        "trigger_from_status": trigger_from_status,
+                        "trigger_to_status": trigger_to_status,
+                        "triggered_at": triggered_at,
+                    },
+                )
             return False
 
         if str(task_state.get("automation_state") or "idle") in {"queued", "running"}:
             pending_requests = _normalize_nonnegative_int(task_state.get("automation_pending_requests"))
-            append_event_fn(
-                db,
-                aggregate_type="Task",
-                aggregate_id=task_id,
-                event_type=TASK_EVENT_UPDATED,
-                payload={
+            pending_changes = {
                     "automation_pending_requests": pending_requests + 1,
                     "last_requested_instruction": effective_instruction,
                     "last_requested_source": "status_change",
@@ -369,6 +450,67 @@ def emit_task_automation_triggers_for_event(
                     "last_requested_from_status": trigger_from_status,
                     "last_requested_to_status": trigger_to_status,
                     "last_requested_triggered_at": triggered_at,
+            }
+            patched_via_handler = _patch_task_internal_fields_via_handler(
+                task_id=task_id,
+                changes=pending_changes,
+            )
+            if not patched_via_handler:
+                append_event_fn(
+                    db,
+                    aggregate_type="Task",
+                    aggregate_id=task_id,
+                    event_type=TASK_EVENT_UPDATED,
+                    payload=pending_changes,
+                    metadata={
+                        "actor_id": AGENT_SYSTEM_USER_ID,
+                        "workspace_id": workspace_id,
+                        "project_id": project_id,
+                        "task_id": task_id,
+                        "trigger_task_id": trigger_task_id,
+                        "trigger_from_status": trigger_from_status,
+                        "trigger_to_status": trigger_to_status,
+                        "triggered_at": triggered_at,
+                    },
+                )
+            return False
+
+        queued_via_handler = _queue_automation_request_via_handler(
+            task_id=task_id,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            instruction=effective_instruction,
+            requested_at=now_iso,
+            source_task_id=trigger_task_id,
+            trigger_from_status=trigger_from_status,
+            trigger_to_status=trigger_to_status,
+            triggered_at=triggered_at,
+        )
+        if not queued_via_handler:
+            append_event_fn(
+                db,
+                aggregate_type="Task",
+                aggregate_id=task_id,
+                event_type=TASK_EVENT_AUTOMATION_REQUESTED,
+                payload={
+                    "requested_at": now_iso,
+                    "instruction": effective_instruction,
+                    "source": "status_change",
+                    "source_task_id": trigger_task_id,
+                    "reason": "status_change_trigger",
+                    "trigger_link": f"{str(trigger_task_id or '').strip()}->{task_id}:{str(trigger_to_status or '').strip() or 'unknown'}",
+                    "correlation_id": (
+                        f"status-change:{str(trigger_task_id or '').strip()}:{task_id}:{str(trigger_to_status or '').strip() or 'unknown'}:{str(triggered_at or now_iso).strip()}"
+                    ),
+                    "trigger_task_id": trigger_task_id,
+                    "from_status": trigger_from_status,
+                    "to_status": trigger_to_status,
+                    "triggered_at": triggered_at,
+                    "lead_handoff_token": (
+                        f"lead:{str(trigger_task_id or '').strip()}:{str(triggered_at or now_iso).strip()}"
+                        if str(trigger_to_status or "").strip() == "QA"
+                        else None
+                    ),
                 },
                 metadata={
                     "actor_id": AGENT_SYSTEM_USER_ID,
@@ -381,44 +523,6 @@ def emit_task_automation_triggers_for_event(
                     "triggered_at": triggered_at,
                 },
             )
-            return False
-
-        append_event_fn(
-            db,
-            aggregate_type="Task",
-            aggregate_id=task_id,
-            event_type=TASK_EVENT_AUTOMATION_REQUESTED,
-            payload={
-                "requested_at": now_iso,
-                "instruction": effective_instruction,
-                "source": "status_change",
-                "source_task_id": trigger_task_id,
-                "reason": "status_change_trigger",
-                "trigger_link": f"{str(trigger_task_id or '').strip()}->{task_id}:{str(trigger_to_status or '').strip() or 'unknown'}",
-                "correlation_id": (
-                    f"status-change:{str(trigger_task_id or '').strip()}:{task_id}:{str(trigger_to_status or '').strip() or 'unknown'}:{str(triggered_at or now_iso).strip()}"
-                ),
-                "trigger_task_id": trigger_task_id,
-                "from_status": trigger_from_status,
-                "to_status": trigger_to_status,
-                "triggered_at": triggered_at,
-                "lead_handoff_token": (
-                    f"lead:{str(trigger_task_id or '').strip()}:{str(triggered_at or now_iso).strip()}"
-                    if str(trigger_to_status or "").strip() == "QA"
-                    else None
-                ),
-            },
-            metadata={
-                "actor_id": AGENT_SYSTEM_USER_ID,
-                "workspace_id": workspace_id,
-                "project_id": project_id,
-                "task_id": task_id,
-                "trigger_task_id": trigger_task_id,
-                "trigger_from_status": trigger_from_status,
-                "trigger_to_status": trigger_to_status,
-                "triggered_at": triggered_at,
-            },
-        )
         requested_task_ids.add(task_id)
         return True
 

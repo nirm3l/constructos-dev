@@ -287,29 +287,45 @@ class ReorderNoteGroupsHandler:
     project_id: str
     payload: ReorderPayload
 
-    def __call__(self, group_id: str, order_index: int) -> bool:
-        _ = self.payload
-        state = load_note_group_command_state(self.ctx.db, group_id)
-        if not state or state.is_deleted or state.workspace_id != self.workspace_id or state.project_id != self.project_id:
-            return False
-
+    def __call__(self) -> dict:
+        updated = 0
         repo = AggregateEventRepository(self.ctx.db)
-        aggregate = repo.load_with_class(
-            aggregate_type="NoteGroup",
-            aggregate_id=group_id,
-            aggregate_cls=NoteGroupAggregate,
-        )
-        if bool(getattr(aggregate, "is_deleted", False)):
-            return False
-        aggregate.reorder(order_index=order_index)
-        repo.persist(
-            aggregate,
-            base_metadata={
-                "actor_id": self.ctx.user.id,
-                "workspace_id": self.workspace_id,
-                "project_id": self.project_id,
-                "note_group_id": group_id,
-            },
-        )
+        unique_ordered_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for group_id in self.payload.ordered_ids:
+            normalized_group_id = str(group_id or "").strip()
+            if not normalized_group_id:
+                continue
+            dedupe_key = normalized_group_id.casefold()
+            if dedupe_key in seen_ids:
+                continue
+            seen_ids.add(dedupe_key)
+            unique_ordered_ids.append(normalized_group_id)
+
+        for order_index, group_id in enumerate(unique_ordered_ids, start=1):
+            state = load_note_group_command_state(self.ctx.db, group_id)
+            if not state or state.is_deleted or state.workspace_id != self.workspace_id or state.project_id != self.project_id:
+                continue
+
+            aggregate = repo.load_with_class(
+                aggregate_type="NoteGroup",
+                aggregate_id=group_id,
+                aggregate_cls=NoteGroupAggregate,
+            )
+            if bool(getattr(aggregate, "is_deleted", False)):
+                continue
+            current_order_index = int(getattr(aggregate, "order_index", 0) or 0)
+            if current_order_index != order_index:
+                aggregate.reorder(order_index=order_index)
+                repo.persist(
+                    aggregate,
+                    base_metadata={
+                        "actor_id": self.ctx.user.id,
+                        "workspace_id": self.workspace_id,
+                        "project_id": self.project_id,
+                        "note_group_id": group_id,
+                    },
+                )
+            updated += 1
         self.ctx.db.commit()
-        return True
+        return {"ok": True, "updated": updated}

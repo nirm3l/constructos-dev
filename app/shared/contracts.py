@@ -349,6 +349,7 @@ class TaskCommandState:
     task_group_id: str | None
     specification_id: str | None
     status: str
+    order_index: int
     archived: bool
     is_deleted: bool
 

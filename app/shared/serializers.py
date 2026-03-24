@@ -442,6 +442,7 @@ def load_task_command_state(db: Session, task_id: str) -> TaskCommandState | Non
             task_group_id=task.task_group_id,
             specification_id=task.specification_id,
             status=task.status,
+            order_index=int(task.order_index or 0),
             archived=task.archived,
             is_deleted=task.is_deleted,
         )
@@ -456,6 +457,7 @@ def load_task_command_state(db: Session, task_id: str) -> TaskCommandState | Non
         task_group_id=state.get("task_group_id"),
         specification_id=state.get("specification_id"),
         status=state.get("status", "To Do"),
+        order_index=int(state.get("order_index") or 0),
         archived=bool(state.get("archived", False)),
         is_deleted=bool(state.get("is_deleted", False)),
     )
