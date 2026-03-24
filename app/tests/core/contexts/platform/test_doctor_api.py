@@ -2,7 +2,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from tests.critical.support.runtime import build_client as build_runtime_client
+from tests.core.support.runtime import build_client as build_runtime_client
 
 
 def build_client(tmp_path: Path) -> TestClient:

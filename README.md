@@ -229,7 +229,7 @@ codex mcp list
 docker compose -p constructos-app -f docker-compose.yml run --rm --build task-app pytest
 
 # Critical bounded-context suite (default pytest collection, 150-200 target)
-docker compose -p constructos-app -f docker-compose.yml run --rm --build task-app pytest app/tests/critical
+docker compose -p constructos-app -f docker-compose.yml run --rm --build task-app pytest app/tests/core
 
 # Legacy broad suite (explicit opt-in during migration)
 docker compose -p constructos-app -f docker-compose.yml run --rm --build task-app pytest app/tests/test_api.py

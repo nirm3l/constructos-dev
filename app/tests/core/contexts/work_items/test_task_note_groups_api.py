@@ -1,28 +1,15 @@
 from __future__ import annotations
 
-from importlib import reload
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func
 
+from tests.core.support.runtime import build_client as build_runtime_client
+
 
 def build_client(tmp_path: Path) -> TestClient:
-    import os
-
-    db_file = tmp_path / "test.db"
-    os.environ["DATABASE_URL"] = f"sqlite:///{db_file}"
-    os.environ["ATTACHMENTS_DIR"] = str(tmp_path / "uploads")
-    os.environ.pop("DB_PATH", None)
-    os.environ["EVENTSTORE_URI"] = ""
-    import main
-
-    main = reload(main)
-    main.bootstrap_data()
-    client = TestClient(main.app)
-    login = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
-    assert login.status_code == 200
-    return client
+    return build_runtime_client(tmp_path)
 
 
 def test_task_group_assignment_filter_and_delete_unassign(tmp_path: Path):
