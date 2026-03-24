@@ -1,4 +1,27 @@
-# Testing Source of Truth
+# Testing And Quality
+
+## Normative Policy (Source of Truth)
+
+- Backend canonical suite root is `app/tests/core/**`.
+- New tests must be context-scoped and behavior-focused.
+- Guardrails must prevent direct event append misuse and prohibited mutation patterns in feature modules.
+
+## Implementation Reality
+
+- Platform, agents, project, and work-item contexts are covered under `app/tests/core/contexts/*`.
+- Shared runtime harnesses exist under `app/tests/core/support/*`.
+- CQRS/eventing and command-id guardrails are actively enforced by tests.
+
+## Known Drift / Transitional Risk
+
+- Some legacy tests outside current canonical layout may still exist during migration windows.
+- Runtime-dependent tests may require strict environment isolation to avoid flaky outcomes.
+
+## Agent Checklist
+
+- Add tests in the owning context folder, not in generic catch-all modules.
+- Prefer regression-oriented assertions over fragile implementation details.
+- Run at least the affected context tests plus policy guardrail tests when touching workflow core.
 
 ## Scope
 This document defines the canonical testing strategy for the application backend.

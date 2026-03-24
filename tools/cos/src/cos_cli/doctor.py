@@ -58,13 +58,19 @@ def _provider_name(args: argparse.Namespace) -> str:
 
 
 def _provider_binary_name(provider: str) -> str:
-    return "claude" if provider == "claude" else "codex"
+    if provider == "claude":
+        return "claude"
+    if provider == "opencode":
+        return "opencode"
+    return "codex"
 
 
 def _provider_docker_binary(args: argparse.Namespace) -> str:
     provider = _provider_name(args)
     if provider == "claude":
         return str(getattr(args, "docker_claude_binary", "claude") or "").strip() or "claude"
+    if provider == "opencode":
+        return str(getattr(args, "docker_opencode_binary", "opencode") or "").strip() or "opencode"
     return str(getattr(args, "docker_codex_binary", "codex") or "").strip() or "codex"
 
 

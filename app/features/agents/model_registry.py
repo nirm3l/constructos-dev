@@ -49,7 +49,7 @@ _CACHE_TTL_SECONDS = _load_positive_float_env("AGENT_CODEX_MODELS_CACHE_TTL_SECO
 _MODEL_LIST_TIMEOUT_SECONDS = _load_positive_float_env("AGENT_CODEX_MODEL_LIST_TIMEOUT_SECONDS", 2.0)
 _MODEL_LIST_LIMIT = _load_positive_int_env("AGENT_CODEX_MODEL_LIST_LIMIT", 200)
 _DEFAULT_CLAUDE_MODELS = ("sonnet", "opus")
-_DEFAULT_OPENCODE_MODELS = ("opencode/gpt-5-nano",)
+_DEFAULT_OPENCODE_MODELS = ("opencode/minimax-m2.5-free",)
 _DEFAULT_OPENCODE_FREE_MODEL_ALLOWLIST = {
     "opencode/big-pickle",
     "opencode/gpt-5-nano",

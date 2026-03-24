@@ -185,6 +185,8 @@ case "$DEPLOY_SOURCE" in
     APP_BUILD="$(date -u +"%Y%m%d%H%M%S")-${GIT_SHA}"
     TASK_APP_IMAGE="${TASK_APP_IMAGE:-task-management-task-app:local}"
     MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-task-management-mcp-tools:local}"
+    SEED_CONSTRUCTOS_INTERNAL_ENABLED="true"
+    COMPOSE_ARGS+=(-f docker-compose.owner.local-docs.yml)
     ;;
   ghcr)
     if [[ -z "$IMAGE_TAG" ]]; then
@@ -201,6 +203,7 @@ case "$DEPLOY_SOURCE" in
     fi
     TASK_APP_IMAGE="${TASK_APP_IMAGE:-ghcr.io/${GHCR_OWNER}/${GHCR_IMAGE_PREFIX}-task-app:${IMAGE_TAG}}"
     MCP_TOOLS_IMAGE="${MCP_TOOLS_IMAGE:-ghcr.io/${GHCR_OWNER}/${GHCR_IMAGE_PREFIX}-mcp-tools:${IMAGE_TAG}}"
+    SEED_CONSTRUCTOS_INTERNAL_ENABLED="false"
     ;;
   *)
     echo "Unsupported DEPLOY_SOURCE: $DEPLOY_SOURCE"
@@ -224,6 +227,7 @@ APP_BUILD=${APP_BUILD}
 APP_DEPLOYED_AT_UTC=${DEPLOYED_AT_UTC}
 TASK_APP_IMAGE=${TASK_APP_IMAGE}
 MCP_TOOLS_IMAGE=${MCP_TOOLS_IMAGE}
+SEED_CONSTRUCTOS_INTERNAL_ENABLED=${SEED_CONSTRUCTOS_INTERNAL_ENABLED}
 OLLAMA_MODELS_MOUNT=${OLLAMA_MODELS_MOUNT}
 AGENT_WORKSPACE_MOUNT=${AGENT_WORKSPACE_MOUNT}
 AGENT_CODEX_WORKSPACE_MOUNT=${AGENT_WORKSPACE_MOUNT}
@@ -333,6 +337,7 @@ echo "Resolved deploy target: ${TARGET_RESOLVED}"
 echo "Deploy source: ${DEPLOY_SOURCE}"
 echo "task-app image: ${TASK_APP_IMAGE}"
 echo "mcp-tools image: ${MCP_TOOLS_IMAGE}"
+echo "Seed ConstructOS Internal: ${SEED_CONSTRUCTOS_INTERNAL_ENABLED}"
 echo "Ollama models mount: ${OLLAMA_MODELS_MOUNT} (${OLLAMA_MODELS_MOUNT_MODE})"
 echo "Agent workspace mount: ${AGENT_WORKSPACE_MOUNT} (${AGENT_WORKSPACE_MOUNT_MODE})"
 echo "Compose project: ${APP_COMPOSE_PROJECT_NAME}"

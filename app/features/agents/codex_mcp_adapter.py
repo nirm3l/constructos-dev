@@ -48,7 +48,7 @@ _DEFAULT_AGENT_HOME_RETENTION_DAYS = 14
 _DEFAULT_AGENT_HOME_CLEANUP_INTERVAL_SECONDS = 3600
 _DEFAULT_STRUCTURED_PROMPT_CACHE_MAX_ENTRIES = 256
 _DEFAULT_CLAUDE_MODEL = "sonnet"
-_DEFAULT_OPENCODE_MODEL = "opencode/gpt-5-nano"
+_DEFAULT_OPENCODE_MODEL = "opencode/minimax-m2.5-free"
 _PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt_templates" / "codex"
 _ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 _STRUCTURED_PROMPT_CACHE_LOCK = threading.Lock()
@@ -1745,8 +1745,6 @@ def _run_opencode_server_stream_once(
         assistant_text_parts: list[str] = []
         assistant_snapshot_texts: list[str] = []
         usage: dict[str, int] | None = None
-        reasoning_status_emitted = False
-        drafting_status_emitted = False
         assistant_text_emitted = False
         started_at = time.monotonic()
 
@@ -1768,6 +1766,9 @@ def _run_opencode_server_stream_once(
                     return True
             return False
 
+        idle_seen_at: float | None = None
+        idle_drain_seconds = 1.0
+
         while time.monotonic() < deadline:
             if serve_proc.poll() is not None:
                 stdout_tail = _server_stdout_tail()
@@ -1777,6 +1778,8 @@ def _run_opencode_server_stream_once(
             try:
                 event = event_queue.get(timeout=0.25)
             except queue.Empty:
+                if idle_seen_at is not None and (time.monotonic() - idle_seen_at) >= idle_drain_seconds:
+                    break
                 continue
             if not isinstance(event, dict) or not _matches_session(event):
                 continue
@@ -1789,14 +1792,12 @@ def _run_opencode_server_stream_once(
                 status_type = ""
                 if isinstance(status_payload, dict):
                     status_type = str(status_payload.get("type") or "").strip().lower()
-                if status_type == "busy" and not reasoning_status_emitted:
-                    _emit_stream_event({"type": "status", "message": "OpenCode is analyzing the request."})
-                    reasoning_status_emitted = True
                 if status_type == "idle":
-                    break
+                    idle_seen_at = time.monotonic()
                 continue
             if event_type == "session.idle":
-                break
+                idle_seen_at = time.monotonic()
+                continue
             if event_type == "message.part.updated":
                 part = props.get("part")
                 if not isinstance(part, dict):
@@ -1826,12 +1827,8 @@ def _run_opencode_server_stream_once(
                                 delta_from_snapshot = text_value
                             if delta_from_snapshot:
                                 assistant_text_parts.append(delta_from_snapshot)
-                                if not drafting_status_emitted:
-                                    _emit_stream_event({"type": "status", "message": "OpenCode is drafting a reply."})
-                                    drafting_status_emitted = True
-                                if stream_plain_text:
-                                    _emit_stream_event({"type": "assistant_text", "delta": delta_from_snapshot})
-                                    assistant_text_emitted = True
+                                _emit_stream_event({"type": "assistant_text", "delta": delta_from_snapshot})
+                                assistant_text_emitted = True
                 continue
             if event_type == "message.part.delta":
                 part_id = str(props.get("partID") or "").strip()
@@ -1849,16 +1846,10 @@ def _run_opencode_server_stream_once(
                     part_seen_delta[part_id] = True
                     part_last_text_snapshot[part_id] = f"{str(part_last_text_snapshot.get(part_id) or '')}{delta}"
                     assistant_text_parts.append(delta)
-                    if not drafting_status_emitted:
-                        _emit_stream_event({"type": "status", "message": "OpenCode is drafting a reply."})
-                        drafting_status_emitted = True
-                    if stream_plain_text:
-                        _emit_stream_event({"type": "assistant_text", "delta": delta})
-                        assistant_text_emitted = True
+                    _emit_stream_event({"type": "assistant_text", "delta": delta})
+                    assistant_text_emitted = True
                 continue
-            if "tool" in event_type and not reasoning_status_emitted:
-                _emit_stream_event({"type": "status", "message": "OpenCode is executing tool calls."})
-                reasoning_status_emitted = True
+            if "tool" in event_type:
                 continue
             if event_type == "message.updated":
                 info = props.get("info")
@@ -1886,12 +1877,18 @@ def _run_opencode_server_stream_once(
                     usage["context_limit_tokens"] = int(AGENT_CHAT_CONTEXT_LIMIT_TOKENS)
                 continue
 
+            if idle_seen_at is not None:
+                if not event_queue.empty():
+                    continue
+                if (time.monotonic() - idle_seen_at) >= idle_drain_seconds:
+                    break
+
         final_message = "".join(assistant_text_parts).strip()
         if not final_message and assistant_snapshot_texts:
             final_message = str(assistant_snapshot_texts[-1] or "").strip()
         if not final_message:
             raise RuntimeError("OpenCode server stream returned no text result")
-        if stream_plain_text and not assistant_text_emitted:
+        if not assistant_text_emitted:
             _emit_stream_event({"type": "assistant_text", "delta": final_message})
         return final_message, usage, session_id
     finally:
@@ -1929,13 +1926,19 @@ def _run_opencode_cli_with_optional_stream(
             f"{_stable_json_dumps(output_schema)}\n"
         )
 
-    # OpenCode CLI JSON mode emits a single final text item; for real chat streaming
-    # we use OpenCode server SSE and fall back to CLI when server mode fails.
-    if stream_events and stream_plain_text:
+    # OpenCode CLI JSON mode often emits a single final text item. For runtime
+    # streaming we prefer OpenCode server SSE and fall back to CLI only on failure.
+    if stream_events:
+        prompt_text_for_server = start_prompt if output_schema is None else f"{start_prompt}{schema_instruction}"
+        resume_prompt_for_server = (
+            (resume_prompt if resume_prompt is not None else start_prompt)
+            if output_schema is None
+            else f"{(resume_prompt if resume_prompt is not None else start_prompt)}{schema_instruction}"
+        )
         try:
             if resume_attempted:
                 final_message, usage, session_id = _run_opencode_server_stream_once(
-                    prompt_text=resume_prompt if resume_prompt is not None else start_prompt,
+                    prompt_text=resume_prompt_for_server,
                     timeout_seconds=timeout_seconds,
                     stream_events=stream_events,
                     model=model,
@@ -1943,12 +1946,12 @@ def _run_opencode_cli_with_optional_stream(
                     resume_session_id=resume_thread_id,
                     env=env,
                     run_cwd=effective_run_cwd,
-                    stream_plain_text=stream_plain_text,
+                    stream_plain_text=True,
                 )
                 resume_succeeded = True
             else:
                 final_message, usage, session_id = _run_opencode_server_stream_once(
-                    prompt_text=start_prompt,
+                    prompt_text=prompt_text_for_server,
                     timeout_seconds=timeout_seconds,
                     stream_events=stream_events,
                     model=model,
@@ -1956,7 +1959,7 @@ def _run_opencode_cli_with_optional_stream(
                     resume_session_id=None,
                     env=env,
                     run_cwd=effective_run_cwd,
-                    stream_plain_text=stream_plain_text,
+                    stream_plain_text=True,
                 )
                 resume_succeeded = False
             if stream_events and usage is not None:
@@ -1965,7 +1968,7 @@ def _run_opencode_cli_with_optional_stream(
         except RuntimeError as exc:
             if resume_attempted and _is_missing_opencode_resume_session(str(exc)):
                 final_message, usage, session_id = _run_opencode_server_stream_once(
-                    prompt_text=start_prompt,
+                    prompt_text=prompt_text_for_server,
                     timeout_seconds=timeout_seconds,
                     stream_events=stream_events,
                     model=model,
@@ -1973,7 +1976,7 @@ def _run_opencode_cli_with_optional_stream(
                     resume_session_id=None,
                     env=env,
                     run_cwd=effective_run_cwd,
-                    stream_plain_text=stream_plain_text,
+                    stream_plain_text=True,
                 )
                 resume_succeeded = False
                 if stream_events and usage is not None:
@@ -2023,32 +2026,6 @@ def _run_opencode_cli_with_optional_stream(
         usage: dict[str, int] | None = None
         delta_parts: list[str] = []
         fatal_error = ""
-        reasoning_status_emitted = False
-        drafting_status_emitted = False
-        heartbeat_stop = threading.Event()
-        heartbeat_started = threading.Event()
-
-        def _emit_heartbeat_status() -> None:
-            if not stream_events:
-                return
-            started_at = time.monotonic()
-            while not heartbeat_stop.wait(timeout=3.0):
-                elapsed_seconds = int(max(0.0, time.monotonic() - started_at))
-                if elapsed_seconds < 3:
-                    continue
-                _emit_stream_event(
-                    {
-                        "type": "status",
-                        "message": f"OpenCode is still processing... ({elapsed_seconds}s)",
-                    }
-                )
-
-        heartbeat_thread: threading.Thread | None = None
-        if stream_events:
-            heartbeat_thread = threading.Thread(target=_emit_heartbeat_status, daemon=True)
-            heartbeat_thread.start()
-            heartbeat_started.set()
-
         for raw_line in proc.stdout:
             line = str(raw_line or "").strip()
             if not line:
@@ -2076,9 +2053,6 @@ def _run_opencode_cli_with_optional_stream(
                     fatal_error = "opencode run returned an error event"
                 continue
             if event_type == "step_start":
-                if stream_events and not reasoning_status_emitted:
-                    _emit_stream_event({"type": "status", "message": "OpenCode is analyzing the request."})
-                    reasoning_status_emitted = True
                 continue
             if event_type == "text":
                 part = event.get("part")
@@ -2088,9 +2062,6 @@ def _run_opencode_cli_with_optional_stream(
                 if not delta:
                     continue
                 delta_parts.append(delta)
-                if stream_events and not drafting_status_emitted:
-                    _emit_stream_event({"type": "status", "message": "OpenCode is drafting a reply."})
-                    drafting_status_emitted = True
                 if stream_events and stream_plain_text:
                     _emit_stream_event({"type": "assistant_text", "delta": delta})
                 continue
@@ -2114,9 +2085,6 @@ def _run_opencode_cli_with_optional_stream(
                     usage["context_limit_tokens"] = int(AGENT_CHAT_CONTEXT_LIMIT_TOKENS)
                 continue
 
-        heartbeat_stop.set()
-        if heartbeat_started.is_set() and heartbeat_thread is not None:
-            heartbeat_thread.join(timeout=0.2)
         done.set()
         return_code = int(proc.wait())
         stdout_text = "\n".join(lines).strip()

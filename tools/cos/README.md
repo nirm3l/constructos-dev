@@ -1,6 +1,6 @@
 # COS CLI
 
-`cos` is a thin wrapper around Codex or Claude Code with automatic application MCP injection.
+`cos` is a thin wrapper around Codex, Claude Code, or OpenCode with automatic application MCP injection.
 By default, `cos` runs on the host and executes the selected provider inside the app Docker container (`task-app`).
 
 Core behavior:
@@ -10,17 +10,17 @@ Core behavior:
 - supports layered config (`~/.cos/config.toml` and `./.cos/config.toml`)
 - uses Docker backend by default (`codex_backend = "docker"`)
 - auto-enables `--skip-git-repo-check` for `cos exec` when backend is Docker
-- defaults to `provider = "codex"` and also supports `provider = "claude"`
+- defaults to `provider = "codex"` and also supports `provider = "claude"` and `provider = "opencode"`
 
 ## Requirements
 
 - Python 3.10+
 - Docker CLI available in `PATH`
-- Running app container with Codex and Claude Code installed (default: `task-app`)
+- Running app container with Codex, Claude Code, and OpenCode installed (default: `task-app`)
 - Optional for git push from Docker backend: set `GITHUB_PAT` in `task-app` container environment.
 
 For local backend (`codex_backend = "local"`):
-- Codex CLI or Claude Code CLI available in `PATH` (`codex --help` or `claude --help`)
+- Codex CLI, Claude Code CLI, or OpenCode CLI available in `PATH` (`codex --help`, `claude --help`, or `opencode --help`)
 
 ## Install (Recommended, Ubuntu + macOS)
 
@@ -148,12 +148,13 @@ For Docker backend, `cos doctor` also reports git push readiness checks:
 Useful options:
 - `--repo /path/to/repo`
 - `--app-mcp-url http://localhost:8091/mcp`
-- `--provider codex` or `--provider claude`
+- `--provider codex`, `--provider claude`, or `--provider opencode`
 - `--codex-backend docker` or `--codex-backend local`
 - `--docker-container task-app`
 - `--docker-workdir /app`
 - `--docker-codex-home-root /home/app/agent-home/workspace` (used by `cos resume` to resolve persisted Codex sessions)
 - `--docker-claude-home-root /home/app/agent-home/workspace` (used by `cos resume` to resolve persisted Claude Code sessions)
+- `--docker-opencode-home-root /home/app/agent-home/workspace` (used by `cos resume` to resolve persisted OpenCode sessions)
 - `cos resume --last` to continue the most recent interactive Codex session
 - Docker-backed runs seed a writable provider home under `/home/app/agent-home/cos/` so trust prompts and provider state can persist without mutating the host-mounted Codex config
 - `--system-prompt-file ~/.cos/system.md`

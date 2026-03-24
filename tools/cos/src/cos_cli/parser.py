@@ -305,6 +305,8 @@ def _run_codex(
     docker_codex_home_root: str,
     docker_claude_binary: str,
     docker_claude_home_root: str,
+    docker_opencode_binary: str,
+    docker_opencode_home_root: str,
     dangerous: bool,
     app_mcp_name: str,
     app_mcp_url: str,
@@ -359,13 +361,30 @@ def _run_codex(
         sid = str(resume_session_id or "").strip()
         if command == "resume" and sid:
             try:
-                docker_resume_root = docker_claude_home_root if normalized_provider == "claude" else docker_codex_home_root
+                if normalized_provider == "claude":
+                    docker_resume_root = docker_claude_home_root
+                elif normalized_provider == "opencode":
+                    docker_resume_root = docker_opencode_home_root
+                else:
+                    docker_resume_root = docker_codex_home_root
                 resume_context = find_docker_resume_context(
                     provider=normalized_provider,
                     container=str(docker_container or "").strip(),
                     session_id=sid,
                     search_root=str(docker_resume_root or "").strip(),
                 )
+                if (
+                    normalized_provider == "opencode"
+                    and not str(resume_context.get("home") or "").strip()
+                    and str(docker_resume_root or "").strip() != "/home/app"
+                ):
+                    # OpenCode sessions from app chat are often stored under /home/app/.opencode.
+                    resume_context = find_docker_resume_context(
+                        provider=normalized_provider,
+                        container=str(docker_container or "").strip(),
+                        session_id=sid,
+                        search_root="/home/app",
+                    )
                 docker_home = str(resume_context.get("home") or "").strip()
                 if normalized_provider == "claude":
                     resume_cwd = str(resume_context.get("cwd") or "").strip()
@@ -410,6 +429,7 @@ def _run_codex(
         docker_workdir=effective_docker_workdir,
         docker_codex_binary=docker_codex_binary,
         docker_claude_binary=docker_claude_binary,
+        docker_opencode_binary=docker_opencode_binary,
         docker_home=docker_home,
         interactive_tty=bool(sys.stdin.isatty() and sys.stdout.isatty()),
         no_app_mcp=no_app_mcp,
@@ -435,7 +455,11 @@ def _run_codex(
             cmd[-1:-1] = ["--color", "never"]
 
     env = os.environ.copy()
-    run_cwd = str(repo or "").strip() if str(provider).strip().lower() == "claude" and str(codex_backend).strip().lower() == "local" else None
+    run_cwd = (
+        str(repo or "").strip()
+        if str(provider).strip().lower() in {"claude", "opencode"} and str(codex_backend).strip().lower() == "local"
+        else None
+    )
     if terminal_theme == "green":
         env.setdefault("NO_COLOR", "1")
         env.setdefault("CLICOLOR", "0")
@@ -469,6 +493,8 @@ def _run_yolo_chat_from_callback(ctx: typer.Context) -> None:
         docker_codex_home_root=str(values["docker_codex_home_root"]),
         docker_claude_binary=str(values["docker_claude_binary"]),
         docker_claude_home_root=str(values["docker_claude_home_root"]),
+        docker_opencode_binary=str(values["docker_opencode_binary"]),
+        docker_opencode_home_root=str(values["docker_opencode_home_root"]),
         dangerous=True,
         app_mcp_name=str(values["app_mcp_name"]),
         app_mcp_url=str(values["app_mcp_url"]),
@@ -495,7 +521,7 @@ app = typer.Typer(
     name="cos",
     help=(
         "ConstructOS (COS) CLI for working with the ConstructOS application. "
-        "It provides CLI support by running Codex or Claude Code with automatic ConstructOS MCP integration."
+        "It provides CLI support by running Codex, Claude Code, or OpenCode with automatic ConstructOS MCP integration."
     ),
     add_completion=False,
     no_args_is_help=False,
@@ -631,10 +657,10 @@ def chat_command(
         ),
     ] = None,
     provider: Annotated[
-        Literal["codex", "claude"] | None,
+        Literal["codex", "claude", "opencode"] | None,
         typer.Option(
             "--provider",
-            help="Agent CLI provider used by COS (codex or claude).",
+            help="Agent CLI provider used by COS (codex, claude, or opencode).",
             case_sensitive=True,
         ),
     ] = None,
@@ -674,6 +700,13 @@ def chat_command(
             help="Claude Code binary path/name inside Docker container.",
         ),
     ] = None,
+    docker_opencode_binary: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-opencode-binary",
+            help="OpenCode binary path/name inside Docker container.",
+        ),
+    ] = None,
     docker_codex_home_root: Annotated[
         str | None,
         typer.Option(
@@ -686,6 +719,13 @@ def chat_command(
         typer.Option(
             "--docker-claude-home-root",
             help="Root directory in Docker used to search persisted Claude Code sessions for resume.",
+        ),
+    ] = None,
+    docker_opencode_home_root: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-opencode-home-root",
+            help="Root directory in Docker used to search persisted OpenCode sessions for resume.",
         ),
     ] = None,
     dangerous: Annotated[
@@ -740,8 +780,10 @@ def chat_command(
             "docker_workdir": docker_workdir,
             "docker_codex_binary": docker_codex_binary,
             "docker_claude_binary": docker_claude_binary,
+            "docker_opencode_binary": docker_opencode_binary,
             "docker_codex_home_root": docker_codex_home_root,
             "docker_claude_home_root": docker_claude_home_root,
+            "docker_opencode_home_root": docker_opencode_home_root,
             "app_mcp_name": app_mcp_name,
             "app_mcp_url": app_mcp_url,
             "app_mcp_bearer_env": app_mcp_bearer_env,
@@ -770,6 +812,8 @@ def chat_command(
         docker_codex_home_root=str(values["docker_codex_home_root"]),
         docker_claude_binary=str(values["docker_claude_binary"]),
         docker_claude_home_root=str(values["docker_claude_home_root"]),
+        docker_opencode_binary=str(values["docker_opencode_binary"]),
+        docker_opencode_home_root=str(values["docker_opencode_home_root"]),
         dangerous=_effective_dangerous_flag(ctx, dangerous),
         app_mcp_name=str(values["app_mcp_name"]),
         app_mcp_url=str(values["app_mcp_url"]),
@@ -818,10 +862,10 @@ def exec_command(
         ),
     ] = None,
     provider: Annotated[
-        Literal["codex", "claude"] | None,
+        Literal["codex", "claude", "opencode"] | None,
         typer.Option(
             "--provider",
-            help="Agent CLI provider used by COS (codex or claude).",
+            help="Agent CLI provider used by COS (codex, claude, or opencode).",
             case_sensitive=True,
         ),
     ] = None,
@@ -861,6 +905,13 @@ def exec_command(
             help="Claude Code binary path/name inside Docker container.",
         ),
     ] = None,
+    docker_opencode_binary: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-opencode-binary",
+            help="OpenCode binary path/name inside Docker container.",
+        ),
+    ] = None,
     docker_codex_home_root: Annotated[
         str | None,
         typer.Option(
@@ -873,6 +924,13 @@ def exec_command(
         typer.Option(
             "--docker-claude-home-root",
             help="Root directory in Docker used to search persisted Claude Code sessions for resume.",
+        ),
+    ] = None,
+    docker_opencode_home_root: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-opencode-home-root",
+            help="Root directory in Docker used to search persisted OpenCode sessions for resume.",
         ),
     ] = None,
     dangerous: Annotated[
@@ -931,8 +989,10 @@ def exec_command(
             "docker_workdir": docker_workdir,
             "docker_codex_binary": docker_codex_binary,
             "docker_claude_binary": docker_claude_binary,
+            "docker_opencode_binary": docker_opencode_binary,
             "docker_codex_home_root": docker_codex_home_root,
             "docker_claude_home_root": docker_claude_home_root,
+            "docker_opencode_home_root": docker_opencode_home_root,
             "app_mcp_name": app_mcp_name,
             "app_mcp_url": app_mcp_url,
             "app_mcp_bearer_env": app_mcp_bearer_env,
@@ -961,6 +1021,8 @@ def exec_command(
         docker_codex_home_root=str(values["docker_codex_home_root"]),
         docker_claude_binary=str(values["docker_claude_binary"]),
         docker_claude_home_root=str(values["docker_claude_home_root"]),
+        docker_opencode_binary=str(values["docker_opencode_binary"]),
+        docker_opencode_home_root=str(values["docker_opencode_home_root"]),
         dangerous=_effective_dangerous_flag(ctx, dangerous),
         app_mcp_name=str(values["app_mcp_name"]),
         app_mcp_url=str(values["app_mcp_url"]),
@@ -1024,10 +1086,10 @@ def resume_command(
         ),
     ] = None,
     provider: Annotated[
-        Literal["codex", "claude"] | None,
+        Literal["codex", "claude", "opencode"] | None,
         typer.Option(
             "--provider",
-            help="Agent CLI provider used by COS (codex or claude).",
+            help="Agent CLI provider used by COS (codex, claude, or opencode).",
             case_sensitive=True,
         ),
     ] = None,
@@ -1067,6 +1129,13 @@ def resume_command(
             help="Claude Code binary path/name inside Docker container.",
         ),
     ] = None,
+    docker_opencode_binary: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-opencode-binary",
+            help="OpenCode binary path/name inside Docker container.",
+        ),
+    ] = None,
     docker_codex_home_root: Annotated[
         str | None,
         typer.Option(
@@ -1079,6 +1148,13 @@ def resume_command(
         typer.Option(
             "--docker-claude-home-root",
             help="Root directory in Docker used to search persisted Claude Code sessions for resume.",
+        ),
+    ] = None,
+    docker_opencode_home_root: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-opencode-home-root",
+            help="Root directory in Docker used to search persisted OpenCode sessions for resume.",
         ),
     ] = None,
     dangerous: Annotated[
@@ -1137,8 +1213,10 @@ def resume_command(
             "docker_workdir": docker_workdir,
             "docker_codex_binary": docker_codex_binary,
             "docker_claude_binary": docker_claude_binary,
+            "docker_opencode_binary": docker_opencode_binary,
             "docker_codex_home_root": docker_codex_home_root,
             "docker_claude_home_root": docker_claude_home_root,
+            "docker_opencode_home_root": docker_opencode_home_root,
             "app_mcp_name": app_mcp_name,
             "app_mcp_url": app_mcp_url,
             "app_mcp_bearer_env": app_mcp_bearer_env,
@@ -1167,6 +1245,8 @@ def resume_command(
         docker_codex_home_root=str(values["docker_codex_home_root"]),
         docker_claude_binary=str(values["docker_claude_binary"]),
         docker_claude_home_root=str(values["docker_claude_home_root"]),
+        docker_opencode_binary=str(values["docker_opencode_binary"]),
+        docker_opencode_home_root=str(values["docker_opencode_home_root"]),
         dangerous=_effective_dangerous_flag(ctx, dangerous),
         app_mcp_name=str(values["app_mcp_name"]),
         app_mcp_url=str(values["app_mcp_url"]),
@@ -1187,10 +1267,10 @@ def resume_command(
 def doctor_command(
     repo: Annotated[str | None, typer.Option("--repo", "-C", help="Repository path used to resolve local .cos/config.toml.")] = None,
     provider: Annotated[
-        Literal["codex", "claude"] | None,
+        Literal["codex", "claude", "opencode"] | None,
         typer.Option(
             "--provider",
-            help="Agent CLI provider used by COS (codex or claude).",
+            help="Agent CLI provider used by COS (codex, claude, or opencode).",
             case_sensitive=True,
         ),
     ] = None,
@@ -1223,6 +1303,13 @@ def doctor_command(
             help="Claude Code binary path/name inside Docker container.",
         ),
     ] = None,
+    docker_opencode_binary: Annotated[
+        str | None,
+        typer.Option(
+            "--docker-opencode-binary",
+            help="OpenCode binary path/name inside Docker container.",
+        ),
+    ] = None,
     app_mcp_url: Annotated[
         str | None,
         typer.Option(
@@ -1250,6 +1337,7 @@ def doctor_command(
             "docker_container": docker_container,
             "docker_codex_binary": docker_codex_binary,
             "docker_claude_binary": docker_claude_binary,
+            "docker_opencode_binary": docker_opencode_binary,
             "app_mcp_url": app_mcp_url,
             "app_mcp_bearer_env": app_mcp_bearer_env,
             "system_prompt_file": system_prompt_file,
@@ -1262,6 +1350,7 @@ def doctor_command(
         docker_container=str(values["docker_container"]),
         docker_codex_binary=str(values["docker_codex_binary"]),
         docker_claude_binary=str(values["docker_claude_binary"]),
+        docker_opencode_binary=str(values["docker_opencode_binary"]),
         app_mcp_url=str(values["app_mcp_url"]),
         app_mcp_bearer_env=str(values["app_mcp_bearer_env"]),
         system_prompt_file=str(values["system_prompt_file"]),

@@ -36,7 +36,7 @@ x-agent-common-config-env: &agent_common_config_env
   AGENT_CODEX_DEFAULT_REASONING_EFFORT: "${AGENT_CODEX_DEFAULT_REASONING_EFFORT:-medium}"
   AGENT_CLAUDE_DEFAULT_MODEL: "${AGENT_CLAUDE_DEFAULT_MODEL:-sonnet}"
   AGENT_CLAUDE_DEFAULT_REASONING_EFFORT: "${AGENT_CLAUDE_DEFAULT_REASONING_EFFORT:-medium}"
-  AGENT_OPENCODE_DEFAULT_MODEL: "${AGENT_OPENCODE_DEFAULT_MODEL:-opencode/gpt-5-nano}"
+  AGENT_OPENCODE_DEFAULT_MODEL: "${AGENT_OPENCODE_DEFAULT_MODEL:-opencode/minimax-m2.5-free}"
   AGENT_OPENCODE_DEFAULT_REASONING_EFFORT: "${AGENT_OPENCODE_DEFAULT_REASONING_EFFORT:-medium}"
   AGENT_ENABLED_PLUGINS: "${AGENT_ENABLED_PLUGINS:-team_mode,git_delivery,github_delivery,doctor}"
   MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:-dev-mcp-token}"
@@ -51,6 +51,7 @@ x-agent-common-config-env: &agent_common_config_env
   ALLOWED_EMBEDDING_MODELS: "nomic-embed-text,mxbai-embed-large,embeddinggemma"
   OLLAMA_EMBED_GPU_ENABLED: "true"
   LICENSE_SERVER_TOKEN: "${LICENSE_SERVER_TOKEN:-dev-license-token}"
+  SEED_CONSTRUCTOS_INTERNAL_ENABLED: "${SEED_CONSTRUCTOS_INTERNAL_ENABLED:-false}"
 
 services:
   postgres:

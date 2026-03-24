@@ -1,0 +1,7 @@
+services:
+  task-app:
+    volumes:
+      - ./docs:/opt/constructos/docs:ro
+  mcp-tools:
+    volumes:
+      - ./docs:/opt/constructos/docs:ro

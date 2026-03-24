@@ -22,15 +22,17 @@ DEFAULT_DOCKER_CONTAINER = "task-app"
 DEFAULT_DOCKER_WORKDIR = "/app"
 DEFAULT_DOCKER_CODEX_BINARY = "codex"
 DEFAULT_DOCKER_CLAUDE_BINARY = "claude"
+DEFAULT_DOCKER_OPENCODE_BINARY = "opencode"
 DEFAULT_DOCKER_APP_MCP_URL = "http://mcp-tools:8091/mcp"
 DEFAULT_DOCKER_CODEX_HOME_ROOT = "/home/app/agent-home/workspace"
 DEFAULT_DOCKER_CLAUDE_HOME_ROOT = "/home/app/agent-home/workspace"
+DEFAULT_DOCKER_OPENCODE_HOME_ROOT = "/home/app"
 
 VALID_SANDBOX = {"read-only", "workspace-write", "danger-full-access"}
 VALID_APPROVAL = {"untrusted", "on-request", "never"}
 VALID_TERMINAL_THEME = {"default", "green"}
 VALID_CODEX_BACKEND = {"local", "docker"}
-VALID_PROVIDER = {"codex", "claude"}
+VALID_PROVIDER = {"codex", "claude", "opencode"}
 
 DEFAULTS: dict[str, Any] = {
     "repo": "",
@@ -44,9 +46,11 @@ DEFAULTS: dict[str, Any] = {
     "docker_workdir": DEFAULT_DOCKER_WORKDIR,
     "docker_codex_binary": DEFAULT_DOCKER_CODEX_BINARY,
     "docker_claude_binary": DEFAULT_DOCKER_CLAUDE_BINARY,
+    "docker_opencode_binary": DEFAULT_DOCKER_OPENCODE_BINARY,
     "docker_app_mcp_url": DEFAULT_DOCKER_APP_MCP_URL,
     "docker_codex_home_root": DEFAULT_DOCKER_CODEX_HOME_ROOT,
     "docker_claude_home_root": DEFAULT_DOCKER_CLAUDE_HOME_ROOT,
+    "docker_opencode_home_root": DEFAULT_DOCKER_OPENCODE_HOME_ROOT,
     "app_mcp_name": DEFAULT_APP_MCP_NAME,
     "app_mcp_url": DEFAULT_APP_MCP_URL,
     "app_mcp_bearer_env": DEFAULT_APP_MCP_BEARER_ENV,
@@ -65,9 +69,11 @@ ENV_VAR_MAP: dict[str, str] = {
     "docker_workdir": "COS_DOCKER_WORKDIR",
     "docker_codex_binary": "COS_DOCKER_CODEX_BINARY",
     "docker_claude_binary": "COS_DOCKER_CLAUDE_BINARY",
+    "docker_opencode_binary": "COS_DOCKER_OPENCODE_BINARY",
     "docker_app_mcp_url": "COS_DOCKER_APP_MCP_URL",
     "docker_codex_home_root": "COS_DOCKER_CODEX_HOME_ROOT",
     "docker_claude_home_root": "COS_DOCKER_CLAUDE_HOME_ROOT",
+    "docker_opencode_home_root": "COS_DOCKER_OPENCODE_HOME_ROOT",
     "app_mcp_name": "COS_APP_MCP_NAME",
     "app_mcp_url": "COS_APP_MCP_URL",
     "app_mcp_bearer_env": "COS_APP_MCP_BEARER_ENV",

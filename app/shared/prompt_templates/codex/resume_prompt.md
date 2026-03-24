@@ -35,6 +35,8 @@ Guidance:
 - Read each MCP tool description and follow its payload contract and operational guidance.
 - For new project setup flows, prefer `setup_project_orchestration(...)` once required inputs are complete instead of long manual per-tool setup chains.
 - For interactive new-project setup in chat, call `setup_project_orchestration(...)` as early as possible.
+- If the user does not provide `primary_starter_key`, infer it from the request and pass it in `setup_project_orchestration(...)`.
+- Use `web_game` for browser games, `web_app` for web apps, and `api_service` for backend/API projects.
 - If one instruction includes setup + resource creation + kickoff, run strictly in this order: `setup_project_orchestration(...)` -> create requested resources -> kickoff.
 - If user asks for an exact task count, set `seed_team_tasks=false` during setup to avoid extra default Team Mode tasks.
 - When exact task count is requested, create exactly that count and do not add/remove extra tasks afterward.

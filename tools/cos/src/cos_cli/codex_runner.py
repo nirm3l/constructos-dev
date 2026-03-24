@@ -43,20 +43,34 @@ def _provider_name(args: argparse.Namespace) -> str:
 
 
 def _provider_binary_name(provider: str) -> str:
-    return "claude" if provider == "claude" else "codex"
+    if provider == "claude":
+        return "claude"
+    if provider == "opencode":
+        return "opencode"
+    return "codex"
 
 
 def _provider_binary_attr(provider: str) -> str:
-    return "docker_claude_binary" if provider == "claude" else "docker_codex_binary"
+    if provider == "claude":
+        return "docker_claude_binary"
+    if provider == "opencode":
+        return "docker_opencode_binary"
+    return "docker_codex_binary"
 
 
 def _provider_session_marker(provider: str) -> str:
-    return "/.claude/projects/" if provider == "claude" else "/.codex/sessions/"
+    if provider == "claude":
+        return "/.claude/projects/"
+    if provider == "opencode":
+        return "/.opencode/sessions/"
+    return "/.codex/sessions/"
 
 
 def _provider_runtime_home(provider: str) -> str:
     if provider == "claude":
         return "/home/app/agent-home/cos/shared-claude-home"
+    if provider == "opencode":
+        return "/home/app/agent-home/cos/shared-opencode-home"
     return "/home/app/agent-home/cos/shared-codex-home"
 
 
@@ -147,6 +161,7 @@ def find_docker_resume_context(*, provider: str, container: str, session_id: str
     if not root:
         return {}
     marker = _provider_session_marker(provider)
+    provider_name = str(provider or "").strip().lower()
 
     code = (
         "from pathlib import Path\n"
@@ -177,9 +192,18 @@ def find_docker_resume_context(*, provider: str, container: str, session_id: str
         "            pass\n"
         "        print(json.dumps(payload, ensure_ascii=True))\n"
         "        raise SystemExit(0)\n"
+        "if sys.argv[4] == 'opencode':\n"
+        "    marker2 = '/.local/share/opencode/storage/session_diff/'\n"
+        "    for path in root.rglob(f'{sid}.json'):\n"
+        "        text = str(path)\n"
+        "        idx = text.find(marker2)\n"
+        "        if idx != -1:\n"
+        "            payload = {'home': text[:idx], 'cwd': ''}\n"
+        "            print(json.dumps(payload, ensure_ascii=True))\n"
+        "            raise SystemExit(0)\n"
     )
     proc = subprocess.run(
-        ["docker", "exec", container, "python", "-c", code, sid, root, marker],
+        ["docker", "exec", container, "python", "-c", code, sid, root, marker, provider_name],
         text=True,
         capture_output=True,
         timeout=10,
@@ -211,6 +235,11 @@ def ensure_docker_provider_home(*, provider: str, container: str) -> str:
         source_auth = "/home/app/.claude.json"
         inner_dir = ".claude"
         auth_target = ".claude.json"
+    elif provider == "opencode":
+        source_dir = "/home/app/.opencode"
+        source_auth = "/home/app/.opencode/auth.json"
+        inner_dir = ".opencode"
+        auth_target = ".opencode/auth.json"
     else:
         source_dir = "/home/app/.codex"
         source_auth = "/home/app/.codex/auth.json"
@@ -401,11 +430,56 @@ def _build_inner_codex_command(args: argparse.Namespace, user_prompt: str, passt
     return cmd
 
 
+def _build_inner_opencode_command(args: argparse.Namespace, user_prompt: str, passthrough: list[str]) -> list[str]:
+    backend = str(getattr(args, "codex_backend", "local") or "").strip().lower()
+    opencode_binary = "opencode"
+    if backend == "docker":
+        opencode_binary = str(getattr(args, "docker_opencode_binary", "opencode") or "").strip() or "opencode"
+
+    if args.command == "chat":
+        cmd: list[str] = [opencode_binary]
+    elif args.command == "exec":
+        cmd = [opencode_binary, "run"]
+    elif args.command == "resume":
+        cmd = [opencode_binary]
+        if bool(getattr(args, "resume_all", False)):
+            raise RuntimeError("`cos resume --all` is not supported for provider 'opencode'.")
+        if bool(getattr(args, "resume_last", False)):
+            cmd.append("--continue")
+        else:
+            session_id = str(getattr(args, "resume_session_id", "") or "").strip()
+            if session_id:
+                cmd.extend(["--session", session_id])
+    else:
+        raise RuntimeError(f"Unsupported command: {args.command}")
+
+    repo = str(args.repo or "").strip()
+    if repo and args.command == "exec":
+        cmd.extend(["--dir", repo])
+
+    model = str(args.model or "").strip()
+    if model:
+        cmd.extend(["--model", model])
+
+    if bool(args.json) and args.command == "exec":
+        cmd.extend(["--format", "json"])
+
+    if passthrough:
+        cmd.extend(passthrough)
+
+    if str(user_prompt).strip():
+        if args.command == "exec":
+            cmd.append(str(user_prompt).strip())
+        else:
+            cmd.extend(["--prompt", str(user_prompt).strip()])
+    return cmd
+
+
 def _effective_docker_workdir(args: argparse.Namespace) -> str:
     provider = _provider_name(args)
     repo = str(getattr(args, "repo", "") or "").strip()
     docker_workdir = str(getattr(args, "docker_workdir", "") or "").strip()
-    if provider == "claude" and repo:
+    if provider in {"claude", "opencode"} and repo:
         return repo
     return docker_workdir
 
@@ -440,6 +514,8 @@ def build_codex_command(args: argparse.Namespace, user_prompt: str, passthrough:
     provider = _provider_name(args)
     if provider == "claude":
         cmd = _build_inner_claude_command(args=args, user_prompt=user_prompt, passthrough=passthrough)
+    elif provider == "opencode":
+        cmd = _build_inner_opencode_command(args=args, user_prompt=user_prompt, passthrough=passthrough)
     else:
         cmd = _build_inner_codex_command(args=args, user_prompt=user_prompt, passthrough=passthrough)
 

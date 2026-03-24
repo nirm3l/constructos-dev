@@ -425,7 +425,7 @@ def _resolve_chat_execution_preferences(payload: AgentChatRun, user: User) -> tu
             default_model = str(agent_default_model_for_provider("claude") or "").strip() or "sonnet"
             model = encode_execution_model(provider="claude", model=default_model)
         elif resolve_provider_effective_auth_source("opencode") != "none":
-            default_model = str(agent_default_model_for_provider("opencode") or "").strip() or "opencode/gpt-5-nano"
+            default_model = str(agent_default_model_for_provider("opencode") or "").strip() or "opencode/minimax-m2.5-free"
             model = encode_execution_model(provider="opencode", model=default_model)
 
     payload_reasoning = _normalize_reasoning_effort(payload.reasoning_effort)
