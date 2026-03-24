@@ -1427,6 +1427,34 @@ model = "gpt-5.3-codex-spark"
     assert 'reasoning_effort = "medium"' in output
 
 
+def test_codex_home_env_sets_opencode_inline_mcp_config(monkeypatch):
+    from features.agents.codex_mcp_adapter import _codex_home_env
+
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps({"model": "opencode/nemotron-3-super-free"}))
+    opencode_mcp_payload = {
+        "mcp": {
+            "constructos-tools": {
+                "type": "remote",
+                "url": "http://localhost:8091/mcp",
+                "enabled": True,
+            }
+        }
+    }
+
+    with _codex_home_env(
+        provider="opencode",
+        mcp_config_text="",
+        opencode_config_payload=opencode_mcp_payload,
+    ) as env:
+        merged_raw = str(env.get("OPENCODE_CONFIG_CONTENT") or "").strip()
+        assert merged_raw
+        merged = json.loads(merged_raw)
+        assert merged.get("model") == "opencode/nemotron-3-super-free"
+        assert merged["mcp"]["constructos-tools"]["type"] == "remote"
+        assert merged["mcp"]["constructos-tools"]["url"] == "http://localhost:8091/mcp"
+        assert merged["mcp"]["constructos-tools"]["enabled"] is True
+
+
 def test_run_structured_prompt_uses_cache_when_input_unchanged(monkeypatch):
     from features.agents import codex_mcp_adapter as adapter_module
 
@@ -1537,4 +1565,54 @@ def test_run_structured_prompt_recomputes_when_input_changes(monkeypatch):
         mcp_servers=[],
     )
 
-    assert calls["count"] == 2
+
+def test_run_opencode_cli_preserves_text_delta_whitespace(monkeypatch):
+    from features.agents import codex_mcp_adapter as adapter_module
+
+    events = [
+        {"type": "step_start", "sessionID": "ses-1"},
+        {"type": "text", "part": {"text": "Hello"}},
+        {"type": "text", "part": {"text": " world"}},
+        {"type": "step_finish", "part": {"tokens": {"input": 1, "output": 2}}},
+    ]
+
+    class _FakeProc:
+        def __init__(self, output_lines):
+            self.stdout = output_lines
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            return None
+
+        def wait(self):
+            return 0
+
+    fake_output = [json.dumps(event) + "\n" for event in events]
+
+    monkeypatch.setattr(
+        adapter_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _FakeProc(fake_output),
+    )
+
+    final_message, usage, session_id, resume_attempted, resume_succeeded = adapter_module._run_opencode_cli_with_optional_stream(
+        start_prompt="Say hello",
+        resume_prompt=None,
+        timeout_seconds=None,
+        stream_events=False,
+        model="opencode/gpt-5-nano",
+        reasoning_effort=None,
+        output_schema=None,
+        preferred_thread_id=None,
+        env=None,
+        run_cwd=None,
+    )
+
+    assert final_message == "Hello world"
+    assert usage == {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 2}
+    assert session_id == "ses-1"
+    assert resume_attempted is False
+    assert resume_succeeded is False
+

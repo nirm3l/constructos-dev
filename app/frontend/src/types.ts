@@ -43,7 +43,7 @@ export type AdminWorkspaceUser = {
   can_deactivate?: boolean
   can_update_role?: boolean
   background_agent_model?: string | null
-  background_agent_provider?: 'codex' | 'claude' | string | null
+  background_agent_provider?: 'codex' | 'claude' | 'opencode' | string | null
   background_agent_available?: boolean
   background_agent_reasoning_effort?: string | null
   background_agent_model_is_fallback?: boolean | null
@@ -96,7 +96,7 @@ export type AdminUserAgentRuntimeUpdateResponse = {
   ok: boolean
   workspace_id: string
   user_id: string
-  provider: 'codex' | 'claude' | string
+  provider: 'codex' | 'claude' | 'opencode' | string
   model: string
   reasoning_effort?: string | null
   is_background_execution_selected: boolean
@@ -1244,8 +1244,8 @@ export type AgentChatResponse = {
   resume_fallback_used?: boolean
 }
 
-export type AgentAuthProvider = 'codex' | 'claude'
-export type AgentAuthEffectiveSource = 'system_override' | 'host_mount' | 'none'
+export type AgentAuthProvider = 'codex' | 'claude' | 'opencode'
+export type AgentAuthEffectiveSource = 'system_override' | 'host_mount' | 'runtime_builtin' | 'none'
 export type CodexAuthLoginMethod = 'browser' | 'device_code'
 export type ClaudeAuthLoginMethod = 'claudeai' | 'console'
 

@@ -56,6 +56,7 @@ from shared.settings import (
     AGENT_CHAT_HISTORY_RECENT_TAIL,
     AGENT_ENABLED_PLUGINS,
     AGENT_SYSTEM_USER_ID,
+    agent_default_model_for_provider,
 )
 
 from features.agents.agent_mcp_adapter import run_structured_agent_prompt
@@ -80,7 +81,8 @@ from .codex_auth import (
     start_device_auth_session,
 )
 from .execution_provider import encode_execution_model, parse_execution_model, resolve_execution_provider
-from .provider_auth import resolve_provider_effective_auth_source
+from .provider_auth import get_provider_auth_status, resolve_provider_effective_auth_source
+from .command_runtime_registry import remember_provider_for_command_id
 from .gateway import build_ui_gateway
 from features.chat.application import ChatApplicationService
 from features.chat.command_handlers import (
@@ -173,7 +175,19 @@ def _provider_display_name(provider: str) -> str:
     normalized = str(provider or "").strip().lower()
     if normalized == "claude":
         return "Claude"
+    if normalized == "opencode":
+        return "OpenCode"
     return "Codex"
+
+
+def _resolve_alternate_configured_provider(current_provider: str) -> str | None:
+    normalized_current = str(current_provider or "").strip().lower()
+    for provider in ("codex", "claude", "opencode"):
+        if provider == normalized_current:
+            continue
+        if resolve_provider_effective_auth_source(provider) != "none":
+            return provider
+    return None
 
 
 def _proxy_codex_browser_callback(
@@ -403,6 +417,16 @@ def _resolve_chat_execution_preferences(payload: AgentChatRun, user: User) -> tu
     payload_model = _normalize_execution_model_value(payload.model)
     user_model = _normalize_execution_model_value(getattr(user, "agent_chat_model", ""))
     model = payload_model or user_model or None
+    if not model:
+        if resolve_provider_effective_auth_source("codex") != "none":
+            default_model = str(agent_default_model_for_provider("codex") or "").strip()
+            model = encode_execution_model(provider="codex", model=default_model) if default_model else None
+        elif resolve_provider_effective_auth_source("claude") != "none":
+            default_model = str(agent_default_model_for_provider("claude") or "").strip() or "sonnet"
+            model = encode_execution_model(provider="claude", model=default_model)
+        elif resolve_provider_effective_auth_source("opencode") != "none":
+            default_model = str(agent_default_model_for_provider("opencode") or "").strip() or "opencode/gpt-5-nano"
+            model = encode_execution_model(provider="opencode", model=default_model)
 
     payload_reasoning = _normalize_reasoning_effort(payload.reasoning_effort)
     user_reasoning = _normalize_reasoning_effort(getattr(user, "agent_chat_reasoning_effort", None))
@@ -2584,6 +2608,13 @@ def codex_auth_status(
     return get_codex_auth_status(user.id)
 
 
+@router.get("/api/agents/opencode-auth")
+def opencode_auth_status(
+    user: User = Depends(get_current_user),
+):
+    return get_provider_auth_status("opencode", user.id)
+
+
 @router.post("/api/agents/codex-auth/device/start")
 def codex_auth_device_start(
     payload: dict[str, object] | None = Body(default=None),
@@ -2777,10 +2808,9 @@ def agent_chat(
     )
     model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     execution_provider = resolve_execution_provider(model)
+    remember_provider_for_command_id(command_id=command_id, provider=execution_provider)
     if resolve_provider_effective_auth_source(execution_provider) == "none":
-        alternate_provider = "claude" if execution_provider == "codex" else "codex"
-        if resolve_provider_effective_auth_source(alternate_provider) == "none":
-            alternate_provider = None
+        alternate_provider = _resolve_alternate_configured_provider(execution_provider)
         attachment_refs = [item.model_dump() for item in payload.attachment_refs or []]
         session_attachment_refs = [item.model_dump() for item in payload.session_attachment_refs or []]
         ChatApplicationService(
@@ -2988,6 +3018,7 @@ def agent_chat(
             mcp_servers=mcp_servers,
             model=model,
             reasoning_effort=reasoning_effort,
+            command_id=command_id,
             prompt_instruction_segments=(
                 chat_usage_metadata.get("prompt_instruction_segments")
                 if isinstance(chat_usage_metadata, dict)
@@ -3130,10 +3161,9 @@ def agent_chat_stream(
     }
     model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     execution_provider = resolve_execution_provider(model)
+    remember_provider_for_command_id(command_id=command_id, provider=execution_provider)
     if resolve_provider_effective_auth_source(execution_provider) == "none":
-        alternate_provider = "claude" if execution_provider == "codex" else "codex"
-        if resolve_provider_effective_auth_source(alternate_provider) == "none":
-            alternate_provider = None
+        alternate_provider = _resolve_alternate_configured_provider(execution_provider)
         attachment_refs = [item.model_dump() for item in payload.attachment_refs or []]
         session_attachment_refs = [item.model_dump() for item in payload.session_attachment_refs or []]
         ChatApplicationService(
@@ -3178,161 +3208,6 @@ def agent_chat_stream(
             yield json.dumps({"type": "final", "response": response}, ensure_ascii=True) + "\n"
 
         return StreamingResponse(_auth_required_stream(), media_type="application/x-ndjson", headers=stream_headers)
-    with SessionLocal() as db:
-        existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
-            db=db,
-            workspace_id=payload.workspace_id,
-            session_id=session_id,
-        )
-        payload_with_session = payload.model_copy(update={"session_id": session_id, "project_id": effective_project_id})
-        (
-            effective_instruction,
-            _,
-            compact_only,
-            prepared_attachment_refs,
-            prepared_session_attachment_refs,
-            intent_flags,
-            chat_usage_metadata,
-        ) = _prepare_chat_instruction(
-            payload=payload_with_session,
-            db=db,
-            user=user,
-            resume_codex_session_id=existing_codex_session_id,
-            resume_last_succeeded=resume_last_succeeded,
-        )
-
-        attachment_refs = prepared_attachment_refs or [item.model_dump() for item in payload.attachment_refs or []]
-        session_attachment_refs = (
-            prepared_session_attachment_refs
-            or [item.model_dump() for item in payload.session_attachment_refs or []]
-        )
-        ChatApplicationService(
-            db,
-            user,
-            command_id=_command_id_with_suffix(command_id, "chat-user"),
-        ).append_user_message(
-            AppendUserMessagePayload(
-                workspace_id=payload.workspace_id,
-                project_id=effective_project_id,
-                session_id=session_id,
-                message_id=None,
-                content=(payload.instruction or "").strip(),
-                usage={"intent_flags": intent_flags},
-                mcp_servers=mcp_servers,
-                attachment_refs=attachment_refs,
-                session_attachment_refs=session_attachment_refs,
-            )
-        )
-
-    if _should_prompt_for_project_setup_name(intent_flags=intent_flags, project_id=effective_project_id):
-        summary = _PROJECT_SETUP_STARTER_NEXT_QUESTION
-        _persist_assistant_message_with_links(
-            db=db,
-            user=user,
-            command_id=command_id,
-            workspace_id=payload.workspace_id,
-            project_id=effective_project_id,
-            session_id=session_id,
-            mcp_servers=mcp_servers,
-            content=summary,
-            usage={},
-            codex_session_id=None,
-        )
-        starter_response = {
-            "ok": True,
-            "action": "comment",
-            "summary": summary,
-            "comment": None,
-            "session_id": session_id,
-            "codex_session_id": None,
-            "usage": None,
-            "resume_attempted": False,
-            "resume_succeeded": False,
-            "resume_fallback_used": False,
-        }
-
-        def _starter_stream():
-            yield json.dumps({"type": "final", "response": starter_response}, ensure_ascii=True) + "\n"
-
-        return StreamingResponse(_starter_stream(), media_type="application/x-ndjson", headers=stream_headers)
-
-    if compact_only:
-        _persist_assistant_message_with_links(
-            db=db,
-            user=user,
-            command_id=command_id,
-            workspace_id=payload.workspace_id,
-            project_id=effective_project_id,
-            session_id=session_id,
-            mcp_servers=mcp_servers,
-            content=effective_instruction,
-            usage=dict(chat_usage_metadata or {}),
-            codex_session_id=None,
-        )
-        compact_response = {
-            "ok": True,
-            "action": "comment",
-            "summary": effective_instruction,
-            "comment": None,
-            "session_id": session_id,
-            "codex_session_id": None,
-            "usage": None,
-            "resume_attempted": False,
-            "resume_succeeded": False,
-            "resume_fallback_used": False,
-        }
-
-        def _compact_stream():
-            yield json.dumps({"type": "final", "response": compact_response}, ensure_ascii=True) + "\n"
-
-        return StreamingResponse(_compact_stream(), media_type="application/x-ndjson", headers=stream_headers)
-
-    with SessionLocal() as db:
-        kickoff_result = plugin_api_policy.maybe_dispatch_execution_kickoff(
-            db=db,
-            user=user,
-            workspace_id=payload.workspace_id,
-            project_id=effective_project_id,
-            intent_flags=intent_flags,
-            allow_mutations=bool(payload.allow_mutations),
-            command_id=command_id,
-            promote_plugin_policy_to_execution_mode_if_needed=_promote_plugin_policy_to_execution_mode_if_needed,
-            build_team_lead_kickoff_instruction=_build_team_lead_kickoff_instruction,
-            command_id_with_suffix=_command_id_with_suffix,
-        )
-    if kickoff_result is not None:
-        summary = str(kickoff_result.get("summary") or "").strip() or "Team Mode kickoff dispatched."
-        comment = str(kickoff_result.get("comment") or "").strip() or None
-        _persist_assistant_message_with_links(
-            db=db,
-            user=user,
-            command_id=command_id,
-            workspace_id=payload.workspace_id,
-            project_id=effective_project_id,
-            session_id=session_id,
-            mcp_servers=mcp_servers,
-            content=_assistant_text(summary, comment),
-            usage={},
-            codex_session_id=None,
-        )
-        kickoff_response = {
-            "ok": bool(kickoff_result.get("ok")),
-            "action": "comment",
-            "summary": summary,
-            "comment": comment,
-            "session_id": session_id,
-            "codex_session_id": None,
-            "usage": None,
-            "resume_attempted": False,
-            "resume_succeeded": False,
-            "resume_fallback_used": False,
-        }
-
-        def _kickoff_stream():
-            yield json.dumps({"type": "final", "response": kickoff_response}, ensure_ascii=True) + "\n"
-
-        return StreamingResponse(_kickoff_stream(), media_type="application/x-ndjson", headers=stream_headers)
-
     description = f"General Codex chat context. workspace_id={payload.workspace_id}; project_id={effective_project_id or ''}"
     run_started_at = datetime.now(timezone.utc)
     stream_key = _chat_stream_key(workspace_id=payload.workspace_id, session_id=session_id)
@@ -3354,6 +3229,10 @@ def agent_chat_stream(
         error_holder: dict[str, Exception] = {}
         finalize_lock = threading.Lock()
         finalized_response: dict[str, object] = {}
+        preflight_state: dict[str, object] = {
+            "intent_flags": {},
+            "chat_usage_metadata": {},
+        }
         streamed_assistant_text_parts: list[str] = []
         streamed_parts_lock = threading.Lock()
 
@@ -3364,6 +3243,10 @@ def agent_chat_stream(
         _publish_chat_stream_event(
             stream_key=stream_key,
             event={"type": "status", "message": "Agent started processing the request."},
+        )
+        _publish_chat_stream_event(
+            stream_key=stream_key,
+            event={"type": "status", "message": "Preparing request context and intent classification..."},
         )
 
         def _on_event(event: dict[str, object]) -> None:
@@ -3379,6 +3262,158 @@ def agent_chat_stream(
 
         def _worker() -> None:
             try:
+                with SessionLocal() as db:
+                    existing_codex_session_id, resume_last_succeeded = _load_chat_session_codex_state(
+                        db=db,
+                        workspace_id=payload.workspace_id,
+                        session_id=session_id,
+                    )
+                    payload_with_session = payload.model_copy(
+                        update={"session_id": session_id, "project_id": effective_project_id}
+                    )
+                    (
+                        effective_instruction,
+                        _,
+                        compact_only,
+                        prepared_attachment_refs,
+                        prepared_session_attachment_refs,
+                        intent_flags,
+                        chat_usage_metadata,
+                    ) = _prepare_chat_instruction(
+                        payload=payload_with_session,
+                        db=db,
+                        user=user,
+                        resume_codex_session_id=existing_codex_session_id,
+                        resume_last_succeeded=resume_last_succeeded,
+                    )
+                    preflight_state["intent_flags"] = dict(intent_flags or {})
+                    preflight_state["chat_usage_metadata"] = (
+                        dict(chat_usage_metadata) if isinstance(chat_usage_metadata, dict) else {}
+                    )
+
+                    attachment_refs = prepared_attachment_refs or [item.model_dump() for item in payload.attachment_refs or []]
+                    session_attachment_refs = (
+                        prepared_session_attachment_refs
+                        or [item.model_dump() for item in payload.session_attachment_refs or []]
+                    )
+                    ChatApplicationService(
+                        db,
+                        user,
+                        command_id=_command_id_with_suffix(command_id, "chat-user"),
+                    ).append_user_message(
+                        AppendUserMessagePayload(
+                            workspace_id=payload.workspace_id,
+                            project_id=effective_project_id,
+                            session_id=session_id,
+                            message_id=None,
+                            content=(payload.instruction or "").strip(),
+                            usage={"intent_flags": intent_flags},
+                            mcp_servers=mcp_servers,
+                            attachment_refs=attachment_refs,
+                            session_attachment_refs=session_attachment_refs,
+                        )
+                    )
+
+                    if _should_prompt_for_project_setup_name(intent_flags=intent_flags, project_id=effective_project_id):
+                        summary = _PROJECT_SETUP_STARTER_NEXT_QUESTION
+                        _persist_assistant_message_with_links(
+                            db=db,
+                            user=user,
+                            command_id=command_id,
+                            workspace_id=payload.workspace_id,
+                            project_id=effective_project_id,
+                            session_id=session_id,
+                            mcp_servers=mcp_servers,
+                            content=summary,
+                            usage={},
+                            codex_session_id=None,
+                        )
+                        outcome_holder["prebuilt_response"] = {
+                            "ok": True,
+                            "action": "comment",
+                            "summary": summary,
+                            "comment": None,
+                            "session_id": session_id,
+                            "codex_session_id": None,
+                            "usage": None,
+                            "resume_attempted": False,
+                            "resume_succeeded": False,
+                            "resume_fallback_used": False,
+                        }
+                        return
+
+                    if compact_only:
+                        _persist_assistant_message_with_links(
+                            db=db,
+                            user=user,
+                            command_id=command_id,
+                            workspace_id=payload.workspace_id,
+                            project_id=effective_project_id,
+                            session_id=session_id,
+                            mcp_servers=mcp_servers,
+                            content=effective_instruction,
+                            usage=dict(chat_usage_metadata or {}),
+                            codex_session_id=None,
+                        )
+                        outcome_holder["prebuilt_response"] = {
+                            "ok": True,
+                            "action": "comment",
+                            "summary": effective_instruction,
+                            "comment": None,
+                            "session_id": session_id,
+                            "codex_session_id": None,
+                            "usage": None,
+                            "resume_attempted": False,
+                            "resume_succeeded": False,
+                            "resume_fallback_used": False,
+                        }
+                        return
+
+                    kickoff_result = plugin_api_policy.maybe_dispatch_execution_kickoff(
+                        db=db,
+                        user=user,
+                        workspace_id=payload.workspace_id,
+                        project_id=effective_project_id,
+                        intent_flags=intent_flags,
+                        allow_mutations=bool(payload.allow_mutations),
+                        command_id=command_id,
+                        promote_plugin_policy_to_execution_mode_if_needed=_promote_plugin_policy_to_execution_mode_if_needed,
+                        build_team_lead_kickoff_instruction=_build_team_lead_kickoff_instruction,
+                        command_id_with_suffix=_command_id_with_suffix,
+                    )
+                    if kickoff_result is not None:
+                        summary = str(kickoff_result.get("summary") or "").strip() or "Team Mode kickoff dispatched."
+                        comment = str(kickoff_result.get("comment") or "").strip() or None
+                        _persist_assistant_message_with_links(
+                            db=db,
+                            user=user,
+                            command_id=command_id,
+                            workspace_id=payload.workspace_id,
+                            project_id=effective_project_id,
+                            session_id=session_id,
+                            mcp_servers=mcp_servers,
+                            content=_assistant_text(summary, comment),
+                            usage={},
+                            codex_session_id=None,
+                        )
+                        outcome_holder["prebuilt_response"] = {
+                            "ok": bool(kickoff_result.get("ok")),
+                            "action": "comment",
+                            "summary": summary,
+                            "comment": comment,
+                            "session_id": session_id,
+                            "codex_session_id": None,
+                            "usage": None,
+                            "resume_attempted": False,
+                            "resume_succeeded": False,
+                            "resume_fallback_used": False,
+                        }
+                        return
+
+                _publish_chat_stream_event(
+                    stream_key=stream_key,
+                    event={"type": "status", "message": "Starting agent execution..."},
+                )
                 outcome = execute_task_automation_stream(
                     task_id="",
                     title="General Codex Chat",
@@ -3395,9 +3430,10 @@ def agent_chat_stream(
                     on_event=_on_event,
                     model=model,
                     reasoning_effort=reasoning_effort,
+                    command_id=command_id,
                     prompt_instruction_segments=(
-                        chat_usage_metadata.get("prompt_instruction_segments")
-                        if isinstance(chat_usage_metadata, dict)
+                        preflight_state.get("chat_usage_metadata", {}).get("prompt_instruction_segments")
+                        if isinstance(preflight_state.get("chat_usage_metadata"), dict)
                         else None
                     ),
                     timeout_seconds=0,
@@ -3450,34 +3486,38 @@ def agent_chat_stream(
                             "_force_summary_only": bool(mapped_ok and mapped_comment is None),
                         }
                 else:
-                    outcome = outcome_holder.get("value")
-                    if outcome is None:
-                        response = {
-                            "ok": False,
-                            "action": "comment",
-                            "summary": _build_chat_error_summary(),
-                            "comment": "Missing automation outcome.",
-                            "session_id": session_id,
-                            "codex_session_id": None,
-                            "usage": None,
-                            "resume_attempted": False,
-                            "resume_succeeded": False,
-                            "resume_fallback_used": False,
-                        }
+                    prebuilt = outcome_holder.get("prebuilt_response")
+                    if isinstance(prebuilt, dict):
+                        response = dict(prebuilt)
                     else:
-                        outcome_obj = outcome  # type: ignore[assignment]
-                        response = {
-                            "ok": True,
-                            "action": getattr(outcome_obj, "action", "comment"),
-                            "summary": getattr(outcome_obj, "summary", ""),
-                            "comment": getattr(outcome_obj, "comment", ""),
-                            "session_id": session_id,
-                            "codex_session_id": getattr(outcome_obj, "codex_session_id", None),
-                            "usage": getattr(outcome_obj, "usage", None),
-                            "resume_attempted": bool(getattr(outcome_obj, "resume_attempted", False)),
-                            "resume_succeeded": bool(getattr(outcome_obj, "resume_succeeded", False)),
-                            "resume_fallback_used": bool(getattr(outcome_obj, "resume_fallback_used", False)),
-                        }
+                        outcome = outcome_holder.get("value")
+                        if outcome is None:
+                            response = {
+                                "ok": False,
+                                "action": "comment",
+                                "summary": _build_chat_error_summary(),
+                                "comment": "Missing automation outcome.",
+                                "session_id": session_id,
+                                "codex_session_id": None,
+                                "usage": None,
+                                "resume_attempted": False,
+                                "resume_succeeded": False,
+                                "resume_fallback_used": False,
+                            }
+                        else:
+                            outcome_obj = outcome  # type: ignore[assignment]
+                            response = {
+                                "ok": True,
+                                "action": getattr(outcome_obj, "action", "comment"),
+                                "summary": getattr(outcome_obj, "summary", ""),
+                                "comment": getattr(outcome_obj, "comment", ""),
+                                "session_id": session_id,
+                                "codex_session_id": getattr(outcome_obj, "codex_session_id", None),
+                                "usage": getattr(outcome_obj, "usage", None),
+                                "resume_attempted": bool(getattr(outcome_obj, "resume_attempted", False)),
+                                "resume_succeeded": bool(getattr(outcome_obj, "resume_succeeded", False)),
+                                "resume_fallback_used": bool(getattr(outcome_obj, "resume_fallback_used", False)),
+                            }
 
                 if cancel_event.is_set() or _is_chat_stream_stop_requested(stream_key=stream_key):
                     response = {
@@ -3493,6 +3533,7 @@ def agent_chat_stream(
                         "resume_fallback_used": False,
                     }
 
+                chat_usage_metadata = preflight_state.get("chat_usage_metadata")
                 if isinstance(chat_usage_metadata, dict):
                     merged_usage = {
                         **(response.get("usage") if isinstance(response.get("usage"), dict) else {}),
@@ -3500,16 +3541,22 @@ def agent_chat_stream(
                     }
                     response["usage"] = merged_usage
 
-                ok_by_contract, final_summary, final_comment = _apply_execution_evidence_contract(
-                    db=db,
-                    user_id=user.id,
-                    project_id=effective_project_id,
-                    execution_intent=bool(intent_flags.get("execution_intent")),
-                    allow_mutations=bool(payload.allow_mutations),
-                    run_started_at=run_started_at,
-                    summary=str(response.get("summary") or ""),
-                    comment=str(response.get("comment") or "") or None,
-                )
+                intent_flags = preflight_state.get("intent_flags")
+                with SessionLocal() as db:
+                    ok_by_contract, final_summary, final_comment = _apply_execution_evidence_contract(
+                        db=db,
+                        user_id=user.id,
+                        project_id=effective_project_id,
+                        execution_intent=bool(
+                            intent_flags.get("execution_intent")
+                            if isinstance(intent_flags, dict)
+                            else False
+                        ),
+                        allow_mutations=bool(payload.allow_mutations),
+                        run_started_at=run_started_at,
+                        summary=str(response.get("summary") or ""),
+                        comment=str(response.get("comment") or "") or None,
+                    )
                 response["ok"] = bool(ok_by_contract) and bool(response.get("ok"))
                 response["summary"] = final_summary
                 response["comment"] = final_comment
@@ -3529,26 +3576,27 @@ def agent_chat_stream(
                         str(final_comment or ""),
                     )
 
-                _persist_assistant_message_with_links(
-                    db=db,
-                    user=user,
-                    command_id=command_id,
-                    workspace_id=payload.workspace_id,
-                    project_id=effective_project_id,
-                    session_id=session_id,
-                    mcp_servers=mcp_servers,
-                    content=assistant_content,
-                    usage=(
-                        {
-                            **(response.get("usage") if isinstance(response.get("usage"), dict) else {}),
-                            "codex_resume_attempted": bool(response.get("resume_attempted")),
-                            "codex_resume_succeeded": bool(response.get("resume_succeeded")),
-                            "codex_resume_fallback_used": bool(response.get("resume_fallback_used")),
-                        }
-                    ),
-                    codex_session_id=str(response.get("codex_session_id") or "").strip() or None,
-                    run_started_at=run_started_at,
-                )
+                with SessionLocal() as db:
+                    _persist_assistant_message_with_links(
+                        db=db,
+                        user=user,
+                        command_id=command_id,
+                        workspace_id=payload.workspace_id,
+                        project_id=effective_project_id,
+                        session_id=session_id,
+                        mcp_servers=mcp_servers,
+                        content=assistant_content,
+                        usage=(
+                            {
+                                **(response.get("usage") if isinstance(response.get("usage"), dict) else {}),
+                                "codex_resume_attempted": bool(response.get("resume_attempted")),
+                                "codex_resume_succeeded": bool(response.get("resume_succeeded")),
+                                "codex_resume_fallback_used": bool(response.get("resume_fallback_used")),
+                            }
+                        ),
+                        codex_session_id=str(response.get("codex_session_id") or "").strip() or None,
+                        run_started_at=run_started_at,
+                    )
 
                 _publish_chat_stream_event(
                     stream_key=stream_key,

@@ -466,6 +466,10 @@ export function useRealtimeEffects(c: any) {
         }
         if (provider === 'claude' && payload.auth_status && typeof payload.auth_status === 'object') {
           qc.setQueryData(['claude-auth-status', userId], payload.auth_status)
+          return
+        }
+        if (provider === 'opencode' && payload.auth_status && typeof payload.auth_status === 'object') {
+          qc.setQueryData(['opencode-auth-status', userId], payload.auth_status)
         }
       } catch {
         // Ignore malformed auth events.

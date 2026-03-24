@@ -239,6 +239,8 @@ declare -a AGENT_RUNTIME_ENV_KEYS=(
   AGENT_CODEX_DEFAULT_REASONING_EFFORT
   AGENT_CLAUDE_DEFAULT_MODEL
   AGENT_CLAUDE_DEFAULT_REASONING_EFFORT
+  AGENT_OPENCODE_DEFAULT_MODEL
+  AGENT_OPENCODE_DEFAULT_REASONING_EFFORT
   AGENT_ENABLED_PLUGINS
 )
 
@@ -255,6 +257,12 @@ for env_key in "${AGENT_RUNTIME_ENV_KEYS[@]}"; do
       ;;
     AGENT_CLAUDE_DEFAULT_REASONING_EFFORT)
       env_value="$(resolve_first_compose_env_value "AGENT_CLAUDE_DEFAULT_REASONING_EFFORT" "AGENT_CLAUDE_REASONING_EFFORT" || true)"
+      ;;
+    AGENT_OPENCODE_DEFAULT_MODEL)
+      env_value="$(resolve_first_compose_env_value "AGENT_OPENCODE_DEFAULT_MODEL" "AGENT_OPENCODE_MODEL" || true)"
+      ;;
+    AGENT_OPENCODE_DEFAULT_REASONING_EFFORT)
+      env_value="$(resolve_first_compose_env_value "AGENT_OPENCODE_DEFAULT_REASONING_EFFORT" "AGENT_OPENCODE_REASONING_EFFORT" || true)"
       ;;
     *)
       env_value="$(resolve_compose_env_value "$env_key" || true)"

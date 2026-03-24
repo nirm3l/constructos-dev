@@ -43,7 +43,7 @@ def _load_positive_float_env(name: str, default: float) -> float:
 
 
 _CACHE_TTL_SECONDS = _load_positive_float_env("MCP_REGISTRY_CACHE_TTL_SECONDS", 60.0)
-_MCP_LIST_TIMEOUT_SECONDS = _load_positive_float_env("MCP_REGISTRY_LIST_TIMEOUT_SECONDS", 0.8)
+_MCP_LIST_TIMEOUT_SECONDS = _load_positive_float_env("MCP_REGISTRY_LIST_TIMEOUT_SECONDS", 2.0)
 
 
 def _toml_quote(value: str) -> str:
@@ -435,6 +435,84 @@ def build_selected_mcp_config_payload(
         if server_payload:
             servers[clean_name] = server_payload
     return {"mcpServers": servers} if servers else {}
+
+
+def _build_opencode_mcp_server_config(*, server_name: str, config: dict[str, Any], core_url: str) -> dict[str, Any]:
+    normalized_name = str(server_name or "").strip()
+    normalized_lookup = _normalize_lookup_key(normalized_name)
+    source = copy.deepcopy(config) if isinstance(config, dict) else {}
+    if normalized_lookup in {_normalize_lookup_key(_FALLBACK_SERVER_NAME), _normalize_lookup_key(_LEGACY_CORE_SERVER_NAME)}:
+        source["url"] = core_url
+
+    url = str(source.get("url") or "").strip()
+    if url:
+        payload: dict[str, Any] = {
+            "type": "remote",
+            "url": url,
+            "enabled": True,
+        }
+        headers = source.get("headers")
+        if isinstance(headers, dict) and headers:
+            payload["headers"] = copy.deepcopy(headers)
+        oauth = source.get("oauth")
+        if oauth is False or isinstance(oauth, dict):
+            payload["oauth"] = copy.deepcopy(oauth)
+        timeout = source.get("timeout")
+        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+            payload["timeout"] = timeout
+        return payload
+
+    command_value = source.get("command")
+    args_value = source.get("args")
+    command: list[str] = []
+    if isinstance(command_value, list):
+        command = [str(item) for item in command_value if str(item or "").strip()]
+    elif str(command_value or "").strip():
+        command = [str(command_value).strip()]
+        if isinstance(args_value, list):
+            command.extend(str(item) for item in args_value if str(item or "").strip())
+    if not command:
+        return {}
+
+    payload = {
+        "type": "local",
+        "command": command,
+        "enabled": True,
+    }
+    environment = source.get("environment")
+    if not isinstance(environment, dict):
+        environment = source.get("env")
+    if isinstance(environment, dict) and environment:
+        payload["environment"] = copy.deepcopy(environment)
+    timeout = source.get("timeout")
+    if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+        payload["timeout"] = timeout
+    return payload
+
+
+def build_selected_opencode_mcp_config_payload(
+    *,
+    selected_servers: list[str],
+    task_management_mcp_url: str | None = None,
+) -> dict[str, Any]:
+    rows = _get_rows()
+    rows_by_name = {str(row.get("name") or "").strip(): row for row in rows}
+    core_url = str(task_management_mcp_url or AGENT_MCP_URL).strip() or AGENT_MCP_URL
+    servers: dict[str, Any] = {}
+    for server_name in selected_servers:
+        clean_name = str(server_name or "").strip()
+        if not clean_name:
+            continue
+        row = rows_by_name.get(clean_name) or {}
+        config_raw = row.get("config")
+        server_payload = _build_opencode_mcp_server_config(
+            server_name=clean_name,
+            config=config_raw if isinstance(config_raw, dict) else {},
+            core_url=core_url,
+        )
+        if server_payload:
+            servers[clean_name] = server_payload
+    return {"mcp": servers} if servers else {}
 
 
 def filter_mcp_servers_for_project_plugins(

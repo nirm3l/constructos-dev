@@ -205,7 +205,7 @@ async def notifications_stream(
                         if signal_reason.startswith(_AGENT_AUTH_REALTIME_REASON_PREFIX):
                             provider = signal_reason.removeprefix(_AGENT_AUTH_REALTIME_REASON_PREFIX).strip()
                             payload = {"provider": provider} if provider else {}
-                            if provider in {"codex", "claude"}:
+                            if provider in {"codex", "claude", "opencode"}:
                                 try:
                                     payload["auth_status"] = get_provider_auth_status(provider)
                                 except Exception:

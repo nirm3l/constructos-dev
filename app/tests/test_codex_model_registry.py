@@ -1,6 +1,33 @@
 from __future__ import annotations
 
 
+def test_parse_execution_model_detects_opencode_style_provider_path():
+    from features.agents.execution_provider import parse_execution_model
+
+    provider, model = parse_execution_model("openai/gpt-5-nano")
+
+    assert provider == "opencode"
+    assert model == "openai/gpt-5-nano"
+
+
+def test_parse_execution_model_keeps_opencode_prefixed_model_path():
+    from features.agents.execution_provider import parse_execution_model
+
+    provider, model = parse_execution_model("opencode/nemotron-3-super-free")
+
+    assert provider == "opencode"
+    assert model == "opencode/nemotron-3-super-free"
+
+
+def test_parse_execution_model_supports_ui_display_format():
+    from features.agents.execution_provider import parse_execution_model
+
+    provider, model = parse_execution_model("OpenCode · opencode/gpt-5-nano")
+
+    assert provider == "opencode"
+    assert model == "opencode/gpt-5-nano"
+
+
 def test_parse_model_list_result_keeps_unique_models_and_default():
     from features.agents import model_registry
 
@@ -48,10 +75,11 @@ def test_list_available_agent_models_combines_providers(monkeypatch):
 
     monkeypatch.setattr(model_registry, "list_available_codex_models", lambda force_refresh=False: (["gpt-5"], "gpt-5"))
     monkeypatch.setattr(model_registry, "list_available_claude_models", lambda: (["sonnet"], "sonnet"))
+    monkeypatch.setattr(model_registry, "list_available_opencode_models", lambda: (["opencode/gpt-5-nano"], "opencode/gpt-5-nano"))
 
     models, default_model = model_registry.list_available_agent_models(force_refresh=True)
 
-    assert models == ["codex:gpt-5", "claude:sonnet"]
+    assert models == ["codex:gpt-5", "claude:sonnet", "opencode:opencode/gpt-5-nano"]
     assert default_model == "codex:gpt-5"
 
 
@@ -65,6 +93,19 @@ def test_list_available_claude_models_uses_built_in_fallbacks(monkeypatch):
 
     assert models == ["sonnet", "opus"]
     assert default_model == "sonnet"
+
+
+def test_list_available_opencode_models_uses_env_fallback(monkeypatch):
+    from features.agents import model_registry
+
+    monkeypatch.setattr(model_registry, "_read_model_list_from_opencode", lambda: (_ for _ in ()).throw(FileNotFoundError()))
+    monkeypatch.setenv("AGENT_OPENCODE_AVAILABLE_MODELS", "opencode/gpt-5-nano,openai/gpt-5-mini,opencode/mimo-v2-pro-free")
+    monkeypatch.setattr(model_registry, "agent_default_model_for_provider", lambda provider: "opencode/gpt-5-nano")
+
+    models, default_model = model_registry.list_available_opencode_models()
+
+    assert models == ["opencode/gpt-5-nano", "opencode/mimo-v2-pro-free"]
+    assert default_model == "opencode/gpt-5-nano"
 
 
 def test_append_agent_chat_models_deduplicates_case_insensitively():

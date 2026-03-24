@@ -1,11 +1,17 @@
 import type { AgentAuthStatus, AgentAuthProvider } from '../types'
 
 export function normalizeAgentExecutionProvider(value: unknown): AgentAuthProvider {
-  return String(value || '').trim().toLowerCase() === 'claude' ? 'claude' : 'codex'
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'claude') return 'claude'
+  if (normalized === 'opencode') return 'opencode'
+  return 'codex'
 }
 
 export function getAgentExecutionProviderLabel(value: unknown): string {
-  return normalizeAgentExecutionProvider(value) === 'claude' ? 'Claude' : 'Codex'
+  const provider = normalizeAgentExecutionProvider(value)
+  if (provider === 'claude') return 'Claude'
+  if (provider === 'opencode') return 'OpenCode'
+  return 'Codex'
 }
 
 export function encodeAgentExecutionModel(provider: unknown, model: unknown): string {
@@ -33,6 +39,13 @@ export function parseAgentExecutionModel(value: unknown): { provider: AgentAuthP
   if (lowered === 'sonnet' || lowered === 'opus' || lowered === 'haiku' || lowered.startsWith('claude-')) {
     return { provider: 'claude', model: raw }
   }
+  const providerPrefix = lowered.split('/')[0] || ''
+  if (raw.includes('/') && [
+    'opencode', 'openai', 'ollama', 'openrouter', 'anthropic', 'google', 'xai',
+    'mistral', 'deepseek', 'cohere', 'groq', 'cerebras', 'minimax',
+  ].includes(providerPrefix)) {
+    return { provider: 'opencode', model: raw }
+  }
   return { provider: 'codex', model: raw }
 }
 
@@ -56,9 +69,25 @@ export function resolveActiveAgentExecutionProvider(model: unknown, defaultModel
 export function authStatusForProvider(
   provider: AgentAuthProvider,
   codexAuthStatus: AgentAuthStatus | null | undefined,
-  claudeAuthStatus: AgentAuthStatus | null | undefined
+  claudeAuthStatus: AgentAuthStatus | null | undefined,
+  opencodeAuthStatus: AgentAuthStatus | null | undefined = null,
 ): AgentAuthStatus | null {
-  return provider === 'claude' ? (claudeAuthStatus ?? null) : (codexAuthStatus ?? null)
+  if (provider === 'claude') return claudeAuthStatus ?? null
+  if (provider === 'opencode') {
+    if (opencodeAuthStatus) return opencodeAuthStatus
+    return {
+      provider: 'opencode',
+      provider_label: 'OpenCode',
+      configured: true,
+      effective_source: 'runtime_builtin',
+      host_auth_available: false,
+      override_available: false,
+      selected_login_method: null,
+      supported_login_methods: [],
+      login_session: null,
+    }
+  }
+  return codexAuthStatus ?? null
 }
 
 export function authSourceLabel(
@@ -71,5 +100,6 @@ export function authSourceLabel(
     return `Connected for ${String(targetUsername || `${provider}-bot`).trim() || `${provider}-bot`}`
   }
   if (normalized === 'host_mount') return 'Using host-mounted auth'
+  if (normalized === 'runtime_builtin') return 'Built-in runtime access'
   return 'Not configured'
 }

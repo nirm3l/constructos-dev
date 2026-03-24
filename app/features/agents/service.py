@@ -1527,6 +1527,7 @@ class AgentTaskService:
                     [
                         agent_system_username_for_provider("codex"),
                         agent_system_username_for_provider("claude"),
+                        agent_system_username_for_provider("opencode"),
                     ]
                 ),
             )
@@ -1542,8 +1543,10 @@ class AgentTaskService:
                 available_agent_member_ids_by_provider["codex"] = normalized_user_id
             elif normalized_username == agent_system_username_for_provider("claude").lower():
                 available_agent_member_ids_by_provider["claude"] = normalized_user_id
+            elif normalized_username == agent_system_username_for_provider("opencode").lower():
+                available_agent_member_ids_by_provider["opencode"] = normalized_user_id
 
-        for provider in ("codex", "claude"):
+        for provider in ("codex", "claude", "opencode"):
             member_id = str(available_agent_member_ids_by_provider.get(provider) or "").strip()
             if not member_id:
                 continue

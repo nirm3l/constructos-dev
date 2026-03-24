@@ -2,8 +2,23 @@ from __future__ import annotations
 
 from shared.settings import AGENT_DEFAULT_EXECUTION_PROVIDER
 
-_KNOWN_EXECUTION_PROVIDERS = {"codex", "claude"}
+_KNOWN_EXECUTION_PROVIDERS = {"codex", "claude", "opencode"}
 _CLAUDE_MODEL_ALIASES = {"sonnet", "opus", "haiku"}
+_OPENCODE_MODEL_PROVIDER_PREFIXES = {
+    "opencode",
+    "openai",
+    "ollama",
+    "openrouter",
+    "anthropic",
+    "google",
+    "xai",
+    "mistral",
+    "deepseek",
+    "cohere",
+    "groq",
+    "cerebras",
+    "minimax",
+}
 
 
 def normalize_execution_provider(value: object) -> str | None:
@@ -27,15 +42,23 @@ def parse_execution_model(value: object) -> tuple[str | None, str | None]:
     raw = str(value or "").strip()
     if not raw:
         return None, None
-    for separator in (":", "/"):
-        provider_part, separator_value, model_part = raw.partition(separator)
-        provider = normalize_execution_provider(provider_part)
-        model = str(model_part or "").strip()
-        if separator_value and provider and model:
-            return provider, model
+    display_provider_part, display_sep, display_model_part = raw.partition("·")
+    if display_sep:
+        display_provider = normalize_execution_provider(display_provider_part.strip().lower())
+        display_model = str(display_model_part or "").strip()
+        if display_provider and display_model:
+            return display_provider, display_model
+    provider_part, separator_value, model_part = raw.partition(":")
+    provider = normalize_execution_provider(provider_part)
+    model = str(model_part or "").strip()
+    if separator_value and provider and model:
+        return provider, model
     lowered = raw.lower()
     if lowered in _CLAUDE_MODEL_ALIASES or lowered.startswith("claude-"):
         return "claude", raw
+    provider_prefix, sep, _ = lowered.partition("/")
+    if sep and provider_prefix in _OPENCODE_MODEL_PROVIDER_PREFIXES:
+        return "opencode", raw
     return "codex", raw
 
 

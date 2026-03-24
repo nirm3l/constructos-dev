@@ -24,6 +24,9 @@ from shared.settings import (
     CODEX_SYSTEM_FULL_NAME,
     CODEX_SYSTEM_USER_ID,
     CODEX_SYSTEM_USERNAME,
+    OPENCODE_SYSTEM_FULL_NAME,
+    OPENCODE_SYSTEM_USER_ID,
+    OPENCODE_SYSTEM_USERNAME,
 )
 
 _DEFAULT_AGENT_HOME_ROOT = "/tmp/agent-home"
@@ -88,6 +91,16 @@ _AUTH_PROVIDER_SPECS: dict[str, AuthProviderSpec] = {
         host_auth_relative_path=(".claude.json",),
         override_auth_relative_path=(".claude.json",),
         login_command=("claude",),
+    ),
+    "opencode": AuthProviderSpec(
+        provider="opencode",
+        display_name="OpenCode",
+        system_user_id=OPENCODE_SYSTEM_USER_ID,
+        system_username=OPENCODE_SYSTEM_USERNAME,
+        system_full_name=OPENCODE_SYSTEM_FULL_NAME,
+        host_auth_relative_path=(".opencode", "auth.json"),
+        override_auth_relative_path=(".opencode", "auth.json"),
+        login_command=(),
     ),
 }
 
@@ -339,6 +352,8 @@ def _read_claude_auth_status(home_path: Path) -> dict[str, object] | None:
 
 def _provider_auth_home_ready(provider: str, home_path: Path | None) -> bool:
     spec = _provider_spec(provider)
+    if spec.provider == "opencode":
+        return shutil.which("opencode") is not None
     if home_path is None:
         return False
     auth_path = home_path.joinpath(*spec.override_auth_relative_path)
@@ -377,6 +392,9 @@ def resolve_provider_system_override_auth_path(provider: str) -> Path:
 
 
 def resolve_provider_effective_auth_source(provider: str, _actor_user_id: str | None = None) -> str:
+    normalized_provider = str(provider or "").strip().lower()
+    if normalized_provider == "opencode":
+        return "runtime_builtin" if shutil.which("opencode") is not None else "none"
     if _provider_auth_home_ready(provider, resolve_provider_system_override_home(provider)):
         return "system_override"
     if resolve_provider_host_auth_path(provider) is not None:
@@ -385,6 +403,9 @@ def resolve_provider_effective_auth_source(provider: str, _actor_user_id: str | 
 
 
 def resolve_provider_effective_auth_path(provider: str, _actor_user_id: str | None = None) -> Path | None:
+    normalized_provider = str(provider or "").strip().lower()
+    if normalized_provider == "opencode":
+        return None
     override_path = resolve_provider_system_override_auth_path(provider)
     if _provider_auth_home_ready(provider, _provider_home_from_auth_path(provider, override_path)):
         return override_path
@@ -394,6 +415,10 @@ def resolve_provider_effective_auth_path(provider: str, _actor_user_id: str | No
 def ensure_provider_system_override_home(provider: str) -> Path:
     spec = _provider_spec(provider)
     home_path = resolve_provider_system_override_home(provider)
+    if spec.provider == "opencode":
+        home_path.mkdir(parents=True, exist_ok=True)
+        (home_path / ".opencode").mkdir(parents=True, exist_ok=True)
+        return home_path
     if spec.provider == "codex":
         codex_dir = home_path / ".codex"
         codex_dir.mkdir(parents=True, exist_ok=True)
@@ -854,6 +879,8 @@ def start_provider_device_auth_session(
     login_method: str | None = None,
 ) -> dict[str, object]:
     spec = _provider_spec(provider)
+    if spec.provider not in {"codex", "claude"}:
+        raise ValueError(f"{spec.display_name} does not require device authentication.")
     normalized_user_id = str(requested_by_user_id or "").strip() or None
     resolved_login_method = _resolve_provider_login_method(spec.provider, login_method)
     if spec.provider == "claude" and resolved_login_method is None:

@@ -86,6 +86,9 @@ CODEX_SYSTEM_FULL_NAME = "Codex Bot"
 CLAUDE_SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000098"
 CLAUDE_SYSTEM_USERNAME = "claude-bot"
 CLAUDE_SYSTEM_FULL_NAME = "Claude Bot"
+OPENCODE_SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000097"
+OPENCODE_SYSTEM_USERNAME = "opencode-bot"
+OPENCODE_SYSTEM_FULL_NAME = "OpenCode Bot"
 AGENT_SYSTEM_USER_ID = CODEX_SYSTEM_USER_ID
 AGENT_SYSTEM_USERNAME = CODEX_SYSTEM_USERNAME
 AGENT_SYSTEM_FULL_NAME = CODEX_SYSTEM_FULL_NAME
@@ -115,6 +118,11 @@ AGENT_CLAUDE_DEFAULT_REASONING_EFFORT = _env_first(
     ("AGENT_CLAUDE_DEFAULT_REASONING_EFFORT", "AGENT_CLAUDE_REASONING_EFFORT"),
     "",
 )
+AGENT_OPENCODE_DEFAULT_MODEL = _env_first(("AGENT_OPENCODE_DEFAULT_MODEL", "AGENT_OPENCODE_MODEL"), "opencode/gpt-5-nano")
+AGENT_OPENCODE_DEFAULT_REASONING_EFFORT = _env_first(
+    ("AGENT_OPENCODE_DEFAULT_REASONING_EFFORT", "AGENT_OPENCODE_REASONING_EFFORT"),
+    "",
+)
 AGENT_CODEX_COMMAND = AGENT_EXECUTION_COMMAND
 AGENT_CODEX_MCP_URL = AGENT_MCP_URL
 AGENT_CODEX_WORKDIR = AGENT_WORKDIR
@@ -122,6 +130,8 @@ AGENT_CODEX_MODEL = AGENT_CODEX_DEFAULT_MODEL
 AGENT_CODEX_REASONING_EFFORT = AGENT_CODEX_DEFAULT_REASONING_EFFORT
 AGENT_CLAUDE_MODEL = AGENT_CLAUDE_DEFAULT_MODEL
 AGENT_CLAUDE_REASONING_EFFORT = AGENT_CLAUDE_DEFAULT_REASONING_EFFORT
+AGENT_OPENCODE_MODEL = AGENT_OPENCODE_DEFAULT_MODEL
+AGENT_OPENCODE_REASONING_EFFORT = AGENT_OPENCODE_DEFAULT_REASONING_EFFORT
 AGENT_ENABLED_PLUGINS = _parse_csv_list_env("AGENT_ENABLED_PLUGINS") or ["team_mode", "git_delivery", "github_delivery", "doctor"]
 ATTACHMENTS_DIR = os.getenv("ATTACHMENTS_DIR", "/data/uploads").strip() or "/data/uploads"
 AUTH_SESSION_COOKIE_NAME = os.getenv("AUTH_SESSION_COOKIE_NAME", "m4tr1x_session").strip() or "m4tr1x_session"
@@ -173,31 +183,57 @@ EVENT_STORMING_ANALYSIS_STALE_AFTER_SECONDS = max(
 
 
 def _normalize_provider_name(value: object) -> str:
-    return "claude" if str(value or "").strip().lower() == "claude" else "codex"
+    normalized = str(value or "").strip().lower()
+    if normalized == "claude":
+        return "claude"
+    if normalized == "opencode":
+        return "opencode"
+    return "codex"
 
 
 def agent_system_user_id_for_provider(provider: object) -> str:
-    return CLAUDE_SYSTEM_USER_ID if _normalize_provider_name(provider) == "claude" else CODEX_SYSTEM_USER_ID
+    normalized = _normalize_provider_name(provider)
+    if normalized == "claude":
+        return CLAUDE_SYSTEM_USER_ID
+    if normalized == "opencode":
+        return OPENCODE_SYSTEM_USER_ID
+    return CODEX_SYSTEM_USER_ID
 
 
 def agent_system_username_for_provider(provider: object) -> str:
-    return CLAUDE_SYSTEM_USERNAME if _normalize_provider_name(provider) == "claude" else CODEX_SYSTEM_USERNAME
+    normalized = _normalize_provider_name(provider)
+    if normalized == "claude":
+        return CLAUDE_SYSTEM_USERNAME
+    if normalized == "opencode":
+        return OPENCODE_SYSTEM_USERNAME
+    return CODEX_SYSTEM_USERNAME
 
 
 def agent_system_full_name_for_provider(provider: object) -> str:
-    return CLAUDE_SYSTEM_FULL_NAME if _normalize_provider_name(provider) == "claude" else CODEX_SYSTEM_FULL_NAME
+    normalized = _normalize_provider_name(provider)
+    if normalized == "claude":
+        return CLAUDE_SYSTEM_FULL_NAME
+    if normalized == "opencode":
+        return OPENCODE_SYSTEM_FULL_NAME
+    return CODEX_SYSTEM_FULL_NAME
 
 
 def agent_default_model_for_provider(provider: object) -> str:
-    return AGENT_CLAUDE_DEFAULT_MODEL if _normalize_provider_name(provider) == "claude" else AGENT_CODEX_DEFAULT_MODEL
+    normalized = _normalize_provider_name(provider)
+    if normalized == "claude":
+        return AGENT_CLAUDE_DEFAULT_MODEL
+    if normalized == "opencode":
+        return AGENT_OPENCODE_DEFAULT_MODEL
+    return AGENT_CODEX_DEFAULT_MODEL
 
 
 def agent_default_reasoning_effort_for_provider(provider: object) -> str:
-    return (
-        AGENT_CLAUDE_DEFAULT_REASONING_EFFORT
-        if _normalize_provider_name(provider) == "claude"
-        else AGENT_CODEX_DEFAULT_REASONING_EFFORT
-    )
+    normalized = _normalize_provider_name(provider)
+    if normalized == "claude":
+        return AGENT_CLAUDE_DEFAULT_REASONING_EFFORT
+    if normalized == "opencode":
+        return AGENT_OPENCODE_DEFAULT_REASONING_EFFORT
+    return AGENT_CODEX_DEFAULT_REASONING_EFFORT
 
 PERSISTENT_SUBSCRIPTION_READ_MODEL_GROUP = (
     os.getenv("PERSISTENT_SUBSCRIPTION_READ_MODEL_GROUP", "task-management-read-model").strip()

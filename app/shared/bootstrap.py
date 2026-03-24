@@ -66,6 +66,9 @@ from .settings import (
     CODEX_SYSTEM_FULL_NAME,
     CODEX_SYSTEM_USER_ID,
     CODEX_SYSTEM_USERNAME,
+    OPENCODE_SYSTEM_FULL_NAME,
+    OPENCODE_SYSTEM_USER_ID,
+    OPENCODE_SYSTEM_USERNAME,
     logger,
 )
 
@@ -405,6 +408,7 @@ def ensure_system_users(db: Session):
     for user_id, username, full_name in (
         (CODEX_SYSTEM_USER_ID, CODEX_SYSTEM_USERNAME, CODEX_SYSTEM_FULL_NAME),
         (CLAUDE_SYSTEM_USER_ID, CLAUDE_SYSTEM_USERNAME, CLAUDE_SYSTEM_FULL_NAME),
+        (OPENCODE_SYSTEM_USER_ID, OPENCODE_SYSTEM_USERNAME, OPENCODE_SYSTEM_FULL_NAME),
     ):
         if not db.get(User, user_id):
             db.add(
@@ -437,7 +441,7 @@ def ensure_system_users(db: Session):
             agent_user.is_active = True
     workspace = db.get(Workspace, BOOTSTRAP_WORKSPACE_ID)
     if workspace:
-        for user_id in (CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID):
+        for user_id in (CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID, OPENCODE_SYSTEM_USER_ID):
             membership = db.execute(
                 select(WorkspaceMember).where(
                     WorkspaceMember.workspace_id == BOOTSTRAP_WORKSPACE_ID,
@@ -573,8 +577,12 @@ def ensure_user_table_columns(db: Session):
         db.execute(text("ALTER TABLE users ADD COLUMN onboarding_advanced_tour_completed BOOLEAN DEFAULT FALSE"))
     db.execute(text("UPDATE users SET user_type='human' WHERE user_type IS NULL OR user_type = ''"))
     db.execute(
-        text("UPDATE users SET user_type='agent' WHERE id IN (:codex_agent_id, :claude_agent_id)"),
-        {"codex_agent_id": CODEX_SYSTEM_USER_ID, "claude_agent_id": CLAUDE_SYSTEM_USER_ID},
+        text("UPDATE users SET user_type='agent' WHERE id IN (:codex_agent_id, :claude_agent_id, :opencode_agent_id)"),
+        {
+            "codex_agent_id": CODEX_SYSTEM_USER_ID,
+            "claude_agent_id": CLAUDE_SYSTEM_USER_ID,
+            "opencode_agent_id": OPENCODE_SYSTEM_USER_ID,
+        },
     )
     db.execute(text("UPDATE users SET must_change_password=TRUE WHERE must_change_password IS NULL"))
     db.execute(text("UPDATE users SET is_active=TRUE WHERE is_active IS NULL"))
@@ -1776,6 +1784,7 @@ def bootstrap_data():
                     WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=DEFAULT_USER_ID, role="Owner"),
                     WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=CODEX_SYSTEM_USER_ID, role="Admin"),
                     WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=CLAUDE_SYSTEM_USER_ID, role="Admin"),
+                    WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=OPENCODE_SYSTEM_USER_ID, role="Admin"),
                 ]
             )
             db.commit()
@@ -1792,7 +1801,7 @@ def bootstrap_data():
             ).scalar_one_or_none()
             if not owner:
                 db.add(WorkspaceMember(workspace_id=BOOTSTRAP_WORKSPACE_ID, user_id=DEFAULT_USER_ID, role="Owner"))
-            for user_id in (CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID):
+            for user_id in (CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID, OPENCODE_SYSTEM_USER_ID):
                 agent_member = db.execute(
                     select(WorkspaceMember).where(
                         WorkspaceMember.workspace_id == BOOTSTRAP_WORKSPACE_ID,

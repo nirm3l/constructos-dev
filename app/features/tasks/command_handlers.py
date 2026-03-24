@@ -60,7 +60,13 @@ from shared.core import (
     to_iso_utc,
 )
 from shared.delivery_evidence import has_merge_to_main_ref
-from shared.settings import AGENT_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID, CODEX_SYSTEM_USER_ID
+from shared.settings import (
+    AGENT_SYSTEM_USER_ID,
+    CLAUDE_SYSTEM_USER_ID,
+    CODEX_SYSTEM_USER_ID,
+    OPENCODE_SYSTEM_USER_ID,
+    agent_system_username_for_provider,
+)
 from shared.team_mode_lifecycle import review_resolution_transition
 from shared.task_automation import (
     TRIGGER_KIND_SCHEDULE,
@@ -89,7 +95,10 @@ from features.agents.intent_classifier import (
     is_team_mode_kickoff_classification,
     resolve_instruction_intent,
 )
+from features.agents.execution_provider import parse_execution_model
 from features.agents.provider_auth import resolve_provider_effective_auth_source
+from features.agents.command_runtime_registry import resolve_provider_for_command_id
+from features.agents.workspace_runtime import resolve_workspace_background_runtime_with_new_session
 from .domain import TaskAggregate
 
 MENTION_PATTERN = re.compile(r"@([A-Za-z0-9_\-]+)")
@@ -863,9 +872,11 @@ def _validate_assignee_id(db: Session, assignee_id: str | None, *, project_id: s
 def _resolve_available_system_bot_assignee_for_project(
     db: Session,
     *,
+    workspace_id: str | None,
     project_id: str | None,
     requested_assignee_id: str | None,
     assigned_agent_code: str | None,
+    preferred_provider: str | None = None,
 ) -> str | None:
     normalized_project_id = str(project_id or "").strip()
     normalized_requested_assignee_id = str(requested_assignee_id or "").strip()
@@ -874,7 +885,11 @@ def _resolve_available_system_bot_assignee_for_project(
         return normalized_requested_assignee_id or None
 
     requested_provider: str | None = None
-    if normalized_requested_assignee_id and normalized_requested_assignee_id not in {CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID}:
+    if normalized_requested_assignee_id and normalized_requested_assignee_id not in {
+        CODEX_SYSTEM_USER_ID,
+        CLAUDE_SYSTEM_USER_ID,
+        OPENCODE_SYSTEM_USER_ID,
+    }:
         requested_user = db.get(User, normalized_requested_assignee_id)
         if requested_user is not None and str(requested_user.user_type or "").strip().lower() == "agent":
             return normalized_requested_assignee_id
@@ -883,6 +898,8 @@ def _resolve_available_system_bot_assignee_for_project(
         requested_provider = "codex"
     elif normalized_requested_assignee_id == CLAUDE_SYSTEM_USER_ID:
         requested_provider = "claude"
+    elif normalized_requested_assignee_id == OPENCODE_SYSTEM_USER_ID:
+        requested_provider = "opencode"
 
     if requested_provider and resolve_provider_effective_auth_source(requested_provider) != "none":
         return normalized_requested_assignee_id or None
@@ -894,7 +911,7 @@ def _resolve_available_system_bot_assignee_for_project(
             ProjectMember.project_id == normalized_project_id,
             User.is_active == True,  # noqa: E712
             User.user_type == "agent",
-            User.id.in_([CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID]),
+            User.id.in_([CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID, OPENCODE_SYSTEM_USER_ID]),
         )
         .order_by(ProjectMember.id.asc())
     ).all()
@@ -904,12 +921,34 @@ def _resolve_available_system_bot_assignee_for_project(
         normalized_username = str(username or "").strip().lower()
         if not normalized_user_id:
             continue
-        if normalized_user_id == CODEX_SYSTEM_USER_ID or normalized_username == "codex-bot":
+        if normalized_user_id == CODEX_SYSTEM_USER_ID or normalized_username == agent_system_username_for_provider("codex").lower():
             available_project_bot_ids_by_provider["codex"] = normalized_user_id
-        elif normalized_user_id == CLAUDE_SYSTEM_USER_ID or normalized_username == "claude-bot":
+        elif normalized_user_id == CLAUDE_SYSTEM_USER_ID or normalized_username == agent_system_username_for_provider("claude").lower():
             available_project_bot_ids_by_provider["claude"] = normalized_user_id
+        elif normalized_user_id == OPENCODE_SYSTEM_USER_ID or normalized_username == agent_system_username_for_provider("opencode").lower():
+            available_project_bot_ids_by_provider["opencode"] = normalized_user_id
 
-    preferred_fallback_providers = ("claude", "codex") if requested_provider == "codex" else ("codex", "claude")
+    effective_preferred_provider: str | None = str(preferred_provider or "").strip().lower() or None
+    preferred_provider = effective_preferred_provider or requested_provider
+    normalized_workspace_id = str(workspace_id or "").strip()
+    if not preferred_provider and normalized_workspace_id:
+        try:
+            runtime = resolve_workspace_background_runtime_with_new_session(normalized_workspace_id)
+            runtime_provider, _ = parse_execution_model(str(runtime.model or "").strip())
+            normalized_runtime_provider = str(runtime_provider or "").strip().lower()
+            if normalized_runtime_provider in {"codex", "claude", "opencode"}:
+                preferred_provider = normalized_runtime_provider
+        except Exception:
+            preferred_provider = None
+
+    if preferred_provider == "codex":
+        preferred_fallback_providers = ("claude", "opencode", "codex")
+    elif preferred_provider == "claude":
+        preferred_fallback_providers = ("claude", "opencode", "codex")
+    elif preferred_provider == "opencode":
+        preferred_fallback_providers = ("opencode", "claude", "codex")
+    else:
+        preferred_fallback_providers = ("codex", "opencode", "claude")
     for provider in preferred_fallback_providers:
         if resolve_provider_effective_auth_source(provider) == "none":
             continue
@@ -919,7 +958,7 @@ def _resolve_available_system_bot_assignee_for_project(
     if normalized_requested_assignee_id:
         return normalized_requested_assignee_id
 
-    for provider in ("codex", "claude"):
+    for provider in ("codex", "claude", "opencode"):
         if resolve_provider_effective_auth_source(provider) == "none":
             continue
         fallback_user_id = str(available_project_bot_ids_by_provider.get(provider) or "").strip()
@@ -929,6 +968,8 @@ def _resolve_available_system_bot_assignee_for_project(
             return CODEX_SYSTEM_USER_ID
         if provider == "claude":
             return CLAUDE_SYSTEM_USER_ID
+        if provider == "opencode":
+            return OPENCODE_SYSTEM_USER_ID
     return None
 
 
@@ -1750,7 +1791,7 @@ def require_task_command_state(db: Session, user: User, task_id: str, *, allowed
 def _resolve_task_scope_for_internal_or_user_actor(ctx: "CommandContext", task_id: str) -> tuple[str, str | None, str, bool]:
     actor_id = str(getattr(ctx.user, "id", "") or "").strip()
     actor_type = str(getattr(ctx.user, "user_type", "") or "").strip().lower()
-    if actor_id in {AGENT_SYSTEM_USER_ID, CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID} or actor_type == "agent":
+    if actor_id in {AGENT_SYSTEM_USER_ID, CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID, OPENCODE_SYSTEM_USER_ID} or actor_type == "agent":
         state = load_task_command_state(ctx.db, task_id)
         if not state or state.is_deleted:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1851,6 +1892,7 @@ def _task_view_from_aggregate(*, task_id: str, aggregate: TaskAggregate, created
 class CommandContext:
     db: Session
     user: User
+    command_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1917,9 +1959,11 @@ class CreateTaskHandler:
             )
         assignee_id = _resolve_available_system_bot_assignee_for_project(
             self.ctx.db,
+            workspace_id=self.payload.workspace_id,
             project_id=self.payload.project_id,
             requested_assignee_id=assignee_id,
             assigned_agent_code=assigned_agent_code,
+            preferred_provider=resolve_provider_for_command_id(self.ctx.command_id),
         )
         assignee_id = _normalize_team_mode_routed_assignee(
             self.ctx.db,
@@ -1947,6 +1991,19 @@ class CreateTaskHandler:
         initial_status = (statuses[0] if statuses else DEFAULT_STATUSES[0]) or DEFAULT_STATUSES[0]
         if requested_status:
             initial_status = requested_status
+        elif _team_mode_enabled_for_project(
+            self.ctx.db,
+            workspace_id=self.payload.workspace_id,
+            project_id=self.payload.project_id,
+        ):
+            semantics = _load_team_mode_status_semantics_for_project(
+                self.ctx.db,
+                workspace_id=self.payload.workspace_id,
+                project_id=self.payload.project_id,
+            ) or dict(REQUIRED_SEMANTIC_STATUSES)
+            todo_status = str(semantics.get("todo") or REQUIRED_SEMANTIC_STATUSES["todo"]).strip()
+            if todo_status and ((not statuses) or todo_status in statuses):
+                initial_status = todo_status
         payload_data = self.payload.model_dump(exclude_unset=True)
         legacy_task_type = payload_data.get("task_type", _UNSET)
         if legacy_task_type is not _UNSET:

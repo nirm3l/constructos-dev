@@ -139,7 +139,7 @@ function buildClassifierMarkdown(value: Record<string, unknown> | null | undefin
 
 function reasoningEffortLabel(
   value: 'low' | 'medium' | 'high' | 'xhigh',
-  provider: 'codex' | 'claude' = 'codex'
+  provider: 'codex' | 'claude' | 'opencode' = 'codex'
 ): string {
   if (value === 'xhigh') return provider === 'claude' ? 'Max' : 'Very high'
   return value.charAt(0).toUpperCase() + value.slice(1)
@@ -174,7 +174,7 @@ function extractCodexThreadIdFromTurns(turns: any[]): string | null {
     const content = String(turn?.content || '')
     if (!content) continue
     const fromResumeCommand = content.match(
-      /\bcos(?:\s+--provider\s+(?:codex|claude))?\s+resume\s+([0-9a-fA-F-]{20,})\b/
+      /\bcos(?:\s+--provider\s+(?:codex|claude|opencode))?\s+resume\s+([0-9a-fA-F-]{20,})\b/
     )
     if (fromResumeCommand?.[1]) return fromResumeCommand[1]
     const fromThreadLabel = content.match(/\bcodex\s+thread\s+id\s*:\s*([0-9a-fA-F-]{20,})\b/i)
@@ -183,10 +183,11 @@ function extractCodexThreadIdFromTurns(turns: any[]): string | null {
   return null
 }
 
-function buildCosResumeCommand(provider: 'codex' | 'claude', threadId: string): string {
+function buildCosResumeCommand(provider: 'codex' | 'claude' | 'opencode', threadId: string): string {
   const normalizedThreadId = String(threadId || '').trim()
   if (!normalizedThreadId) return ''
   if (provider === 'claude') return `cos resume --provider claude ${normalizedThreadId}`
+  if (provider === 'opencode') return `cos resume --provider opencode ${normalizedThreadId}`
   return `cos resume ${normalizedThreadId}`
 }
 
@@ -615,11 +616,14 @@ export function CodexChatDrawer({ state }: { state: any }) {
   const activeAuthStatus = authStatusForProvider(
     activeExecutionProvider,
     state.codexAuthStatus?.data ?? null,
-    state.claudeAuthStatus?.data ?? null
+    state.claudeAuthStatus?.data ?? null,
+    state.opencodeAuthStatus?.data ?? null
   )
   const activeAuthLoading = activeExecutionProvider === 'claude'
     ? Boolean(state.claudeAuthStatus?.isLoading || state.claudeAuthStatus?.isFetching)
-    : Boolean(state.codexAuthStatus?.isLoading || state.codexAuthStatus?.isFetching)
+    : activeExecutionProvider === 'opencode'
+      ? Boolean(state.opencodeAuthStatus?.isLoading || state.opencodeAuthStatus?.isFetching)
+      : Boolean(state.codexAuthStatus?.isLoading || state.codexAuthStatus?.isFetching)
   const providerAuthMissing = !activeAuthLoading
     && String(activeAuthStatus?.effective_source || '').trim().toLowerCase() === 'none'
   const canManageProviderAuth = Boolean(state.canManageUsers)

@@ -1002,6 +1002,9 @@ export const deleteCodexAuthOverride = (userId: string) =>
 export const getClaudeAuthStatus = (userId: string) =>
   api<CodexAuthStatus>('/api/agents/claude-auth', userId)
 
+export const getOpenCodeAuthStatus = (userId: string) =>
+  api<CodexAuthStatus>('/api/agents/opencode-auth', userId)
+
 export const startClaudeDeviceAuth = (userId: string, payload?: { login_method?: ClaudeAuthLoginMethod | null }) =>
   api<CodexAuthStatus>('/api/agents/claude-auth/device/start', userId, {
     method: 'POST',

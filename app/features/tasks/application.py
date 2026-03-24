@@ -32,7 +32,7 @@ class TaskApplicationService:
         self.db = db
         self.user = user
         self.command_id = command_id
-        self.ctx = CommandContext(db=db, user=user)
+        self.ctx = CommandContext(db=db, user=user, command_id=command_id)
 
     def create_task(self, payload: TaskCreate) -> dict:
         return execute_command(

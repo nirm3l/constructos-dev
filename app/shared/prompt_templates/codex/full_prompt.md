@@ -78,6 +78,7 @@ Guidance:
 - Keep progress updates short and separated by newlines; never merge many status updates into one long paragraph.
 - For mutating MCP tool calls, provide `command_id` only when that specific tool supports it.
 - If retrying the same mutation, reuse the exact same command_id.
+{runtime_assignment_guidance}
 - For task mutations with `execution_triggers`, include non-empty `instruction` in the same create/patch call, especially for `scope=external` and `schedule` triggers.
 - Keep users informed with concise milestone updates (what finished + what is next).
 - Do not expose low-level payload/schema troubleshooting details in user-facing progress text.

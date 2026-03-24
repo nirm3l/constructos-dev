@@ -49,6 +49,15 @@ _CACHE_TTL_SECONDS = _load_positive_float_env("AGENT_CODEX_MODELS_CACHE_TTL_SECO
 _MODEL_LIST_TIMEOUT_SECONDS = _load_positive_float_env("AGENT_CODEX_MODEL_LIST_TIMEOUT_SECONDS", 2.0)
 _MODEL_LIST_LIMIT = _load_positive_int_env("AGENT_CODEX_MODEL_LIST_LIMIT", 200)
 _DEFAULT_CLAUDE_MODELS = ("sonnet", "opus")
+_DEFAULT_OPENCODE_MODELS = ("opencode/gpt-5-nano",)
+_DEFAULT_OPENCODE_FREE_MODEL_ALLOWLIST = {
+    "opencode/big-pickle",
+    "opencode/gpt-5-nano",
+    "opencode/mimo-v2-omni-free",
+    "opencode/mimo-v2-pro-free",
+    "opencode/minimax-m2.5-free",
+    "opencode/nemotron-3-super-free",
+}
 
 
 def _append_unique_model(out: list[str], seen: set[str], value: object) -> None:
@@ -72,6 +81,15 @@ def _normalize_claude_model(value: object) -> str:
     if lowered.startswith("claude-"):
         return model
     return ""
+
+
+def _is_free_opencode_model(value: object) -> bool:
+    model = str(value or "").strip().lower()
+    if not model.startswith("opencode/"):
+        return False
+    if model in _DEFAULT_OPENCODE_FREE_MODEL_ALLOWLIST:
+        return True
+    return model.endswith("-free")
 
 
 def _load_claude_models_from_env() -> tuple[list[str], str]:
@@ -276,6 +294,76 @@ def list_available_claude_models() -> tuple[list[str], str]:
     return _load_claude_models_from_env()
 
 
+def _read_model_list_from_opencode() -> list[str]:
+    result = subprocess.run(
+        ["opencode", "models"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=max(2.0, _MODEL_LIST_TIMEOUT_SECONDS),
+    )
+    output = str(result.stdout or "").strip()
+    if result.returncode != 0:
+        err = str(result.stderr or "").strip()
+        detail = err or output or f"exit={result.returncode}"
+        raise RuntimeError(f"opencode models failed: {detail[:600]}")
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw_line in output.splitlines():
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if lowered.startswith("opencode models"):
+            continue
+        if "/" not in line:
+            continue
+        if not _is_free_opencode_model(line):
+            continue
+        _append_unique_model(out, seen, line)
+    return out
+
+
+def _load_opencode_models_from_env() -> tuple[list[str], str]:
+    raw_available = str(os.getenv("AGENT_OPENCODE_AVAILABLE_MODELS", "")).strip()
+    out: list[str] = []
+    seen: set[str] = set()
+    for chunk in raw_available.split(","):
+        if not _is_free_opencode_model(chunk):
+            continue
+        _append_unique_model(out, seen, chunk)
+    default_model = str(agent_default_model_for_provider("opencode") or "").strip()
+    if not out:
+        for fallback_model in _DEFAULT_OPENCODE_MODELS:
+            _append_unique_model(out, seen, fallback_model)
+    if not default_model:
+        default_model = out[0] if out else ""
+    if default_model and default_model.lower() not in {item.lower() for item in out}:
+        out.insert(0, default_model)
+    return out, default_model
+
+
+def list_available_opencode_models() -> tuple[list[str], str]:
+    try:
+        models = _read_model_list_from_opencode()
+    except FileNotFoundError:
+        logger.warning("opencode binary not found; model discovery falls back to env values")
+        return _load_opencode_models_from_env()
+    except Exception as exc:
+        logger.warning("Failed to discover OpenCode models: %s", exc)
+        return _load_opencode_models_from_env()
+    out: list[str] = []
+    seen: set[str] = set()
+    for model in models:
+        _append_unique_model(out, seen, model)
+    default_model = str(agent_default_model_for_provider("opencode") or "").strip()
+    if not default_model:
+        default_model = out[0] if out else ""
+    if default_model and default_model.lower() not in {item.lower() for item in out}:
+        out.insert(0, default_model)
+    return out, default_model
+
+
 def list_available_agent_models(*, force_refresh: bool = False) -> tuple[list[str], str]:
     combined: list[str] = []
     seen: set[str] = set()
@@ -296,12 +384,17 @@ def list_available_agent_models(*, force_refresh: bool = False) -> tuple[list[st
     claude_models, claude_default = list_available_claude_models()
     for model in claude_models:
         _append("claude", model)
+    opencode_models, opencode_default = list_available_opencode_models()
+    for model in opencode_models:
+        _append("opencode", model)
 
     default_model = ""
     if codex_default:
         default_model = encode_execution_model(provider="codex", model=codex_default)
     elif claude_default:
         default_model = encode_execution_model(provider="claude", model=claude_default)
+    elif opencode_default:
+        default_model = encode_execution_model(provider="opencode", model=opencode_default)
     elif combined:
         default_model = combined[0]
     return combined, default_model

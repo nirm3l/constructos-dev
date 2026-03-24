@@ -6,16 +6,21 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import queue
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from collections import OrderedDict
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from features.agents.execution_provider import encode_execution_model, parse_execution_model, resolve_execution_provider
 from features.agents.mcp_registry import (
+    build_selected_opencode_mcp_config_payload,
     build_selected_mcp_config_payload,
     build_selected_mcp_config_text,
     normalize_chat_mcp_servers,
@@ -43,6 +48,7 @@ _DEFAULT_AGENT_HOME_RETENTION_DAYS = 14
 _DEFAULT_AGENT_HOME_CLEANUP_INTERVAL_SECONDS = 3600
 _DEFAULT_STRUCTURED_PROMPT_CACHE_MAX_ENTRIES = 256
 _DEFAULT_CLAUDE_MODEL = "sonnet"
+_DEFAULT_OPENCODE_MODEL = "opencode/gpt-5-nano"
 _PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "shared" / "prompt_templates" / "codex"
 _ALLOWED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 _STRUCTURED_PROMPT_CACHE_LOCK = threading.Lock()
@@ -50,7 +56,12 @@ _STRUCTURED_PROMPT_CACHE: OrderedDict[str, tuple[float, dict[str, object], dict[
 
 
 def _provider_display_name(provider: str) -> str:
-    return "Claude" if str(provider or "").strip().lower() == "claude" else "Codex"
+    normalized = str(provider or "").strip().lower()
+    if normalized == "claude":
+        return "Claude"
+    if normalized == "opencode":
+        return "OpenCode"
+    return "Codex"
 
 
 def _resolve_host_config_path(provider: str) -> Path | None:
@@ -527,11 +538,13 @@ def _codex_home_env(
     *,
     provider: str,
     mcp_config_text: str,
+    opencode_config_payload: dict[str, object] | None = None,
     runtime_config_text: str = "",
     workspace_id: str | None = None,
     chat_session_id: str | None = None,
     actor_user_id: str | None = None,
 ):
+    normalized_provider = str(provider or "").strip().lower()
     normalized_workspace_id = str(workspace_id or "").strip()
     normalized_chat_session_id = str(chat_session_id or "").strip()
     if normalized_workspace_id and normalized_chat_session_id:
@@ -554,6 +567,27 @@ def _codex_home_env(
         if persistent_home is not None:
             env = os.environ.copy()
             env["HOME"] = str(persistent_home)
+            if normalized_provider == "opencode" and isinstance(opencode_config_payload, dict) and opencode_config_payload:
+                existing_payload: dict[str, object] = {}
+                existing_content = str(env.get("OPENCODE_CONFIG_CONTENT") or "").strip()
+                if existing_content:
+                    try:
+                        parsed_existing = json.loads(existing_content)
+                    except Exception:
+                        parsed_existing = None
+                    if isinstance(parsed_existing, dict):
+                        existing_payload = dict(parsed_existing)
+                merged_payload = dict(existing_payload)
+                for key, value in opencode_config_payload.items():
+                    if key == "mcp" and isinstance(value, dict):
+                        existing_mcp = merged_payload.get("mcp")
+                        merged_mcp = dict(existing_mcp) if isinstance(existing_mcp, dict) else {}
+                        for mcp_name, mcp_config in value.items():
+                            merged_mcp[str(mcp_name)] = mcp_config
+                        merged_payload["mcp"] = merged_mcp
+                    else:
+                        merged_payload[key] = value
+                env["OPENCODE_CONFIG_CONTENT"] = _stable_json_dumps(merged_payload)
             yield env
             return
 
@@ -568,6 +602,27 @@ def _codex_home_env(
         )
         env = os.environ.copy()
         env["HOME"] = str(temp_home_path)
+        if normalized_provider == "opencode" and isinstance(opencode_config_payload, dict) and opencode_config_payload:
+            existing_payload: dict[str, object] = {}
+            existing_content = str(env.get("OPENCODE_CONFIG_CONTENT") or "").strip()
+            if existing_content:
+                try:
+                    parsed_existing = json.loads(existing_content)
+                except Exception:
+                    parsed_existing = None
+                if isinstance(parsed_existing, dict):
+                    existing_payload = dict(parsed_existing)
+            merged_payload = dict(existing_payload)
+            for key, value in opencode_config_payload.items():
+                if key == "mcp" and isinstance(value, dict):
+                    existing_mcp = merged_payload.get("mcp")
+                    merged_mcp = dict(existing_mcp) if isinstance(existing_mcp, dict) else {}
+                    for mcp_name, mcp_config in value.items():
+                        merged_mcp[str(mcp_name)] = mcp_config
+                    merged_payload["mcp"] = merged_mcp
+                else:
+                    merged_payload[key] = value
+            env["OPENCODE_CONFIG_CONTENT"] = _stable_json_dumps(merged_payload)
         yield env
 
 
@@ -616,6 +671,18 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     mcp_servers = _normalize_prompt_mcp_servers(ctx.get("mcp_servers"))
     enabled_mcp_servers_text = ", ".join(mcp_servers)
     stream_plain_text = bool(ctx.get("stream_plain_text"))
+    runtime_provider = resolve_execution_provider(ctx.get("model"))
+    runtime_provider_label = _provider_display_name(runtime_provider)
+    base_command_id = str(ctx.get("command_id") or "").strip()
+    runtime_assignment_guidance = (
+        f"- Active chat execution provider for this run: {runtime_provider_label}.\n"
+        f"- If the user does not explicitly specify task assignees during setup/resource creation, default assignments to the {runtime_provider_label} system bot.\n"
+    )
+    if base_command_id:
+        runtime_assignment_guidance += (
+            f"- Base command_id for mutating MCP calls: `{base_command_id}`.\n"
+            "- For retries or child mutations, derive suffix ids from this base using `<base>:<suffix>`.\n"
+        )
     soul_md = project_description.strip() or "_(empty)_"
     graph_md = graph_context_markdown or "_(knowledge graph unavailable)_"
     graph_evidence = graph_evidence_json or "[]"
@@ -733,6 +800,7 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "interaction_mode_guidance": interaction_mode_guidance,
             "plugin_workflow_guidance": _render_plugin_workflow_guidance("full_prompt_workflow_guidance.md"),
             "enabled_mcp_servers_text": enabled_mcp_servers_text,
+            "runtime_assignment_guidance": runtime_assignment_guidance,
             "mutation_policy": mutation_policy,
             "response_tail": response_tail,
         },
@@ -936,6 +1004,18 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     mcp_servers = _normalize_prompt_mcp_servers(ctx.get("mcp_servers"))
     enabled_mcp_servers_text = ", ".join(mcp_servers) if mcp_servers else "_(none selected)_"
     stream_plain_text = bool(ctx.get("stream_plain_text"))
+    runtime_provider = resolve_execution_provider(ctx.get("model"))
+    runtime_provider_label = _provider_display_name(runtime_provider)
+    base_command_id = str(ctx.get("command_id") or "").strip()
+    runtime_assignment_guidance = (
+        f"- Active chat execution provider for this run: {runtime_provider_label}.\n"
+        f"- If the user does not explicitly specify task assignees during setup/resource creation, default assignments to the {runtime_provider_label} system bot.\n"
+    )
+    if base_command_id:
+        runtime_assignment_guidance += (
+            f"- Base command_id for mutating MCP calls: `{base_command_id}`.\n"
+            "- For retries or child mutations, derive suffix ids from this base using `<base>:<suffix>`.\n"
+        )
     has_task_context = bool(str(task_id or "").strip())
     task_guidance = (
         "- If task context is present, validate with get_task(task_id) before mutating state.\n"
@@ -1001,6 +1081,7 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
             "interaction_mode_guidance": interaction_mode_guidance,
             "plugin_workflow_guidance": _render_plugin_workflow_guidance("resume_prompt_workflow_guidance.md"),
             "enabled_mcp_servers_text": enabled_mcp_servers_text,
+            "runtime_assignment_guidance": runtime_assignment_guidance,
             "mutation_policy": mutation_policy,
             "response_tail": response_tail,
         },
@@ -1048,6 +1129,11 @@ def _normalize_codex_model(value: object) -> str | None:
     return model or None
 
 
+def _normalize_opencode_model(value: object) -> str | None:
+    model = str(value or "").strip()
+    return model or None
+
+
 def _resolve_runtime_provider_and_model(value: object) -> tuple[str, str | None]:
     provider, parsed_model = parse_execution_model(value)
     normalized_provider = provider or resolve_execution_provider(
@@ -1061,6 +1147,13 @@ def _resolve_runtime_provider_and_model(value: object) -> tuple[str, str | None]
             or _DEFAULT_CLAUDE_MODEL
         )
         return "claude", model
+    if normalized_provider == "opencode":
+        model = (
+            _normalize_opencode_model(parsed_model)
+            or _normalize_opencode_model(agent_default_model_for_provider("opencode"))
+            or _DEFAULT_OPENCODE_MODEL
+        )
+        return "opencode", model
     model = (
         _normalize_codex_model(parsed_model)
         or _normalize_codex_model(agent_default_model_for_provider("codex"))
@@ -1072,8 +1165,11 @@ def _resolve_runtime_reasoning_effort(provider: str, value: object) -> str | Non
     preferred = _normalize_reasoning_effort(value)
     if preferred:
         return preferred
-    if str(provider or "").strip().lower() == "claude":
+    normalized_provider = str(provider or "").strip().lower()
+    if normalized_provider == "claude":
         return _normalize_reasoning_effort(agent_default_reasoning_effort_for_provider("claude"))
+    if normalized_provider == "opencode":
+        return _normalize_reasoning_effort(agent_default_reasoning_effort_for_provider("opencode"))
     return _normalize_reasoning_effort(agent_default_reasoning_effort_for_provider("codex"))
 
 
@@ -1099,6 +1195,25 @@ def _extract_turn_usage(stdout: str) -> dict[str, int] | None:
                 event.get("usage") if isinstance(event.get("usage"), dict) else None,
                 event.get("modelUsage") if isinstance(event.get("modelUsage"), dict) else None,
             )
+            continue
+        if event_type == "step_finish":
+            part = event.get("part")
+            if not isinstance(part, dict):
+                continue
+            tokens = part.get("tokens")
+            if not isinstance(tokens, dict):
+                continue
+            cached = 0
+            cache_payload = tokens.get("cache")
+            if isinstance(cache_payload, dict):
+                cached = _safe_non_negative_int(cache_payload.get("read")) or 0
+            usage = {
+                "input_tokens": _safe_non_negative_int(tokens.get("input")) or 0,
+                "cached_input_tokens": cached,
+                "output_tokens": _safe_non_negative_int(tokens.get("output")) or 0,
+            }
+            if AGENT_CHAT_CONTEXT_LIMIT_TOKENS > 0:
+                usage["context_limit_tokens"] = int(AGENT_CHAT_CONTEXT_LIMIT_TOKENS)
             continue
         if event_type == "stream_event":
             event_payload = event.get("event")
@@ -1185,6 +1300,17 @@ def _normalize_claude_effort(value: object) -> str | None:
     normalized = _normalize_reasoning_effort(value)
     if normalized is None:
         return None
+    if normalized == "xhigh":
+        return "max"
+    return normalized
+
+
+def _normalize_opencode_effort(value: object) -> str | None:
+    normalized = _normalize_reasoning_effort(value)
+    if normalized is None:
+        return None
+    if normalized == "low":
+        return "minimal"
     if normalized == "xhigh":
         return "max"
     return normalized
@@ -1329,6 +1455,11 @@ def _is_missing_claude_resume_session(message_text: str) -> bool:
     return "no conversation found with session id:" in normalized
 
 
+def _is_missing_opencode_resume_session(message_text: str) -> bool:
+    normalized = str(message_text or "").strip().lower()
+    return "session not found" in normalized or "unknown session" in normalized
+
+
 def _extract_claude_result_payload(lines: list[str]) -> dict[str, object] | None:
     if not lines:
         return None
@@ -1390,6 +1521,647 @@ def _build_claude_command(
     cmd.append("--")
     cmd.append(prompt)
     return cmd
+
+
+def _build_opencode_command(
+    *,
+    prompt: str,
+    model: str | None,
+    reasoning_effort: str | None,
+    preferred_thread_id: str | None,
+) -> list[str]:
+    cmd = ["opencode", "run", "--format", "json"]
+    if model:
+        cmd.extend(["-m", model])
+    mapped_effort = _normalize_opencode_effort(reasoning_effort)
+    if mapped_effort:
+        cmd.extend(["--variant", mapped_effort])
+    if preferred_thread_id:
+        cmd.extend(["--session", preferred_thread_id])
+    cmd.append(prompt)
+    return cmd
+
+
+def _reserve_local_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        return int(sock.getsockname()[1])
+
+
+def _parse_opencode_model_reference(model: str | None) -> tuple[str, str]:
+    raw = str(model or "").strip()
+    if not raw:
+        return "opencode", "gpt-5-nano"
+    if "/" not in raw:
+        return "opencode", raw
+    provider_id, model_id = raw.split("/", 1)
+    provider_id = str(provider_id or "").strip() or "opencode"
+    model_id = str(model_id or "").strip() or "gpt-5-nano"
+    return provider_id, model_id
+
+
+def _run_opencode_server_stream_once(
+    *,
+    prompt_text: str,
+    timeout_seconds: float | None,
+    stream_events: bool,
+    model: str | None,
+    reasoning_effort: str | None,
+    resume_session_id: str | None,
+    env: dict[str, str] | None,
+    run_cwd: Path | None,
+    stream_plain_text: bool,
+) -> tuple[str, dict[str, int] | None, str | None]:
+    if not stream_events:
+        raise RuntimeError("OpenCode server stream path requires stream_events=true")
+    effective_run_cwd = run_cwd or _resolve_codex_workdir()
+    server_port = _reserve_local_tcp_port()
+    serve_cmd = [
+        "opencode",
+        "serve",
+        "--hostname",
+        "127.0.0.1",
+        "--port",
+        str(server_port),
+    ]
+    serve_proc = subprocess.Popen(
+        serve_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=env,
+        cwd=str(effective_run_cwd) if effective_run_cwd is not None else None,
+    )
+    event_queue: queue.Queue[dict[str, object]] = queue.Queue()
+    sse_error_holder: list[Exception] = []
+    stop_reader = threading.Event()
+    reader_response_holder: dict[str, object] = {}
+
+    def _stop_server() -> None:
+        if serve_proc.poll() is None:
+            serve_proc.terminate()
+            try:
+                serve_proc.wait(timeout=1.5)
+            except Exception:
+                serve_proc.kill()
+                serve_proc.wait(timeout=1.5)
+
+    def _server_stdout_tail() -> str:
+        if serve_proc.stdout is None:
+            return ""
+        try:
+            return str(serve_proc.stdout.read() or "").strip()[:1200]
+        except Exception:
+            return ""
+
+    def _wait_for_health(deadline_monotonic: float) -> None:
+        health_url = f"http://127.0.0.1:{server_port}/global/health"
+        last_error = ""
+        while time.monotonic() < deadline_monotonic:
+            if serve_proc.poll() is not None:
+                stdout_tail = _server_stdout_tail()
+                raise RuntimeError(stdout_tail or "OpenCode server exited before health check passed")
+            req = urllib_request.Request(health_url, method="GET")
+            try:
+                with urllib_request.urlopen(req, timeout=1.0) as resp:
+                    if int(getattr(resp, "status", 0) or 0) == 200:
+                        return
+            except Exception as exc:
+                last_error = str(exc)
+            time.sleep(0.2)
+        raise TimeoutError(last_error or "OpenCode server did not become healthy in time")
+
+    def _sse_reader() -> None:
+        event_url = f"http://127.0.0.1:{server_port}/event"
+        req = urllib_request.Request(event_url, method="GET", headers={"Accept": "text/event-stream"})
+        while not stop_reader.is_set():
+            try:
+                with urllib_request.urlopen(req, timeout=120.0) as resp:
+                    reader_response_holder["value"] = resp
+                    while not stop_reader.is_set():
+                        raw_line = resp.readline()
+                        if not raw_line:
+                            if stop_reader.is_set():
+                                break
+                            time.sleep(0.05)
+                            continue
+                        line = raw_line.decode("utf-8", errors="ignore").strip()
+                        if not line.startswith("data: "):
+                            continue
+                        payload = line[6:].strip()
+                        if not payload:
+                            continue
+                        try:
+                            event = json.loads(payload)
+                        except Exception:
+                            continue
+                        if isinstance(event, dict):
+                            event_queue.put(event)
+                    if stop_reader.is_set():
+                        return
+            except Exception as exc:
+                if stop_reader.is_set():
+                    return
+                # Keep trying while the run is alive; short network hiccups should not
+                # force immediate fallback to non-streaming CLI mode.
+                if isinstance(exc, TimeoutError | socket.timeout):
+                    time.sleep(0.1)
+                    continue
+                message = str(exc).strip().lower()
+                if "timed out" in message or "timeout" in message:
+                    time.sleep(0.1)
+                    continue
+                sse_error_holder.append(exc)
+                return
+
+    def _create_session() -> str:
+        session_url = f"http://127.0.0.1:{server_port}/session"
+        req = urllib_request.Request(
+            session_url,
+            method="POST",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib_request.urlopen(req, timeout=10.0) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        session_id = str(payload.get("id") or "").strip()
+        if not session_id:
+            raise RuntimeError("OpenCode server returned no session id")
+        return session_id
+
+    def _send_prompt_async(target_session_id: str) -> None:
+        provider_id, model_id = _parse_opencode_model_reference(model)
+        prompt_payload: dict[str, object] = {
+            "parts": [{"type": "text", "text": prompt_text}],
+            "model": {"providerID": provider_id, "modelID": model_id},
+        }
+        variant = _normalize_opencode_effort(reasoning_effort)
+        if variant:
+            prompt_payload["variant"] = variant
+        payload_bytes = json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        prompt_url = f"http://127.0.0.1:{server_port}/session/{target_session_id}/prompt_async"
+        req = urllib_request.Request(
+            prompt_url,
+            method="POST",
+            data=payload_bytes,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib_request.urlopen(req, timeout=10.0):
+            return
+
+    try:
+        effective_timeout = timeout_seconds if timeout_seconds is not None and timeout_seconds > 0 else 120.0
+        deadline = time.monotonic() + float(effective_timeout)
+        _wait_for_health(deadline)
+
+        reader_thread = threading.Thread(target=_sse_reader, daemon=True)
+        reader_thread.start()
+        time.sleep(0.15)
+
+        session_id = str(resume_session_id or "").strip()
+        if not session_id:
+            session_id = _create_session()
+        try:
+            _send_prompt_async(session_id)
+        except urllib_error.HTTPError as exc:
+            if int(getattr(exc, "code", 0) or 0) == 404 and str(resume_session_id or "").strip():
+                session_id = _create_session()
+                _send_prompt_async(session_id)
+            else:
+                body = ""
+                try:
+                    body = str(exc.read().decode("utf-8", errors="ignore") or "").strip()
+                except Exception:
+                    body = ""
+                raise RuntimeError(body or str(exc)) from exc
+
+        part_types: dict[str, str] = {}
+        part_message_ids: dict[str, str] = {}
+        part_seen_delta: dict[str, bool] = {}
+        part_last_text_snapshot: dict[str, str] = {}
+        assistant_message_ids: set[str] = set()
+        assistant_text_parts: list[str] = []
+        assistant_snapshot_texts: list[str] = []
+        usage: dict[str, int] | None = None
+        reasoning_status_emitted = False
+        drafting_status_emitted = False
+        assistant_text_emitted = False
+        started_at = time.monotonic()
+
+        def _matches_session(event: dict[str, object]) -> bool:
+            props = event.get("properties")
+            if not isinstance(props, dict):
+                return False
+            direct_session = str(props.get("sessionID") or "").strip()
+            if direct_session == session_id:
+                return True
+            part = props.get("part")
+            if isinstance(part, dict) and str(part.get("sessionID") or "").strip() == session_id:
+                return True
+            info = props.get("info")
+            if isinstance(info, dict):
+                if str(info.get("sessionID") or "").strip() == session_id:
+                    return True
+                if str(info.get("id") or "").strip() == session_id:
+                    return True
+            return False
+
+        while time.monotonic() < deadline:
+            if serve_proc.poll() is not None:
+                stdout_tail = _server_stdout_tail()
+                raise RuntimeError(stdout_tail or "OpenCode server exited during streaming")
+            if sse_error_holder:
+                raise RuntimeError(str(sse_error_holder[-1]))
+            try:
+                event = event_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if not isinstance(event, dict) or not _matches_session(event):
+                continue
+            event_type = str(event.get("type") or "").strip().lower()
+            properties = event.get("properties")
+            props = properties if isinstance(properties, dict) else {}
+
+            if event_type == "session.status":
+                status_payload = props.get("status")
+                status_type = ""
+                if isinstance(status_payload, dict):
+                    status_type = str(status_payload.get("type") or "").strip().lower()
+                if status_type == "busy" and not reasoning_status_emitted:
+                    _emit_stream_event({"type": "status", "message": "OpenCode is analyzing the request."})
+                    reasoning_status_emitted = True
+                if status_type == "idle":
+                    break
+                continue
+            if event_type == "session.idle":
+                break
+            if event_type == "message.part.updated":
+                part = props.get("part")
+                if not isinstance(part, dict):
+                    continue
+                part_id = str(part.get("id") or "").strip()
+                message_id = str(part.get("messageID") or "").strip()
+                part_type = str(part.get("type") or "").strip().lower()
+                if part_id and part_type:
+                    part_types[part_id] = part_type
+                if part_id and message_id:
+                    part_message_ids[part_id] = message_id
+                if part_type == "text":
+                    text_value = str(part.get("text") or "")
+                    if text_value:
+                        previous_text = str(part_last_text_snapshot.get(part_id) or "")
+                        part_last_text_snapshot[part_id] = text_value
+                        assistant_snapshot_texts.append(text_value)
+                        should_emit = (not message_id) or (message_id in assistant_message_ids) or (not assistant_message_ids)
+                        if should_emit and not part_seen_delta.get(part_id):
+                            delta_from_snapshot = ""
+                            if text_value.startswith(previous_text):
+                                delta_from_snapshot = text_value[len(previous_text) :]
+                            elif previous_text and previous_text in text_value:
+                                start_index = text_value.find(previous_text)
+                                delta_from_snapshot = text_value[start_index + len(previous_text) :]
+                            elif previous_text != text_value:
+                                delta_from_snapshot = text_value
+                            if delta_from_snapshot:
+                                assistant_text_parts.append(delta_from_snapshot)
+                                if not drafting_status_emitted:
+                                    _emit_stream_event({"type": "status", "message": "OpenCode is drafting a reply."})
+                                    drafting_status_emitted = True
+                                if stream_plain_text:
+                                    _emit_stream_event({"type": "assistant_text", "delta": delta_from_snapshot})
+                                    assistant_text_emitted = True
+                continue
+            if event_type == "message.part.delta":
+                part_id = str(props.get("partID") or "").strip()
+                field = str(props.get("field") or "").strip().lower()
+                delta = str(props.get("delta") or "")
+                if not part_id or field != "text" or not delta:
+                    continue
+                current_part_type = str(part_types.get(part_id) or "").strip().lower()
+                if current_part_type == "reasoning":
+                    continue
+                message_id = str(part_message_ids.get(part_id) or "").strip()
+                if message_id and assistant_message_ids and message_id not in assistant_message_ids:
+                    continue
+                if current_part_type == "text":
+                    part_seen_delta[part_id] = True
+                    part_last_text_snapshot[part_id] = f"{str(part_last_text_snapshot.get(part_id) or '')}{delta}"
+                    assistant_text_parts.append(delta)
+                    if not drafting_status_emitted:
+                        _emit_stream_event({"type": "status", "message": "OpenCode is drafting a reply."})
+                        drafting_status_emitted = True
+                    if stream_plain_text:
+                        _emit_stream_event({"type": "assistant_text", "delta": delta})
+                        assistant_text_emitted = True
+                continue
+            if "tool" in event_type and not reasoning_status_emitted:
+                _emit_stream_event({"type": "status", "message": "OpenCode is executing tool calls."})
+                reasoning_status_emitted = True
+                continue
+            if event_type == "message.updated":
+                info = props.get("info")
+                if not isinstance(info, dict):
+                    continue
+                role = str(info.get("role") or "").strip().lower()
+                message_id = str(info.get("id") or "").strip()
+                if role == "assistant" and message_id:
+                    assistant_message_ids.add(message_id)
+                if role != "assistant":
+                    continue
+                tokens = info.get("tokens")
+                if not isinstance(tokens, dict):
+                    continue
+                cache_payload = tokens.get("cache")
+                cache_read = 0
+                if isinstance(cache_payload, dict):
+                    cache_read = _safe_non_negative_int(cache_payload.get("read")) or 0
+                usage = {
+                    "input_tokens": _safe_non_negative_int(tokens.get("input")) or 0,
+                    "cached_input_tokens": cache_read,
+                    "output_tokens": _safe_non_negative_int(tokens.get("output")) or 0,
+                }
+                if AGENT_CHAT_CONTEXT_LIMIT_TOKENS > 0:
+                    usage["context_limit_tokens"] = int(AGENT_CHAT_CONTEXT_LIMIT_TOKENS)
+                continue
+
+        final_message = "".join(assistant_text_parts).strip()
+        if not final_message and assistant_snapshot_texts:
+            final_message = str(assistant_snapshot_texts[-1] or "").strip()
+        if not final_message:
+            raise RuntimeError("OpenCode server stream returned no text result")
+        if stream_plain_text and not assistant_text_emitted:
+            _emit_stream_event({"type": "assistant_text", "delta": final_message})
+        return final_message, usage, session_id
+    finally:
+        stop_reader.set()
+        response_obj = reader_response_holder.get("value")
+        if response_obj is not None:
+            try:
+                response_obj.close()
+            except Exception:
+                pass
+        _stop_server()
+
+
+def _run_opencode_cli_with_optional_stream(
+    *,
+    start_prompt: str,
+    resume_prompt: str | None,
+    timeout_seconds: float | None,
+    stream_events: bool,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    output_schema: dict | None = None,
+    preferred_thread_id: str | None = None,
+    env: dict[str, str] | None = None,
+    run_cwd: Path | None = None,
+) -> tuple[str, dict[str, int] | None, str | None, bool, bool]:
+    effective_run_cwd = run_cwd or _resolve_codex_workdir()
+    stream_plain_text = output_schema is None
+    resume_thread_id = str(preferred_thread_id or "").strip()
+    resume_attempted = bool(resume_thread_id)
+    schema_instruction = ""
+    if output_schema is not None:
+        schema_instruction = (
+            "\n\nReturn only valid JSON that matches this schema exactly:\n"
+            f"{_stable_json_dumps(output_schema)}\n"
+        )
+
+    # OpenCode CLI JSON mode emits a single final text item; for real chat streaming
+    # we use OpenCode server SSE and fall back to CLI when server mode fails.
+    if stream_events and stream_plain_text:
+        try:
+            if resume_attempted:
+                final_message, usage, session_id = _run_opencode_server_stream_once(
+                    prompt_text=resume_prompt if resume_prompt is not None else start_prompt,
+                    timeout_seconds=timeout_seconds,
+                    stream_events=stream_events,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    resume_session_id=resume_thread_id,
+                    env=env,
+                    run_cwd=effective_run_cwd,
+                    stream_plain_text=stream_plain_text,
+                )
+                resume_succeeded = True
+            else:
+                final_message, usage, session_id = _run_opencode_server_stream_once(
+                    prompt_text=start_prompt,
+                    timeout_seconds=timeout_seconds,
+                    stream_events=stream_events,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    resume_session_id=None,
+                    env=env,
+                    run_cwd=effective_run_cwd,
+                    stream_plain_text=stream_plain_text,
+                )
+                resume_succeeded = False
+            if stream_events and usage is not None:
+                _emit_stream_event({"type": "usage", "usage": usage})
+            return final_message, usage, session_id, resume_attempted, resume_succeeded
+        except RuntimeError as exc:
+            if resume_attempted and _is_missing_opencode_resume_session(str(exc)):
+                final_message, usage, session_id = _run_opencode_server_stream_once(
+                    prompt_text=start_prompt,
+                    timeout_seconds=timeout_seconds,
+                    stream_events=stream_events,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    resume_session_id=None,
+                    env=env,
+                    run_cwd=effective_run_cwd,
+                    stream_plain_text=stream_plain_text,
+                )
+                resume_succeeded = False
+                if stream_events and usage is not None:
+                    _emit_stream_event({"type": "usage", "usage": usage})
+                return final_message, usage, session_id, resume_attempted, resume_succeeded
+
+    def _run_once(*, prompt_text: str, resume_session_id: str | None) -> tuple[str, dict[str, int] | None, str | None]:
+        cmd = _build_opencode_command(
+            prompt=f"{prompt_text}{schema_instruction}",
+            model=model,
+            reasoning_effort=reasoning_effort,
+            preferred_thread_id=resume_session_id,
+        )
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+            cwd=str(effective_run_cwd) if effective_run_cwd is not None else None,
+        )
+        timed_out = False
+        done = threading.Event()
+        timeout_error_message = "opencode run timed out"
+        if timeout_seconds is not None:
+            timeout_error_message = f"opencode run timed out after {timeout_seconds:.1f}s"
+
+        def _timeout_watchdog() -> None:
+            nonlocal timed_out
+            if timeout_seconds is None:
+                return
+            if done.wait(timeout_seconds):
+                return
+            if proc.poll() is None:
+                timed_out = True
+                proc.kill()
+
+        if timeout_seconds is not None:
+            threading.Thread(target=_timeout_watchdog, daemon=True).start()
+
+        if proc.stdout is None:
+            raise RuntimeError("opencode run stdout unavailable")
+
+        lines: list[str] = []
+        session_id: str | None = None
+        usage: dict[str, int] | None = None
+        delta_parts: list[str] = []
+        fatal_error = ""
+        reasoning_status_emitted = False
+        drafting_status_emitted = False
+        heartbeat_stop = threading.Event()
+        heartbeat_started = threading.Event()
+
+        def _emit_heartbeat_status() -> None:
+            if not stream_events:
+                return
+            started_at = time.monotonic()
+            while not heartbeat_stop.wait(timeout=3.0):
+                elapsed_seconds = int(max(0.0, time.monotonic() - started_at))
+                if elapsed_seconds < 3:
+                    continue
+                _emit_stream_event(
+                    {
+                        "type": "status",
+                        "message": f"OpenCode is still processing... ({elapsed_seconds}s)",
+                    }
+                )
+
+        heartbeat_thread: threading.Thread | None = None
+        if stream_events:
+            heartbeat_thread = threading.Thread(target=_emit_heartbeat_status, daemon=True)
+            heartbeat_thread.start()
+            heartbeat_started.set()
+
+        for raw_line in proc.stdout:
+            line = str(raw_line or "").strip()
+            if not line:
+                continue
+            lines.append(line)
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_session_id = str(event.get("sessionID") or event.get("session_id") or "").strip()
+            if event_session_id:
+                session_id = event_session_id
+            event_type = str(event.get("type") or "").strip().lower()
+            if event_type == "error":
+                err_payload = event.get("error")
+                if isinstance(err_payload, dict):
+                    data = err_payload.get("data")
+                    if isinstance(data, dict):
+                        fatal_error = str(data.get("message") or "").strip()
+                    if not fatal_error:
+                        fatal_error = str(err_payload.get("message") or err_payload.get("name") or "").strip()
+                if not fatal_error:
+                    fatal_error = "opencode run returned an error event"
+                continue
+            if event_type == "step_start":
+                if stream_events and not reasoning_status_emitted:
+                    _emit_stream_event({"type": "status", "message": "OpenCode is analyzing the request."})
+                    reasoning_status_emitted = True
+                continue
+            if event_type == "text":
+                part = event.get("part")
+                if not isinstance(part, dict):
+                    continue
+                delta = str(part.get("text") or "")
+                if not delta:
+                    continue
+                delta_parts.append(delta)
+                if stream_events and not drafting_status_emitted:
+                    _emit_stream_event({"type": "status", "message": "OpenCode is drafting a reply."})
+                    drafting_status_emitted = True
+                if stream_events and stream_plain_text:
+                    _emit_stream_event({"type": "assistant_text", "delta": delta})
+                continue
+            if event_type == "step_finish":
+                part = event.get("part")
+                if not isinstance(part, dict):
+                    continue
+                tokens = part.get("tokens")
+                if not isinstance(tokens, dict):
+                    continue
+                cached_input_tokens = 0
+                cache_payload = tokens.get("cache")
+                if isinstance(cache_payload, dict):
+                    cached_input_tokens = _safe_non_negative_int(cache_payload.get("read")) or 0
+                usage = {
+                    "input_tokens": _safe_non_negative_int(tokens.get("input")) or 0,
+                    "cached_input_tokens": cached_input_tokens,
+                    "output_tokens": _safe_non_negative_int(tokens.get("output")) or 0,
+                }
+                if AGENT_CHAT_CONTEXT_LIMIT_TOKENS > 0:
+                    usage["context_limit_tokens"] = int(AGENT_CHAT_CONTEXT_LIMIT_TOKENS)
+                continue
+
+        heartbeat_stop.set()
+        if heartbeat_started.is_set() and heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=0.2)
+        done.set()
+        return_code = int(proc.wait())
+        stdout_text = "\n".join(lines).strip()
+        if timed_out:
+            raise TimeoutError(timeout_error_message)
+        if return_code != 0:
+            if fatal_error:
+                raise RuntimeError(fatal_error)
+            raise RuntimeError(stdout_text[:1200] or f"opencode run failed (exit={return_code})")
+        if fatal_error:
+            raise RuntimeError(fatal_error)
+        final_message = "".join(delta_parts).strip()
+        if not final_message:
+            raise RuntimeError("opencode run returned no text result")
+        return final_message, usage, session_id
+
+    if resume_attempted:
+        try:
+            final_message, usage, session_id = _run_once(
+                prompt_text=resume_prompt if resume_prompt is not None else start_prompt,
+                resume_session_id=resume_thread_id,
+            )
+            resume_succeeded = True
+        except RuntimeError as exc:
+            if not _is_missing_opencode_resume_session(str(exc)):
+                raise
+            final_message, usage, session_id = _run_once(
+                prompt_text=start_prompt,
+                resume_session_id=None,
+            )
+            resume_succeeded = False
+    else:
+        final_message, usage, session_id = _run_once(
+            prompt_text=start_prompt,
+            resume_session_id=None,
+        )
+        resume_succeeded = False
+
+    if stream_events and not stream_plain_text and final_message:
+        rendered = _render_stream_assistant_text(final_message)
+        if rendered:
+            _emit_stream_event({"type": "assistant_text", "delta": rendered})
+    if stream_events and usage is not None:
+        _emit_stream_event({"type": "usage", "usage": usage})
+    return final_message, usage, session_id, resume_attempted, resume_succeeded
 
 
 def _run_claude_cli_with_optional_stream(
@@ -1618,6 +2390,19 @@ def _run_codex_app_server_with_optional_stream(
             output_schema=output_schema,
             preferred_thread_id=preferred_thread_id,
             mcp_config_payload=mcp_config_payload,
+            env=env,
+            run_cwd=run_cwd,
+        )
+    if normalized_provider == "opencode":
+        return _run_opencode_cli_with_optional_stream(
+            start_prompt=start_prompt,
+            resume_prompt=resume_prompt,
+            timeout_seconds=timeout_seconds,
+            stream_events=stream_events,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            output_schema=output_schema,
+            preferred_thread_id=preferred_thread_id,
             env=env,
             run_cwd=run_cwd,
         )
@@ -2095,6 +2880,10 @@ def run_structured_codex_prompt_with_usage(
         selected_servers=selected_mcp_servers,
         task_management_mcp_url=AGENT_MCP_URL,
     )
+    opencode_config_payload = build_selected_opencode_mcp_config_payload(
+        selected_servers=selected_mcp_servers,
+        task_management_mcp_url=AGENT_MCP_URL,
+    )
     runtime_model_value = model
     runtime_reasoning_value = reasoning_effort
     if normalized_workspace_id and not str(model or "").strip():
@@ -2134,6 +2923,7 @@ def run_structured_codex_prompt_with_usage(
         with _codex_home_env(
             provider=runtime_provider,
             mcp_config_text=mcp_config_text,
+            opencode_config_payload=opencode_config_payload,
             runtime_config_text="",
             workspace_id=normalized_workspace_id,
             chat_session_id=normalized_session_key,
@@ -2189,6 +2979,10 @@ def main() -> int:
         task_management_mcp_url=mcp_url,
     )
     mcp_config_payload = build_selected_mcp_config_payload(
+        selected_servers=selected_mcp_servers,
+        task_management_mcp_url=mcp_url,
+    )
+    opencode_config_payload = build_selected_opencode_mcp_config_payload(
         selected_servers=selected_mcp_servers,
         task_management_mcp_url=mcp_url,
     )
@@ -2262,6 +3056,7 @@ def main() -> int:
         with _codex_home_env(
             provider=runtime_provider,
             mcp_config_text=mcp_config_text,
+            opencode_config_payload=opencode_config_payload,
             workspace_id=workspace_id,
             chat_session_id=chat_session_id,
             actor_user_id=actor_user_id,

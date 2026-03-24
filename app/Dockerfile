@@ -36,6 +36,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 ARG APP_UID=10001
 ARG APP_GID=10001
+ARG OPENCODE_VERSION=""
 ARG APP_BUNDLE_ENCRYPT=false
 ARG APP_BUNDLE_PASSWORD=""
 ARG APP_BUNDLE_KDF_ITERATIONS=200000
@@ -51,6 +52,12 @@ COPY --from=agent-cli-builder /usr/local/lib/node_modules /usr/local/lib/node_mo
 # Keep the same global bin layout npm creates so the agent CLIs can resolve platform packages.
 RUN ln -sf ../lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex
 RUN ln -sf ../lib/node_modules/@anthropic-ai/claude-code/cli.js /usr/local/bin/claude
+RUN if [ -n "${OPENCODE_VERSION}" ]; then \
+      curl -fsSL https://opencode.ai/install | bash -s -- --version "${OPENCODE_VERSION}" --no-modify-path; \
+    else \
+      curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path; \
+    fi \
+    && install -m 0755 "${HOME}/.opencode/bin/opencode" /usr/local/bin/opencode
 
 COPY requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt

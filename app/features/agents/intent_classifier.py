@@ -9,6 +9,7 @@ from threading import RLock
 from typing import Any
 
 from features.agents.agent_mcp_adapter import run_structured_agent_prompt
+from features.agents.workspace_runtime import resolve_workspace_background_runtime_with_new_session
 from shared.classification_cache import ClassificationCache, build_classification_cache_key
 
 run_structured_codex_prompt = run_structured_agent_prompt
@@ -100,6 +101,7 @@ def _default_intent_envelope() -> dict[str, Any]:
         "code_review_required": False,
         "project_name_provided": False,
         "task_completion_requested": False,
+        "classifier_model": "",
         "reason": "",
     }
 
@@ -120,8 +122,20 @@ def _normalize_intent_envelope(values: dict[str, Any] | None) -> dict[str, Any]:
     normalized["code_review_required"] = bool(parsed.get("code_review_required"))
     normalized["project_name_provided"] = bool(parsed.get("project_name_provided"))
     normalized["task_completion_requested"] = bool(parsed.get("task_completion_requested"))
+    normalized["classifier_model"] = str(parsed.get("classifier_model") or "").strip()
     normalized["reason"] = str(parsed.get("reason") or "").strip()
     return normalized
+
+
+def _resolve_classifier_model(workspace_id: str | None) -> str:
+    normalized_workspace_id = str(workspace_id or "").strip()
+    if not normalized_workspace_id:
+        return ""
+    try:
+        runtime_target = resolve_workspace_background_runtime_with_new_session(normalized_workspace_id)
+    except Exception:
+        return ""
+    return str(getattr(runtime_target, "model", "") or "").strip()
 
 
 def _build_partial_intent_envelope(values: dict[str, Any] | None) -> dict[str, Any]:
@@ -174,9 +188,12 @@ def classify_instruction_intent(
     session_id: str | None,
     actor_user_id: str | None = None,
 ) -> dict[str, Any]:
+    classifier_model = _resolve_classifier_model(workspace_id)
     normalized_instruction = str(instruction or "").strip()
     if not normalized_instruction:
-        return _default_intent_envelope()
+        empty = _default_intent_envelope()
+        empty["classifier_model"] = classifier_model
+        return empty
     payload = {
         "instruction": normalized_instruction,
         "workspace_id": str(workspace_id or "").strip() or None,
@@ -237,7 +254,9 @@ def classify_instruction_intent(
     if cached is not None:
         with _INTENT_CLASSIFIER_STATS_LOCK:
             _INTENT_CLASSIFIER_STATS["cache_hits"] += 1
-        return _normalize_intent_envelope(cached)
+        normalized_cached = _normalize_intent_envelope(cached)
+        normalized_cached["classifier_model"] = classifier_model
+        return normalized_cached
     with _INTENT_CLASSIFIER_STATS_LOCK:
         _INTENT_CLASSIFIER_STATS["cache_misses"] += 1
     try:
@@ -259,6 +278,7 @@ def classify_instruction_intent(
     if not isinstance(parsed, dict):
         parsed = {}
     normalized = _normalize_intent_envelope(parsed)
+    normalized["classifier_model"] = classifier_model
     _INTENT_CLASSIFICATION_CACHE.set(cache_key, normalized)
     return deepcopy(normalized)
 

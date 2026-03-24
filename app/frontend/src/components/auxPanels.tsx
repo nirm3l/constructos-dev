@@ -176,9 +176,11 @@ function isAdminTierRole(value: unknown): boolean {
 function resolveWorkspaceBotProvider(item: AdminWorkspaceUser): AgentAuthProvider | null {
   const configuredProvider = String(item.background_agent_provider || '').trim().toLowerCase()
   if (configuredProvider === 'claude') return 'claude'
+  if (configuredProvider === 'opencode') return 'opencode'
   if (configuredProvider === 'codex') return 'codex'
   const username = String(item.username || '').trim().toLowerCase()
   if (username === 'claude-bot') return 'claude'
+  if (username === 'opencode-bot') return 'opencode'
   if (username === 'codex-bot') return 'codex'
   const parsed = parseAgentExecutionModel(item.background_agent_model)
   return parsed?.provider || null
@@ -188,6 +190,7 @@ function getWorkspaceUserMonogram(item: AdminWorkspaceUser): string {
   const username = String(item.username || '').trim().toLowerCase()
   if (username === 'codex-bot') return 'CX'
   if (username === 'claude-bot') return 'CL'
+  if (username === 'opencode-bot') return 'OC'
   const source = String(item.full_name || item.username || '').trim()
   if (!source) return '??'
   const tokens = source.split(/\s+/).filter(Boolean)
@@ -2288,6 +2291,8 @@ export function WorkspacePanel({
   codexAuthStatus,
   codexAuthLoading,
   canManageCodexAuth,
+  opencodeAuthStatus,
+  opencodeAuthLoading,
   claudeAuthStatus,
   claudeAuthLoading,
   canManageClaudeAuth,
@@ -2334,6 +2339,8 @@ export function WorkspacePanel({
   codexAuthStatus: AgentAuthStatus | null
   codexAuthLoading: boolean
   canManageCodexAuth: boolean
+  opencodeAuthStatus: AgentAuthStatus | null
+  opencodeAuthLoading: boolean
   claudeAuthStatus: AgentAuthStatus | null
   claudeAuthLoading: boolean
   canManageClaudeAuth: boolean
@@ -2430,6 +2437,12 @@ export function WorkspacePanel({
   const codexAuthCanRemoveOverride = canManageCodexAuth
     && Boolean(codexAuthStatus?.override_available)
     && !deleteCodexAuthOverridePending
+  const opencodeAuthSource = String(opencodeAuthStatus?.effective_source || '').trim().toLowerCase()
+  const opencodeAuthStatusLabel = authSourceLabel(
+    'opencode',
+    opencodeAuthStatus?.effective_source,
+    opencodeAuthStatus?.target_actor_username
+  )
   const claudeAuthSource = String(claudeAuthStatus?.effective_source || '').trim().toLowerCase()
   const claudeAuthLoginSession = claudeAuthStatus?.login_session ?? null
   const claudeAuthStatusLabel = authSourceLabel(
@@ -2477,6 +2490,11 @@ export function WorkspacePanel({
     { label: 'Host auth', value: codexAuthStatus?.host_auth_available ? 'Available' : 'Missing' },
     { label: 'Shared override', value: codexAuthStatus?.override_available ? 'Active' : 'Not set' },
     { label: 'Scope', value: String(codexAuthStatus?.scope || 'system').trim() || 'system' },
+  ]
+  const opencodeAuthSummaryPills: WorkspaceAuthSummaryPill[] = [
+    { label: 'Runtime', value: opencodeAuthSource === 'runtime_builtin' ? 'Built-in' : 'Unavailable' },
+    { label: 'Host auth', value: opencodeAuthStatus?.host_auth_available ? 'Available' : 'Not required' },
+    { label: 'Shared override', value: opencodeAuthStatus?.override_available ? 'Active' : 'Not required' },
   ]
   const claudeAuthSummaryPills: WorkspaceAuthSummaryPill[] = [
     { label: 'Host auth', value: claudeAuthStatus?.host_auth_available ? 'Available' : 'Missing' },
@@ -2955,6 +2973,29 @@ export function WorkspacePanel({
                   </div>
                 ) : null}
                 feedback={codexAuthFeedback}
+              />
+
+              <WorkspaceAuthCard
+                id="workspace-opencode-auth"
+                title="OpenCode authentication"
+                providerLabel="OpenCode"
+                actorUsername={String(opencodeAuthStatus?.target_actor_username || 'opencode-bot').trim() || 'opencode-bot'}
+                loading={opencodeAuthLoading}
+                loadingText="Loading OpenCode runtime status..."
+                description="OpenCode uses runtime-built-in access and does not require device sign-in."
+                statusLabel={opencodeAuthStatusLabel}
+                statusTone={opencodeAuthSource === 'none' ? 'error' : 'default'}
+                sessionStatusLabel={null}
+                summaryPills={opencodeAuthSummaryPills}
+                facts={[
+                  { label: 'Effective source', value: opencodeAuthStatusLabel },
+                  { label: 'Auth target', value: String(opencodeAuthStatus?.target_actor_username || 'opencode-bot').trim() || 'opencode-bot' },
+                  { label: 'Override updated', value: formatDateTime(opencodeAuthStatus?.override_updated_at || null) },
+                ]}
+                canManage={false}
+                manageHint="OpenCode is runtime-managed and does not expose manual sign-in actions."
+                forceDetailsOpen={false}
+                feedback={null}
               />
 
               <WorkspaceAuthCard

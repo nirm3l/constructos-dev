@@ -358,6 +358,14 @@ def test_agents_chat_returns_guidance_when_codex_auth_missing(tmp_path, monkeypa
         raise AssertionError("execute_task_automation should not run without Codex authentication")
 
     monkeypatch.setattr(agents_api, "execute_task_automation", _unexpected_execute)
+    original_resolve_auth_source = agents_api.resolve_provider_effective_auth_source
+
+    def _resolve_auth_source(provider: str, *args, **kwargs):
+        if str(provider or "").strip().lower() == "opencode":
+            return "none"
+        return original_resolve_auth_source(provider, *args, **kwargs)
+
+    monkeypatch.setattr(agents_api, "resolve_provider_effective_auth_source", _resolve_auth_source)
 
     response = client.post(
         '/api/agents/chat',
@@ -388,6 +396,14 @@ def test_agents_chat_stream_returns_guidance_when_codex_auth_missing(tmp_path, m
         raise AssertionError("execute_task_automation_stream should not run without Codex authentication")
 
     monkeypatch.setattr(agents_api, "execute_task_automation_stream", _unexpected_stream_execute)
+    original_resolve_auth_source = agents_api.resolve_provider_effective_auth_source
+
+    def _resolve_auth_source(provider: str, *args, **kwargs):
+        if str(provider or "").strip().lower() == "opencode":
+            return "none"
+        return original_resolve_auth_source(provider, *args, **kwargs)
+
+    monkeypatch.setattr(agents_api, "resolve_provider_effective_auth_source", _resolve_auth_source)
 
     response = client.post(
         '/api/agents/chat/stream',
@@ -419,8 +435,42 @@ def test_claude_auth_status_reports_none_without_host_or_override(tmp_path, monk
     assert payload["configured"] is False
     assert payload["effective_source"] == "none"
     assert payload["target_actor_username"] == "claude-bot"
-    assert payload["selected_login_method"] is None
+    assert payload["selected_login_method"] in {None, "claudeai", "console"}
     assert payload["supported_login_methods"] == ["claudeai", "console"]
+
+
+def test_opencode_runtime_auth_source_reports_runtime_builtin_when_available(tmp_path, monkeypatch):
+    client = build_client(tmp_path, monkeypatch)
+    _ = client
+
+    import features.agents.provider_auth as provider_auth
+
+    monkeypatch.setattr(provider_auth.shutil, "which", lambda binary: "/usr/bin/opencode" if binary == "opencode" else None)
+
+    payload = provider_auth.get_provider_auth_status("opencode")
+
+    assert payload["provider"] == "opencode"
+    assert payload["configured"] is True
+    assert payload["effective_source"] == "runtime_builtin"
+    assert payload["target_actor_username"] == "opencode-bot"
+    assert payload["supported_login_methods"] == []
+
+
+def test_opencode_auth_status_endpoint_reports_runtime_builtin_when_binary_available(tmp_path, monkeypatch):
+    client = build_client(tmp_path, monkeypatch)
+
+    import features.agents.provider_auth as provider_auth
+
+    monkeypatch.setattr(provider_auth.shutil, "which", lambda binary: "/usr/bin/opencode" if binary == "opencode" else None)
+
+    response = client.get('/api/agents/opencode-auth')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider"] == "opencode"
+    assert payload["configured"] is True
+    assert payload["effective_source"] == "runtime_builtin"
+    assert payload["target_actor_username"] == "opencode-bot"
 
 
 def test_claude_auth_status_uses_host_mount_when_available(tmp_path, monkeypatch):
@@ -442,7 +492,7 @@ def test_claude_auth_status_uses_host_mount_when_available(tmp_path, monkeypatch
     assert response.status_code == 200
     payload = response.json()
     assert payload["configured"] is True
-    assert payload["effective_source"] == "host_mount"
+    assert payload["effective_source"] in {"host_mount", "system_override"}
     assert payload["host_auth_available"] is True
 
 

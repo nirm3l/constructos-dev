@@ -10,6 +10,7 @@ from shared.settings import (
     AGENT_DEFAULT_EXECUTION_PROVIDER,
     CLAUDE_SYSTEM_USER_ID,
     CODEX_SYSTEM_USER_ID,
+    OPENCODE_SYSTEM_USER_ID,
     agent_default_model_for_provider,
     agent_default_reasoning_effort_for_provider,
     agent_system_user_id_for_provider,
@@ -60,6 +61,8 @@ def provider_for_system_user(*, user_id: str | None = None, username: str | None
     normalized_username = str(username or "").strip().lower()
     if normalized_user_id == CLAUDE_SYSTEM_USER_ID or normalized_username == agent_system_username_for_provider("claude").lower():
         return "claude"
+    if normalized_user_id == OPENCODE_SYSTEM_USER_ID or normalized_username == agent_system_username_for_provider("opencode").lower():
+        return "opencode"
     if normalized_user_id == CODEX_SYSTEM_USER_ID or normalized_username == agent_system_username_for_provider("codex").lower():
         return "codex"
     return None
@@ -70,6 +73,8 @@ def _fallback_model(provider: str) -> str:
     configured = str(agent_default_model_for_provider(normalized_provider) or "").strip()
     if normalized_provider == "claude":
         return encode_execution_model(provider="claude", model=configured or "sonnet")
+    if normalized_provider == "opencode":
+        return encode_execution_model(provider="opencode", model=configured or "opencode/gpt-5-nano")
     if configured:
         return encode_execution_model(provider="codex", model=configured)
     return ""
@@ -79,6 +84,8 @@ def _fallback_reasoning(provider: str) -> str | None:
     normalized_provider = normalize_execution_provider(provider)
     configured = _normalize_reasoning_effort(agent_default_reasoning_effort_for_provider(normalized_provider))
     if normalized_provider == "claude":
+        return configured
+    if normalized_provider == "opencode":
         return configured
     return configured or _CODEX_DEFAULT_REASONING
 
@@ -109,7 +116,7 @@ def normalize_workspace_runtime_reasoning(*, provider: str, value: object) -> st
 
 
 def _resolve_default_provider() -> str:
-    return normalize_execution_provider(AGENT_DEFAULT_EXECUTION_PROVIDER)
+    return normalize_execution_provider(AGENT_DEFAULT_EXECUTION_PROVIDER) or "codex"
 
 
 def _resolve_available_default_provider() -> str:
@@ -117,6 +124,8 @@ def _resolve_available_default_provider() -> str:
         return "codex"
     if resolve_provider_effective_auth_source("claude") != "none":
         return "claude"
+    if resolve_provider_effective_auth_source("opencode") != "none":
+        return "opencode"
     return _resolve_default_provider()
 
 
@@ -133,7 +142,7 @@ def _load_runtime_user_map(db: Session, workspace_id: str) -> dict[str, User]:
         .join(WorkspaceMember, WorkspaceMember.user_id == User.id)
         .where(
             WorkspaceMember.workspace_id == workspace_id,
-            User.id.in_([CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID]),
+            User.id.in_([CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID, OPENCODE_SYSTEM_USER_ID]),
         )
     ).scalars().all()
     return {str(row.id): row for row in rows}
@@ -157,7 +166,7 @@ def list_workspace_runtime_targets(db: Session, workspace_id: str) -> dict[str, 
     if not selected_user_id:
         selected_user_id = system_user_id_for_provider(_resolve_available_default_provider())
     out: dict[str, WorkspaceRuntimeTarget] = {}
-    for provider in ("codex", "claude"):
+    for provider in ("codex", "claude", "opencode"):
         user_id = system_user_id_for_provider(provider)
         user = runtime_users.get(user_id)
         username = str(getattr(user, "username", "") or "").strip() or agent_system_username_for_provider(provider)

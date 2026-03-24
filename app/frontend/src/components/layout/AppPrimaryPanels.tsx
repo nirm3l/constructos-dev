@@ -591,6 +591,8 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             deployedAtUtc={state.backendDeployedAtUtc}
             codexAuthStatus={state.codexAuthStatus?.data ?? null}
             codexAuthLoading={Boolean(state.codexAuthStatus?.isLoading || state.codexAuthStatus?.isFetching)}
+            opencodeAuthStatus={state.opencodeAuthStatus?.data ?? null}
+            opencodeAuthLoading={Boolean(state.opencodeAuthStatus?.isLoading || state.opencodeAuthStatus?.isFetching)}
             claudeAuthStatus={state.claudeAuthStatus?.data ?? null}
             claudeAuthLoading={Boolean(state.claudeAuthStatus?.isLoading || state.claudeAuthStatus?.isFetching)}
             canManageCodexAuth={state.canManageUsers}

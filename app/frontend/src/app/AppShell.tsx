@@ -16,6 +16,7 @@ import {
   getBootstrap,
   getClaudeAuthStatus,
   getCodexAuthStatus,
+  getOpenCodeAuthStatus,
   getLicenseStatus,
   getWorkspaceDoctorStatus,
   resetWorkspaceDoctor,
@@ -433,6 +434,14 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const claudeAuthStatus = useQuery({
     queryKey: ['claude-auth-status', userId],
     queryFn: () => getClaudeAuthStatus(userId),
+    enabled: Boolean(bootstrap.data),
+    retry: 1,
+    refetchOnWindowFocus: false,
+    refetchInterval: false,
+  })
+  const opencodeAuthStatus = useQuery({
+    queryKey: ['opencode-auth-status', userId],
+    queryFn: () => getOpenCodeAuthStatus(userId),
     enabled: Boolean(bootstrap.data),
     retry: 1,
     refetchOnWindowFocus: false,
@@ -2749,6 +2758,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       backendDeployedAtUtc,
       codexAuthStatus,
       claudeAuthStatus,
+      opencodeAuthStatus,
       startCodexDeviceAuth: startCodexDeviceAuthMutation.mutateAsync,
       startCodexDeviceAuthPending: startCodexDeviceAuthMutation.isPending,
       cancelCodexDeviceAuth: cancelCodexDeviceAuthMutation.mutateAsync,

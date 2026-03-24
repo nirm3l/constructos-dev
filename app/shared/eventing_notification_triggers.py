@@ -24,7 +24,7 @@ from features.tasks.domain import (
 from .contracts import EventEnvelope
 from .eventing_rebuild import rebuild_state
 from .models import Project, Task, TaskWatcher
-from .settings import AGENT_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID
+from .settings import AGENT_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID, OPENCODE_SYSTEM_USER_ID
 from .typed_notifications import (
     NOTIFICATION_TYPE_PROJECT_MEMBERSHIP_CHANGED,
     NOTIFICATION_TYPE_TASK_ASSIGNED_TO_ME,
@@ -382,7 +382,7 @@ def _emit_project_membership_changed(
     action = "removed" if env.event_type == PROJECT_EVENT_MEMBER_REMOVED else "upserted"
     if action == "upserted" and actor_id and actor_id == target_user_id:
         return
-    if action == "upserted" and actor_id in {AGENT_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID} and project_id:
+    if action == "upserted" and actor_id in {AGENT_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID, OPENCODE_SYSTEM_USER_ID} and project_id:
         project_row = db.get(Project, project_id)
         if project_row is not None and isinstance(project_row.created_at, datetime):
             age_seconds = (datetime.now(timezone.utc) - project_row.created_at.astimezone(timezone.utc)).total_seconds()
