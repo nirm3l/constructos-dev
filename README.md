@@ -11,6 +11,9 @@ m4tr1x is a task/project platform that combines:
 ## Documentation
 Project documentation is being rewritten and is temporarily unavailable in this repository.
 
+Testing policy source of truth:
+- `docs/testing-source-of-truth.md`
+
 ## System At A Glance
 ```mermaid
 graph LR
@@ -230,9 +233,6 @@ docker compose -p constructos-app -f docker-compose.yml run --rm --build task-ap
 
 # Critical bounded-context suite (default pytest collection, 150-200 target)
 docker compose -p constructos-app -f docker-compose.yml run --rm --build task-app pytest app/tests/core
-
-# Legacy broad suite (explicit opt-in during migration)
-docker compose -p constructos-app -f docker-compose.yml run --rm --build task-app pytest app/tests/test_api.py
 ```
 
 ## COS Wrapper CLI

@@ -1616,3 +1616,12 @@ def test_run_opencode_cli_preserves_text_delta_whitespace(monkeypatch):
     assert session_id == "ses-1"
     assert resume_attempted is False
     assert resume_succeeded is False
+
+
+def test_structured_response_selection_for_stream_modes() -> None:
+    from features.agents.codex_mcp_adapter import _should_use_structured_response
+
+    assert _should_use_structured_response(provider="opencode", stream_events=True, stream_plain_text=True) is True
+    assert _should_use_structured_response(provider="codex", stream_events=True, stream_plain_text=True) is False
+    assert _should_use_structured_response(provider="codex", stream_events=False, stream_plain_text=True) is True
+    assert _should_use_structured_response(provider="claude", stream_events=True, stream_plain_text=False) is True

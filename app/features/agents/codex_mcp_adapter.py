@@ -2720,6 +2720,12 @@ def _try_parse_structured_reply_text(text: str) -> dict[str, object] | None:
     return None
 
 
+def _should_use_structured_response(*, provider: str, stream_events: bool, stream_plain_text: bool) -> bool:
+    if not (stream_events and stream_plain_text):
+        return True
+    return str(provider or "").strip().lower() == "opencode"
+
+
 def _render_stream_assistant_text(message_text: str) -> str:
     raw = str(message_text or "").strip()
     if not raw:
@@ -2995,7 +3001,11 @@ def main() -> int:
         fallback_seconds=AGENT_EXECUTOR_TIMEOUT_SECONDS,
     )
     task_run_cwd = _resolve_task_workdir(ctx.get("task_workdir"))
-    structured_response = not (stream_events and stream_plain_text)
+    structured_response = _should_use_structured_response(
+        provider=runtime_provider,
+        stream_events=stream_events,
+        stream_plain_text=stream_plain_text,
+    )
     start_prompt = _build_prompt(ctx, structured_response=structured_response)
     resume_prompt = _build_resume_prompt(ctx, structured_response=structured_response)
     full_prompt_segments = _prompt_segment_char_stats(ctx, mode="full")
