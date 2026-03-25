@@ -1434,6 +1434,37 @@ def _extract_error_message(payload: object) -> str:
     return ""
 
 
+def _parse_json_dicts_from_line(raw_line: str) -> list[dict[str, object]]:
+    text = str(raw_line or "")
+    stripped = text.strip()
+    if not stripped:
+        return []
+
+    out: list[dict[str, object]] = []
+    try:
+        parsed = json.loads(stripped)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        return [parsed]
+
+    decoder = json.JSONDecoder()
+    cursor = 0
+    while cursor < len(text):
+        start = text.find("{", cursor)
+        if start < 0:
+            break
+        try:
+            candidate, end = decoder.raw_decode(text, start)
+        except Exception:
+            cursor = start + 1
+            continue
+        if isinstance(candidate, dict):
+            out.append(candidate)
+        cursor = max(end, start + 1)
+    return out
+
+
 def _build_plain_text_result(message_text: str) -> dict[str, object]:
     text = str(message_text or "").strip()
     if not text:
@@ -2024,6 +2055,7 @@ def _run_opencode_cli_with_optional_stream(
             raise RuntimeError("opencode run stdout unavailable")
 
         lines: list[str] = []
+        parsed_events: list[dict[str, object]] = []
         session_id: str | None = None
         usage: dict[str, int] | None = None
         delta_parts: list[str] = []
@@ -2033,59 +2065,58 @@ def _run_opencode_cli_with_optional_stream(
             if not line:
                 continue
             lines.append(line)
-            try:
-                event = json.loads(line)
-            except Exception:
+            events = _parse_json_dicts_from_line(line)
+            if not events:
                 continue
-            if not isinstance(event, dict):
-                continue
-            event_session_id = str(event.get("sessionID") or event.get("session_id") or "").strip()
-            if event_session_id:
-                session_id = event_session_id
-            event_type = str(event.get("type") or "").strip().lower()
-            if event_type == "error":
-                err_payload = event.get("error")
-                if isinstance(err_payload, dict):
-                    data = err_payload.get("data")
-                    if isinstance(data, dict):
-                        fatal_error = str(data.get("message") or "").strip()
+            for event in events:
+                parsed_events.append(event)
+                event_session_id = str(event.get("sessionID") or event.get("session_id") or "").strip()
+                if event_session_id:
+                    session_id = event_session_id
+                event_type = str(event.get("type") or "").strip().lower()
+                if event_type == "error":
+                    err_payload = event.get("error")
+                    if isinstance(err_payload, dict):
+                        data = err_payload.get("data")
+                        if isinstance(data, dict):
+                            fatal_error = str(data.get("message") or "").strip()
+                        if not fatal_error:
+                            fatal_error = str(err_payload.get("message") or err_payload.get("name") or "").strip()
                     if not fatal_error:
-                        fatal_error = str(err_payload.get("message") or err_payload.get("name") or "").strip()
-                if not fatal_error:
-                    fatal_error = "opencode run returned an error event"
-                continue
-            if event_type == "step_start":
-                continue
-            if event_type == "text":
-                part = event.get("part")
-                if not isinstance(part, dict):
+                        fatal_error = "opencode run returned an error event"
                     continue
-                delta = str(part.get("text") or "")
-                if not delta:
+                if event_type == "step_start":
                     continue
-                delta_parts.append(delta)
-                if stream_events and stream_plain_text:
-                    _emit_stream_event({"type": "assistant_text", "delta": delta})
-                continue
-            if event_type == "step_finish":
-                part = event.get("part")
-                if not isinstance(part, dict):
+                if event_type == "text":
+                    part = event.get("part")
+                    if not isinstance(part, dict):
+                        continue
+                    delta = str(part.get("text") or "")
+                    if not delta:
+                        continue
+                    delta_parts.append(delta)
+                    if stream_events and stream_plain_text:
+                        _emit_stream_event({"type": "assistant_text", "delta": delta})
                     continue
-                tokens = part.get("tokens")
-                if not isinstance(tokens, dict):
+                if event_type == "step_finish":
+                    part = event.get("part")
+                    if not isinstance(part, dict):
+                        continue
+                    tokens = part.get("tokens")
+                    if not isinstance(tokens, dict):
+                        continue
+                    cached_input_tokens = 0
+                    cache_payload = tokens.get("cache")
+                    if isinstance(cache_payload, dict):
+                        cached_input_tokens = _safe_non_negative_int(cache_payload.get("read")) or 0
+                    usage = {
+                        "input_tokens": _safe_non_negative_int(tokens.get("input")) or 0,
+                        "cached_input_tokens": cached_input_tokens,
+                        "output_tokens": _safe_non_negative_int(tokens.get("output")) or 0,
+                    }
+                    if AGENT_CHAT_CONTEXT_LIMIT_TOKENS > 0:
+                        usage["context_limit_tokens"] = int(AGENT_CHAT_CONTEXT_LIMIT_TOKENS)
                     continue
-                cached_input_tokens = 0
-                cache_payload = tokens.get("cache")
-                if isinstance(cache_payload, dict):
-                    cached_input_tokens = _safe_non_negative_int(cache_payload.get("read")) or 0
-                usage = {
-                    "input_tokens": _safe_non_negative_int(tokens.get("input")) or 0,
-                    "cached_input_tokens": cached_input_tokens,
-                    "output_tokens": _safe_non_negative_int(tokens.get("output")) or 0,
-                }
-                if AGENT_CHAT_CONTEXT_LIMIT_TOKENS > 0:
-                    usage["context_limit_tokens"] = int(AGENT_CHAT_CONTEXT_LIMIT_TOKENS)
-                continue
 
         done.set()
         return_code = int(proc.wait())
@@ -2100,7 +2131,36 @@ def _run_opencode_cli_with_optional_stream(
             raise RuntimeError(fatal_error)
         final_message = "".join(delta_parts).strip()
         if not final_message:
-            raise RuntimeError("opencode run returned no text result")
+            # Some OpenCode builds return only a final JSON payload (result/output)
+            # without emitting incremental text deltas.
+            for event in reversed(parsed_events):
+                candidate = ""
+                for key in ("result", "output", "response", "message", "assistant", "content", "text", "part"):
+                    if key not in event:
+                        continue
+                    extracted = _extract_message_text(event.get(key))
+                    if extracted.strip():
+                        candidate = extracted.strip()
+                        break
+                if not candidate:
+                    extracted = _extract_message_text(event)
+                    if extracted.strip():
+                        candidate = extracted.strip()
+                if not candidate:
+                    continue
+                if output_schema is not None and _try_parse_structured_reply_text(candidate) is None:
+                    continue
+                final_message = candidate
+                break
+        if not final_message and output_schema is not None:
+            parsed_structured = _try_parse_structured_reply_text(stdout_text)
+            if parsed_structured is not None:
+                final_message = _stable_json_dumps(parsed_structured)
+        if not final_message:
+            raise RuntimeError(
+                "opencode run returned no text result"
+                + (f" | stdout_snippet={stdout_text[:320]}" if stdout_text else "")
+            )
         return final_message, usage, session_id
 
     if resume_attempted:
@@ -2687,6 +2747,21 @@ def _try_parse_structured_reply_text(text: str) -> dict[str, object] | None:
         payload = _coerce_structured_reply_payload(parsed)
         if payload is not None:
             return payload
+    decoder = json.JSONDecoder()
+    cursor = 0
+    while cursor < len(raw):
+        start = raw.find("{", cursor)
+        if start < 0:
+            break
+        try:
+            parsed, end = decoder.raw_decode(raw, start)
+        except Exception:
+            cursor = start + 1
+            continue
+        payload = _coerce_structured_reply_payload(parsed)
+        if payload is not None:
+            return payload
+        cursor = max(end, start + 1)
     return None
 
 

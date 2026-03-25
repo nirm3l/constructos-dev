@@ -1731,6 +1731,277 @@ def test_run_opencode_cli_preserves_text_delta_whitespace(monkeypatch):
     assert resume_succeeded is False
 
 
+def test_run_opencode_cli_accepts_final_result_payload_without_text_deltas(monkeypatch):
+    from features.agents import codex_mcp_adapter as adapter_module
+
+    structured_payload = (
+        '{"action":"comment","summary":"ok","comment":null,'
+        + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+        + "}"
+    )
+    events = [
+        {"type": "step_start", "sessionID": "ses-2"},
+        {"type": "result", "result": {"text": structured_payload}},
+        {"type": "step_finish", "part": {"tokens": {"input": 5, "output": 7}}},
+    ]
+
+    class _FakeProc:
+        def __init__(self, output_lines):
+            self.stdout = output_lines
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            return None
+
+        def wait(self):
+            return 0
+
+    fake_output = [json.dumps(event) + "\n" for event in events]
+    monkeypatch.setattr(
+        adapter_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _FakeProc(fake_output),
+    )
+
+    final_message, usage, session_id, resume_attempted, resume_succeeded = adapter_module._run_opencode_cli_with_optional_stream(
+        start_prompt="Say hello",
+        resume_prompt=None,
+        timeout_seconds=None,
+        stream_events=False,
+        model="opencode/gpt-5-nano",
+        reasoning_effort=None,
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "action": {"type": "string"},
+                "summary": {"type": "string"},
+                "comment": {"type": ["string", "null"]},
+                "execution_outcome_contract": {"type": "object"},
+            },
+            "required": ["action", "summary", "comment", "execution_outcome_contract"],
+        },
+        preferred_thread_id=None,
+        env=None,
+        run_cwd=None,
+    )
+
+    assert final_message == structured_payload
+    assert usage == {"input_tokens": 5, "cached_input_tokens": 0, "output_tokens": 7}
+    assert session_id == "ses-2"
+    assert resume_attempted is False
+    assert resume_succeeded is False
+
+
+def test_run_opencode_cli_parses_embedded_json_line_with_prefix(monkeypatch):
+    from features.agents import codex_mcp_adapter as adapter_module
+
+    structured_payload = (
+        '{"action":"comment","summary":"ok","comment":null,'
+        + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+        + "}"
+    )
+    raw_lines = [
+        'Database migration complete. {"type":"step_start","sessionID":"ses-3"}\n',
+        f'noise before json {{"type":"result","result":{{"text":{json.dumps(structured_payload)}}}}}\n',
+        '{"type":"step_finish","part":{"tokens":{"input":9,"output":4}}}\n',
+    ]
+
+    class _FakeProc:
+        def __init__(self, output_lines):
+            self.stdout = output_lines
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            return None
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        adapter_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _FakeProc(raw_lines),
+    )
+
+    final_message, usage, session_id, resume_attempted, resume_succeeded = adapter_module._run_opencode_cli_with_optional_stream(
+        start_prompt="hello",
+        resume_prompt=None,
+        timeout_seconds=None,
+        stream_events=False,
+        model="opencode/gpt-5-nano",
+        reasoning_effort=None,
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "action": {"type": "string"},
+                "summary": {"type": "string"},
+                "comment": {"type": ["string", "null"]},
+                "execution_outcome_contract": {"type": "object"},
+            },
+            "required": ["action", "summary", "comment", "execution_outcome_contract"],
+        },
+        preferred_thread_id=None,
+        env=None,
+        run_cwd=None,
+    )
+
+    assert final_message == structured_payload
+    assert usage == {"input_tokens": 9, "cached_input_tokens": 0, "output_tokens": 4}
+    assert session_id == "ses-3"
+    assert resume_attempted is False
+    assert resume_succeeded is False
+
+
+def test_run_opencode_cli_parses_multiple_json_objects_from_single_line(monkeypatch):
+    from features.agents import codex_mcp_adapter as adapter_module
+
+    structured_payload = (
+        '{"action":"comment","summary":"ok","comment":null,'
+        + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+        + "}"
+    )
+    merged_line = (
+        '{"type":"step_start","sessionID":"ses-4"}'
+        + json.dumps({"type": "result", "result": {"text": structured_payload}})
+        + '{"type":"step_finish","part":{"tokens":{"input":4,"output":2}}}\n'
+    )
+
+    class _FakeProc:
+        def __init__(self, output_lines):
+            self.stdout = output_lines
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            return None
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        adapter_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _FakeProc([merged_line]),
+    )
+
+    final_message, usage, session_id, resume_attempted, resume_succeeded = adapter_module._run_opencode_cli_with_optional_stream(
+        start_prompt="hello",
+        resume_prompt=None,
+        timeout_seconds=None,
+        stream_events=False,
+        model="opencode/gpt-5-nano",
+        reasoning_effort=None,
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "action": {"type": "string"},
+                "summary": {"type": "string"},
+                "comment": {"type": ["string", "null"]},
+                "execution_outcome_contract": {"type": "object"},
+            },
+            "required": ["action", "summary", "comment", "execution_outcome_contract"],
+        },
+        preferred_thread_id=None,
+        env=None,
+        run_cwd=None,
+    )
+
+    assert final_message == structured_payload
+    assert usage == {"input_tokens": 4, "cached_input_tokens": 0, "output_tokens": 2}
+    assert session_id == "ses-4"
+    assert resume_attempted is False
+    assert resume_succeeded is False
+
+
+def test_try_parse_structured_reply_text_handles_noisy_multi_json_payload():
+    from features.agents.codex_mcp_adapter import _try_parse_structured_reply_text
+
+    noisy = (
+        "startup logs... "
+        '{"type":"step_start","sessionID":"ses-x"}'
+        '{"action":"comment","summary":"ok","comment":null,'
+        + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+        + "}"
+    )
+    parsed = _try_parse_structured_reply_text(noisy)
+
+    assert isinstance(parsed, dict)
+    assert parsed.get("summary") == "ok"
+    assert parsed.get("action") == "comment"
+
+
+def test_run_opencode_cli_uses_stdout_structured_fallback_when_events_missing(monkeypatch):
+    from features.agents import codex_mcp_adapter as adapter_module
+
+    structured_payload = (
+        '{"action":"comment","summary":"fallback-ok","comment":null,'
+        + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+        + "}"
+    )
+    raw_lines = [
+        "Performing one time database migration, may take a few minutes...\n",
+        "sqlite-migration:done\n",
+        f"Database migration complete. {structured_payload}\n",
+    ]
+
+    class _FakeProc:
+        def __init__(self, output_lines):
+            self.stdout = output_lines
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            return None
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        adapter_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _FakeProc(raw_lines),
+    )
+
+    final_message, usage, session_id, resume_attempted, resume_succeeded = adapter_module._run_opencode_cli_with_optional_stream(
+        start_prompt="hello",
+        resume_prompt=None,
+        timeout_seconds=None,
+        stream_events=False,
+        model="opencode/gpt-5-nano",
+        reasoning_effort=None,
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "action": {"type": "string"},
+                "summary": {"type": "string"},
+                "comment": {"type": ["string", "null"]},
+                "execution_outcome_contract": {"type": "object"},
+            },
+            "required": ["action", "summary", "comment", "execution_outcome_contract"],
+        },
+        preferred_thread_id=None,
+        env=None,
+        run_cwd=None,
+    )
+
+    parsed = json.loads(final_message)
+    assert parsed["summary"] == "fallback-ok"
+    assert usage is None
+    assert session_id is None
+    assert resume_attempted is False
+    assert resume_succeeded is False
+
+
 def test_structured_response_selection_for_stream_modes() -> None:
     from features.agents.codex_mcp_adapter import _should_use_structured_response
 
