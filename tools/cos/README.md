@@ -47,7 +47,7 @@ pipx install --force ./tools/cos
 
 From GitHub release artifact:
 ```bash
-COS_CLI_VERSION=1.0.0
+COS_CLI_VERSION=1.0.1
 pipx install --force "https://github.com/nirm3l/constructos/releases/download/cos-v${COS_CLI_VERSION}/constructos_cli-${COS_CLI_VERSION}-py3-none-any.whl"
 ```
 
