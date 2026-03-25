@@ -216,9 +216,9 @@ def _derive_config_from_list_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _discover_rows_uncached() -> list[dict[str, Any]]:
+def _discover_rows_uncached(*, include_codex_cli: bool = True) -> list[dict[str, Any]]:
     config_rows = _load_mcp_servers_from_config()
-    list_rows = _run_codex_mcp_list_json()
+    list_rows = _run_codex_mcp_list_json() if include_codex_cli else []
     list_by_name: dict[str, dict[str, Any]] = {}
     ordered_names: list[str] = []
     for row in list_rows:
@@ -284,22 +284,25 @@ def _discover_rows_uncached() -> list[dict[str, Any]]:
     return rows
 
 
-def _get_rows(*, force_refresh: bool = False) -> list[dict[str, Any]]:
+def _get_rows(*, force_refresh: bool = False, include_codex_cli: bool = True) -> list[dict[str, Any]]:
     global _CACHE_ROWS, _CACHE_EXPIRES_AT
+    if not include_codex_cli:
+        # OpenCode discovery should not depend on Codex CLI availability.
+        return _discover_rows_uncached(include_codex_cli=False)
     now = time.monotonic()
     with _CACHE_LOCK:
         if not force_refresh and _CACHE_ROWS and now < _CACHE_EXPIRES_AT:
             return copy.deepcopy(_CACHE_ROWS)
 
-    discovered = _discover_rows_uncached()
+    discovered = _discover_rows_uncached(include_codex_cli=True)
     with _CACHE_LOCK:
         _CACHE_ROWS = copy.deepcopy(discovered)
         _CACHE_EXPIRES_AT = time.monotonic() + _CACHE_TTL_SECONDS
         return copy.deepcopy(_CACHE_ROWS)
 
 
-def list_available_mcp_servers(*, force_refresh: bool = False) -> list[dict[str, Any]]:
-    rows = _get_rows(force_refresh=force_refresh)
+def list_available_mcp_servers(*, force_refresh: bool = False, include_codex_cli: bool = True) -> list[dict[str, Any]]:
+    rows = _get_rows(force_refresh=force_refresh, include_codex_cli=include_codex_cli)
     out: list[dict[str, Any]] = []
     for row in rows:
         out.append(
@@ -314,8 +317,13 @@ def list_available_mcp_servers(*, force_refresh: bool = False) -> list[dict[str,
     return out
 
 
-def normalize_chat_mcp_servers(raw_servers: list[str] | None, *, strict: bool = True) -> list[str]:
-    available_rows = _get_rows()
+def normalize_chat_mcp_servers(
+    raw_servers: list[str] | None,
+    *,
+    strict: bool = True,
+    include_codex_cli: bool = True,
+) -> list[str]:
+    available_rows = _get_rows(include_codex_cli=include_codex_cli)
     enabled_names = [
         str(row.get("name") or "").strip()
         for row in available_rows
@@ -362,8 +370,13 @@ def normalize_chat_mcp_servers(raw_servers: list[str] | None, *, strict: bool = 
     return [name for name in enabled_names if name in selected_set]
 
 
-def build_selected_mcp_config_text(*, selected_servers: list[str], task_management_mcp_url: str | None = None) -> str:
-    rows = _get_rows()
+def build_selected_mcp_config_text(
+    *,
+    selected_servers: list[str],
+    task_management_mcp_url: str | None = None,
+    include_codex_cli: bool = True,
+) -> str:
+    rows = _get_rows(include_codex_cli=include_codex_cli)
     rows_by_name = {str(row.get("name") or "").strip(): row for row in rows}
     core_url = str(task_management_mcp_url or AGENT_MCP_URL).strip() or AGENT_MCP_URL
     lines: list[str] = []
@@ -416,8 +429,9 @@ def build_selected_mcp_config_payload(
     *,
     selected_servers: list[str],
     task_management_mcp_url: str | None = None,
+    include_codex_cli: bool = True,
 ) -> dict[str, Any]:
-    rows = _get_rows()
+    rows = _get_rows(include_codex_cli=include_codex_cli)
     rows_by_name = {str(row.get("name") or "").strip(): row for row in rows}
     core_url = str(task_management_mcp_url or AGENT_MCP_URL).strip() or AGENT_MCP_URL
     servers: dict[str, Any] = {}
@@ -494,8 +508,9 @@ def build_selected_opencode_mcp_config_payload(
     *,
     selected_servers: list[str],
     task_management_mcp_url: str | None = None,
+    include_codex_cli: bool = True,
 ) -> dict[str, Any]:
-    rows = _get_rows()
+    rows = _get_rows(include_codex_cli=include_codex_cli)
     rows_by_name = {str(row.get("name") or "").strip(): row for row in rows}
     core_url = str(task_management_mcp_url or AGENT_MCP_URL).strip() or AGENT_MCP_URL
     servers: dict[str, Any] = {}

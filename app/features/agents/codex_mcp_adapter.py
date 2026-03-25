@@ -2845,18 +2845,27 @@ def run_structured_codex_prompt_with_usage(
 ) -> tuple[dict[str, object], dict[str, int] | None]:
     normalized_workspace_id = str(workspace_id or "").strip() or None
     normalized_session_key = str(session_key or "").strip() or None
-    selected_mcp_servers = normalize_chat_mcp_servers(mcp_servers, strict=False)
+    runtime_provider, preferred_model = _resolve_runtime_provider_and_model(model)
+    include_codex_cli_discovery = runtime_provider != "opencode"
+    selected_mcp_servers = normalize_chat_mcp_servers(
+        mcp_servers,
+        strict=False,
+        include_codex_cli=include_codex_cli_discovery,
+    )
     mcp_config_text = build_selected_mcp_config_text(
         selected_servers=selected_mcp_servers,
         task_management_mcp_url=AGENT_MCP_URL,
+        include_codex_cli=include_codex_cli_discovery,
     )
     mcp_config_payload = build_selected_mcp_config_payload(
         selected_servers=selected_mcp_servers,
         task_management_mcp_url=AGENT_MCP_URL,
+        include_codex_cli=include_codex_cli_discovery,
     )
     opencode_config_payload = build_selected_opencode_mcp_config_payload(
         selected_servers=selected_mcp_servers,
         task_management_mcp_url=AGENT_MCP_URL,
+        include_codex_cli=include_codex_cli_discovery,
     )
     runtime_model_value = model
     runtime_reasoning_value = reasoning_effort
@@ -2944,25 +2953,30 @@ def main() -> int:
     preferred_codex_session_id = str(ctx.get("codex_session_id") or "").strip() or None
     actor_user_id = str(ctx.get("actor_user_id") or "").strip() or None
     mcp_url = AGENT_MCP_URL
+    runtime_provider, preferred_model = _resolve_runtime_provider_and_model(ctx.get("model"))
+    include_codex_cli_discovery = runtime_provider != "opencode"
     selected_mcp_servers = normalize_chat_mcp_servers(
         ctx.get("mcp_servers"),
         strict=False,
+        include_codex_cli=include_codex_cli_discovery,
     )
     mcp_config_text = build_selected_mcp_config_text(
         selected_servers=selected_mcp_servers,
         task_management_mcp_url=mcp_url,
+        include_codex_cli=include_codex_cli_discovery,
     )
     mcp_config_payload = build_selected_mcp_config_payload(
         selected_servers=selected_mcp_servers,
         task_management_mcp_url=mcp_url,
+        include_codex_cli=include_codex_cli_discovery,
     )
     opencode_config_payload = build_selected_opencode_mcp_config_payload(
         selected_servers=selected_mcp_servers,
         task_management_mcp_url=mcp_url,
+        include_codex_cli=include_codex_cli_discovery,
     )
     stream_events = bool(ctx.get("stream_events"))
     stream_plain_text = bool(ctx.get("stream_plain_text"))
-    runtime_provider, preferred_model = _resolve_runtime_provider_and_model(ctx.get("model"))
     preferred_reasoning_effort = _resolve_runtime_reasoning_effort(runtime_provider, ctx.get("reasoning_effort"))
     runtime_timeout_seconds = _effective_timeout_seconds(
         ctx.get("executor_timeout_seconds"),
