@@ -1827,8 +1827,9 @@ def _run_opencode_server_stream_once(
                                 delta_from_snapshot = text_value
                             if delta_from_snapshot:
                                 assistant_text_parts.append(delta_from_snapshot)
-                                _emit_stream_event({"type": "assistant_text", "delta": delta_from_snapshot})
-                                assistant_text_emitted = True
+                                if stream_plain_text:
+                                    _emit_stream_event({"type": "assistant_text", "delta": delta_from_snapshot})
+                                    assistant_text_emitted = True
                 continue
             if event_type == "message.part.delta":
                 part_id = str(props.get("partID") or "").strip()
@@ -1846,8 +1847,9 @@ def _run_opencode_server_stream_once(
                     part_seen_delta[part_id] = True
                     part_last_text_snapshot[part_id] = f"{str(part_last_text_snapshot.get(part_id) or '')}{delta}"
                     assistant_text_parts.append(delta)
-                    _emit_stream_event({"type": "assistant_text", "delta": delta})
-                    assistant_text_emitted = True
+                    if stream_plain_text:
+                        _emit_stream_event({"type": "assistant_text", "delta": delta})
+                        assistant_text_emitted = True
                 continue
             if "tool" in event_type:
                 continue
@@ -1888,7 +1890,7 @@ def _run_opencode_server_stream_once(
             final_message = str(assistant_snapshot_texts[-1] or "").strip()
         if not final_message:
             raise RuntimeError("OpenCode server stream returned no text result")
-        if not assistant_text_emitted:
+        if stream_plain_text and not assistant_text_emitted:
             _emit_stream_event({"type": "assistant_text", "delta": final_message})
         return final_message, usage, session_id
     finally:
@@ -1946,7 +1948,7 @@ def _run_opencode_cli_with_optional_stream(
                     resume_session_id=resume_thread_id,
                     env=env,
                     run_cwd=effective_run_cwd,
-                    stream_plain_text=True,
+                    stream_plain_text=stream_plain_text,
                 )
                 resume_succeeded = True
             else:
@@ -1959,7 +1961,7 @@ def _run_opencode_cli_with_optional_stream(
                     resume_session_id=None,
                     env=env,
                     run_cwd=effective_run_cwd,
-                    stream_plain_text=True,
+                    stream_plain_text=stream_plain_text,
                 )
                 resume_succeeded = False
             if stream_events and usage is not None:
@@ -1976,7 +1978,7 @@ def _run_opencode_cli_with_optional_stream(
                     resume_session_id=None,
                     env=env,
                     run_cwd=effective_run_cwd,
-                    stream_plain_text=True,
+                    stream_plain_text=stream_plain_text,
                 )
                 resume_succeeded = False
                 if stream_events and usage is not None:
@@ -2976,6 +2978,11 @@ def main() -> int:
         include_codex_cli=include_codex_cli_discovery,
     )
     stream_events = bool(ctx.get("stream_events"))
+    # OpenCode streaming has shown unstable structured-output behavior in production
+    # (prompt leakage / non-JSON final frames). Keep OpenCode on the stable
+    # final-only JSON path until a provider-native streaming contract is reliable.
+    if runtime_provider == "opencode":
+        stream_events = False
     stream_plain_text = bool(ctx.get("stream_plain_text"))
     preferred_reasoning_effort = _resolve_runtime_reasoning_effort(runtime_provider, ctx.get("reasoning_effort"))
     runtime_timeout_seconds = _effective_timeout_seconds(

@@ -1341,6 +1341,119 @@ def test_codex_adapter_main_non_stream_uses_app_server_resume_thread(monkeypatch
     assert captured["lock_chat_session_id"] == "chat-42"
 
 
+def test_codex_adapter_main_forces_non_stream_for_opencode(monkeypatch):
+    from contextlib import contextmanager
+    from features.agents import codex_mcp_adapter as adapter_module
+
+    captured: dict[str, object] = {}
+
+    @contextmanager
+    def _fake_home_env(
+        *,
+        provider: str,
+        mcp_config_text: str,
+        runtime_config_text: str = "",
+        opencode_config_payload: dict | None = None,
+        workspace_id: str | None = None,
+        chat_session_id: str | None = None,
+        actor_user_id: str | None = None,
+    ):
+        _ = (
+            provider,
+            mcp_config_text,
+            runtime_config_text,
+            opencode_config_payload,
+            workspace_id,
+            chat_session_id,
+            actor_user_id,
+        )
+        yield {"HOME": "/tmp/fake-codex-home"}
+
+    @contextmanager
+    def _fake_run_lock(
+        *,
+        workspace_id: str | None = None,
+        chat_session_id: str | None = None,
+        timeout_seconds: float,
+        poll_interval_seconds: float = 0.1,
+    ):
+        _ = (workspace_id, chat_session_id, timeout_seconds, poll_interval_seconds)
+        yield
+
+    def _fake_run_codex_app_server_with_optional_stream(
+        *,
+        provider: str,
+        start_prompt: str,
+        resume_prompt: str | None,
+        timeout_seconds: float,
+        stream_events: bool,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        model_provider: str | None = None,
+        local_provider: str | None = None,
+        output_schema: dict | None = None,
+        preferred_thread_id: str | None = None,
+        mcp_config_payload: dict | None = None,
+        run_cwd: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> tuple[str, dict[str, int] | None, str | None, bool, bool]:
+        captured["provider"] = provider
+        captured["stream_events"] = stream_events
+        _ = (
+            start_prompt,
+            resume_prompt,
+            timeout_seconds,
+            model,
+            reasoning_effort,
+            model_provider,
+            local_provider,
+            output_schema,
+            preferred_thread_id,
+            mcp_config_payload,
+            run_cwd,
+            env,
+        )
+        return (
+            (
+                '{"action":"comment","summary":"ok","comment":null,'
+                + _MIN_EXECUTION_OUTCOME_CONTRACT_JSON
+                + "}"
+            ),
+            {"input_tokens": 3, "output_tokens": 1},
+            "thread-opencode",
+            False,
+            False,
+        )
+
+    monkeypatch.setattr(adapter_module, "_codex_home_env", _fake_home_env)
+    monkeypatch.setattr(adapter_module, "_chat_session_run_lock", _fake_run_lock)
+    monkeypatch.setattr(adapter_module, "_run_codex_app_server_with_optional_stream", _fake_run_codex_app_server_with_optional_stream)
+    monkeypatch.setattr(adapter_module, "run_codex_home_cleanup_if_due", lambda **_: {"ran": False, "removed": 0, "failures": 0})
+    monkeypatch.setattr(
+        adapter_module.sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "instruction": "hello",
+                    "workspace_id": "ws-main",
+                    "chat_session_id": "chat-opencode",
+                    "stream_events": True,
+                    "stream_plain_text": True,
+                    "model": "opencode/gpt-5-nano",
+                }
+            )
+        ),
+    )
+    stdout = io.StringIO()
+    monkeypatch.setattr(adapter_module.sys, "stdout", stdout)
+
+    exit_code = adapter_module.main()
+    assert exit_code == 0
+    assert captured["provider"] == "opencode"
+    assert captured["stream_events"] is False
+
+
 def test_strip_mcp_server_tables_preserves_non_mcp_config():
     from features.agents.codex_mcp_adapter import _strip_mcp_server_tables
 
@@ -1625,3 +1738,68 @@ def test_structured_response_selection_for_stream_modes() -> None:
     assert _should_use_structured_response(provider="codex", stream_events=True, stream_plain_text=True) is False
     assert _should_use_structured_response(provider="codex", stream_events=False, stream_plain_text=True) is True
     assert _should_use_structured_response(provider="claude", stream_events=True, stream_plain_text=False) is True
+
+
+def test_opencode_streaming_structured_mode_disables_plain_text_deltas(monkeypatch):
+    from features.agents import codex_mcp_adapter as adapter_module
+
+    captured_stream_plain_text: list[bool] = []
+    emitted_events: list[dict[str, object]] = []
+
+    def _fake_run_opencode_server_stream_once(*, stream_plain_text: bool, **kwargs):
+        captured_stream_plain_text.append(bool(stream_plain_text))
+        _ = kwargs
+        return (
+            json.dumps(
+                {
+                    "action": "comment",
+                    "summary": "Safe summary",
+                    "comment": "Safe comment",
+                    "execution_outcome_contract": {
+                        "contract_version": 1,
+                        "files_changed": [],
+                        "commit_sha": None,
+                        "branch": None,
+                        "tests_run": False,
+                        "tests_passed": False,
+                        "artifacts": [],
+                    },
+                }
+            ),
+            {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+            "ses-1",
+        )
+
+    monkeypatch.setattr(adapter_module, "_run_opencode_server_stream_once", _fake_run_opencode_server_stream_once)
+    monkeypatch.setattr(adapter_module, "_emit_stream_event", lambda event: emitted_events.append(dict(event)))
+
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "action": {"type": "string"},
+            "summary": {"type": "string"},
+        },
+        "required": ["action", "summary"],
+    }
+    final_message, usage, session_id, resume_attempted, resume_succeeded = adapter_module._run_opencode_cli_with_optional_stream(
+        start_prompt="hello",
+        resume_prompt=None,
+        timeout_seconds=5.0,
+        stream_events=True,
+        model="opencode/gpt-5-nano",
+        reasoning_effort=None,
+        output_schema=schema,
+        preferred_thread_id=None,
+        env=None,
+        run_cwd=None,
+    )
+
+    assert captured_stream_plain_text == [False]
+    assert final_message
+    assert usage == {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1}
+    assert session_id == "ses-1"
+    assert resume_attempted is False
+    assert resume_succeeded is False
+    assert not any(str(item.get("type") or "") == "assistant_text" for item in emitted_events)
+    assert any(str(item.get("type") or "") == "usage" for item in emitted_events)
