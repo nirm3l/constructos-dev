@@ -964,6 +964,74 @@ export type ProjectPolicyCheckCatalogItem = {
 export type ProjectPolicyChecksVerifyResponse = {
   project_id: string
   team_mode?: ProjectPolicyCheckResult
+  team_mode_runtime?: {
+    active: boolean
+    parallel_limit?: number
+    agents: Array<{
+      id: string
+      name: string
+      authority_role: string
+      executor_user_id?: string | null
+      status: 'busy' | 'idle' | string
+      busy_task_ids: string[]
+      busy_task_count: number
+    }>
+    tasks: Array<{
+      id: string
+      title: string
+      status: string
+      semantic_status?: string
+      role: string
+      phase?: string
+      priority?: string
+      automation_state: string
+      assigned_agent_code?: string
+      dispatch_slot?: string
+      has_instruction?: boolean
+      dispatch_ready?: boolean
+      dependency_ready?: boolean
+      dependency_reason?: string | null
+      runtime_state?: 'active' | 'runnable' | 'blocked' | 'waiting' | 'missing_instruction' | 'out_of_scope' | string
+      blocker_reason?: string | null
+      runnable?: boolean
+      selected_for_dispatch?: boolean
+      selected_for_kickoff?: boolean
+      last_requested_source?: string | null
+      last_agent_run_at?: string | null
+    }>
+    summary?: {
+      tasks_total?: number
+      team_tasks_total?: number
+      active_tasks_total?: number
+      runnable_tasks_total?: number
+      blocked_tasks_total?: number
+      waiting_tasks_total?: number
+      missing_instruction_total?: number
+      active_agents_total?: number
+      idle_agents_total?: number
+      by_role?: Record<string, { total?: number; active?: number; runnable?: number; blocked?: number }>
+      role_agents?: Record<string, { configured?: number; busy?: number; idle?: number }>
+    }
+    dispatch?: {
+      ok?: boolean
+      mode?: string
+      queue_task_ids?: string[]
+      selected_by_role?: Record<string, string[]>
+      counts?: {
+        busy_total?: number
+        available_slots?: number
+        candidates?: Record<string, number>
+      }
+      blocked_reasons?: string[]
+    }
+    kickoff?: {
+      ok?: boolean
+      kickoff_task_ids?: string[]
+      kickoff_task_ids_by_role?: Record<string, string[]>
+      parallel_limit?: number
+      blocked_reasons?: string[]
+    }
+  }
   delivery?: ProjectPolicyCheckResult & {
     runtime_deploy_health?: Record<string, unknown>
   }

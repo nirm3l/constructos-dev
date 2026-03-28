@@ -32,11 +32,13 @@ from plugins.runner_policy import (
     preflight_error as plugin_preflight_error,
 )
 from features.agents.intent_classifier import is_team_mode_kickoff_classification
+from plugins.team_mode.runtime_context import TeamModeProjectRuntimeContext
 from plugins.team_mode.task_roles import (
     canonicalize_role,
     derive_task_role,
     normalize_team_agents,
     parse_labels,
+    pick_agent_for_role,
     pick_agent_for_task,
 )
 from plugins.team_mode.state_machine import evaluate_team_mode_transition
@@ -47,7 +49,6 @@ from plugins.team_mode.workflow_orchestrator import (
 from plugins.team_mode.semantics import (
     REQUIRED_SEMANTIC_STATUSES,
     derive_phase_from_status_and_role,
-    normalize_review_policy,
     semantic_status_key,
 )
 from .executor import AutomationOutcome, build_automation_usage_metadata, execute_task_automation_stream
@@ -56,7 +57,12 @@ from .gates import run_runtime_deploy_health_check
 from features.notes.application import NoteApplicationService
 from features.projects.application import ProjectApplicationService
 from features.tasks.domain import (
+    EVENT_AUTOMATION_STARTED,
     EVENT_AUTOMATION_REQUESTED,
+    EVENT_SCHEDULE_COMPLETED,
+    EVENT_SCHEDULE_FAILED,
+    EVENT_SCHEDULE_QUEUED,
+    EVENT_SCHEDULE_STARTED,
 )
 from features.tasks.command_handlers import (
     AddTaskCommentInternalHandler,
@@ -615,35 +621,17 @@ def _resolve_task_actor_user_id(
     def _resolve_team_mode_executor_user_id() -> str | None:
         if not workspace_id or not project_id:
             return None
-        config_row = db.execute(
-            select(ProjectPluginConfig.config_json).where(
-                ProjectPluginConfig.workspace_id == workspace_id,
-                ProjectPluginConfig.project_id == project_id,
-                ProjectPluginConfig.plugin_key == "team_mode",
-                ProjectPluginConfig.enabled == True,  # noqa: E712
-                ProjectPluginConfig.is_deleted == False,  # noqa: E712
-            )
-        ).scalar_one_or_none()
-        if not config_row:
+        runtime_context = TeamModeProjectRuntimeContext(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+        )
+        if not runtime_context.enabled:
             return None
-        try:
-            config_obj = json.loads(str(config_row or "").strip() or "{}")
-        except Exception:
-            return None
-        if not isinstance(config_obj, dict):
-            return None
-        agents = normalize_team_agents(config_obj.get("team"))
+        agents = runtime_context.team_agents
         if not agents:
             return None
-        membership_roles = {
-            str(user_id): canonicalize_role(role)
-            for user_id, role in db.execute(
-                select(ProjectMember.user_id, ProjectMember.role).where(
-                    ProjectMember.workspace_id == workspace_id,
-                    ProjectMember.project_id == project_id,
-                )
-            ).all()
-        }
+        membership_roles = runtime_context.member_role_by_user_id
         task_like = {
             "id": task_id,
             "assignee_id": assignee_id,
@@ -651,10 +639,13 @@ def _resolve_task_actor_user_id(
             "labels": source_state.get("labels"),
             "status": source_state.get("status"),
         }
+        current_load_by_agent_code = runtime_context.active_agent_load_by_code(agents=agents)
         selected_agent = pick_agent_for_task(
             agents=agents,
             task_like=task_like,
             member_role_by_user_id=membership_roles,
+            agent_role_by_code=runtime_context.agent_role_by_code,
+            current_load_by_agent_code=current_load_by_agent_code,
         )
         if not selected_agent:
             return None
@@ -1047,54 +1038,28 @@ def _resolve_assignee_project_role(
     normalized_assigned_agent_code = str(assigned_agent_code or "").strip().lower()
     if not workspace_id or not normalized_project_id:
         return ""
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
     if normalized_assigned_agent_code:
-        plugin_row = db.execute(
-            select(ProjectPluginConfig.config_json).where(
-                ProjectPluginConfig.workspace_id == workspace_id,
-                ProjectPluginConfig.project_id == normalized_project_id,
-                ProjectPluginConfig.plugin_key == "team_mode",
-                ProjectPluginConfig.is_deleted == False,  # noqa: E712
-            )
-        ).scalar_one_or_none()
-        plugin_config: dict[str, object] = {}
-        if isinstance(plugin_row, dict):
-            plugin_config = dict(plugin_row)
-        elif isinstance(plugin_row, str) and plugin_row.strip():
-            try:
-                parsed = json.loads(plugin_row)
-            except Exception:
-                parsed = {}
-            if isinstance(parsed, dict):
-                plugin_config = parsed
-        team_agents = normalize_team_agents(plugin_config.get("team", {}))
-        for agent in team_agents:
-            if str(agent.get("id") or "").strip().lower() != normalized_assigned_agent_code:
-                continue
-            agent_role = canonicalize_role(agent.get("authority_role"))
-            if agent_role:
-                return agent_role
-    declared = derive_task_role(
+        agent_role = str(runtime_context.agent_role_by_code.get(normalized_assigned_agent_code) or "").strip()
+        if agent_role:
+            return agent_role
+    declared = runtime_context.derive_workflow_role(
         task_like={
             "assignee_id": normalized_assignee_id,
             "assigned_agent_code": normalized_assigned_agent_code,
             "labels": task_labels,
             "status": str(task_status or "").strip(),
-        },
-        member_role_by_user_id={},
-        allow_status_fallback=False,
-        )
+        }
+    )
     if declared:
         return declared
     if not normalized_assignee_id:
         return ""
-    role = db.execute(
-        select(ProjectMember.role).where(
-            ProjectMember.workspace_id == workspace_id,
-            ProjectMember.project_id == normalized_project_id,
-            ProjectMember.user_id == normalized_assignee_id,
-        )
-    ).scalar_one_or_none()
-    return canonicalize_role(role)
+    return str(runtime_context.member_role_by_user_id.get(normalized_assignee_id) or "").strip()
 
 
 def _resolve_team_agent_assignment_by_role(
@@ -1108,30 +1073,17 @@ def _resolve_team_agent_assignment_by_role(
     normalized_role = canonicalize_role(authority_role)
     if not workspace_id or not normalized_project_id or not normalized_role:
         return None, None
-    plugin_row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == workspace_id,
-            ProjectPluginConfig.project_id == normalized_project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).scalar_one_or_none()
-    config_obj: dict[str, object] = {}
-    if isinstance(plugin_row, str) and plugin_row.strip():
-        try:
-            parsed = json.loads(plugin_row)
-        except Exception:
-            parsed = {}
-        if isinstance(parsed, dict):
-            config_obj = parsed
-    team_agents = normalize_team_agents(config_obj.get("team"))
-    matching_agent = next(
-        (
-            agent
-            for agent in team_agents
-            if canonicalize_role(agent.get("authority_role")) == normalized_role
-        ),
-        None,
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    team_agents = runtime_context.team_agents
+    current_load_by_agent_code = runtime_context.active_agent_load_by_code(agents=team_agents)
+    matching_agent = pick_agent_for_role(
+        agents=team_agents,
+        authority_role=normalized_role,
+        current_load_by_agent_code=current_load_by_agent_code,
     )
     if matching_agent is None:
         return None, None
@@ -1239,23 +1191,16 @@ def _project_has_running_automation(
     if not workspace_id or not normalized_project_id:
         return False
     excluded = str(exclude_task_id or "").strip()
-    task_ids = [
-        str(item or "").strip()
-        for item in db.execute(
-            select(Task.id).where(
-                Task.workspace_id == workspace_id,
-                Task.project_id == normalized_project_id,
-                Task.is_deleted == False,  # noqa: E712
-                Task.archived == False,  # noqa: E712
-            )
-        ).scalars().all()
-        if str(item or "").strip()
-    ]
-    for task_id in task_ids:
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    for entry in runtime_context.task_entries():
+        task_id = str(getattr(entry.task, "id", "") or "").strip()
         if excluded and task_id == excluded:
             continue
-        state, _ = rebuild_state(db, "Task", task_id)
-        if str(state.get("automation_state") or "idle").strip().lower() == "running":
+        if str(entry.state.get("automation_state") or "idle").strip().lower() == "running":
             return True
     return False
 
@@ -1271,24 +1216,17 @@ def _project_running_automation_count(
     if not workspace_id or not normalized_project_id:
         return 0
     excluded = str(exclude_task_id or "").strip()
-    task_ids = [
-        str(item or "").strip()
-        for item in db.execute(
-            select(Task.id).where(
-                Task.workspace_id == workspace_id,
-                Task.project_id == normalized_project_id,
-                Task.is_deleted == False,  # noqa: E712
-                Task.archived == False,  # noqa: E712
-            )
-        ).scalars().all()
-        if str(item or "").strip()
-    ]
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
     running = 0
-    for task_id in task_ids:
+    for entry in runtime_context.task_entries():
+        task_id = str(getattr(entry.task, "id", "") or "").strip()
         if excluded and task_id == excluded:
             continue
-        state, _ = rebuild_state(db, "Task", task_id)
-        if str(state.get("automation_state") or "idle").strip().lower() == "running":
+        if str(entry.state.get("automation_state") or "idle").strip().lower() == "running":
             running += 1
     return running
 
@@ -1317,103 +1255,47 @@ def _build_team_mode_dispatch_candidates(
     workspace_id: str,
     project_id: str | None,
     exclude_task_ids: set[str] | None = None,
-) -> tuple[list[dict[str, object]], dict[str, tuple[Task, dict[str, object], str]]]:
+) -> tuple[list[dict[str, object]], dict[str, tuple[Task, dict[str, object], str, str]]]:
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return [], []
     excluded_task_ids = {str(item or "").strip() for item in (exclude_task_ids or set()) if str(item or "").strip()}
-
-    membership_roles = {
-        str(user_id): canonicalize_role(role)
-        for user_id, role in db.execute(
-            select(ProjectMember.user_id, ProjectMember.role).where(
-                ProjectMember.workspace_id == workspace_id,
-                ProjectMember.project_id == normalized_project_id,
-            )
-        ).all()
-    }
-    team_mode_row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == workspace_id,
-            ProjectPluginConfig.project_id == normalized_project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).scalar_one_or_none()
-    config_obj: dict[str, object] = {}
-    if team_mode_row:
-        try:
-            parsed = json.loads(str(team_mode_row or "").strip() or "{}")
-            if isinstance(parsed, dict):
-                config_obj = parsed
-        except Exception:
-            config_obj = {}
-    team_agents = normalize_team_agents(config_obj.get("team"))
-    developer_slot_ids = [
-        str(agent.get("id") or "").strip()
-        for agent in team_agents
-        if str(agent.get("authority_role") or "").strip() == "Developer"
-        and str(agent.get("id") or "").strip()
-    ]
-
-    tasks = db.execute(
-        select(Task).where(
-            Task.workspace_id == workspace_id,
-            Task.project_id == normalized_project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-        ).order_by(Task.created_at.asc())
-    ).scalars().all()
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    team_agents = runtime_context.team_agents
 
     from features.tasks.application import TaskApplicationService
     from shared.core import TaskAutomationRun
 
     now_utc = datetime.now(timezone.utc)
     dispatch_candidates: list[dict[str, object]] = []
-    candidate_map: dict[str, tuple[Task, dict[str, object], str]] = {}
+    candidate_map: dict[str, tuple[Task, dict[str, object], str, str]] = {}
     lead_task_count = 0
-    task_contexts: list[tuple[Task, dict[str, object], str, str, str, str, str, str]] = []
-    for task in tasks:
+    task_contexts: list[tuple[Task, dict[str, object], str, str, str, str, str]] = []
+    for entry in runtime_context.task_entries():
+        task = entry.task
         task_id = str(task.id or "").strip()
         if not task_id or task_id in excluded_task_ids:
             continue
-        state, _ = rebuild_state(db, "Task", task_id)
+        state = entry.state
         status = str(state.get("status") or getattr(task, "status", "") or "").strip()
-        role = _resolve_assignee_project_role(
-            db=db,
-            workspace_id=workspace_id,
-            project_id=normalized_project_id,
-            assignee_id=str(state.get("assignee_id") or getattr(task, "assignee_id", "") or ""),
-            assigned_agent_code=str(state.get("assigned_agent_code") or getattr(task, "assigned_agent_code", "") or ""),
-            task_labels=state.get("labels") if state.get("labels") is not None else getattr(task, "labels", None),
-            task_status=status,
-        )
+        role = str(entry.workflow_role or "").strip()
         assigned_slot = str(state.get("assigned_agent_code") or getattr(task, "assigned_agent_code", "") or "").strip()
         automation_state = str(state.get("automation_state") or "idle").strip().lower()
         instruction = (
             str(state.get("instruction") or "").strip()
             or str(state.get("scheduled_instruction") or "").strip()
         )
-        target_slot = assigned_slot
-        if not target_slot and developer_slot_ids:
-            selected_agent = pick_agent_for_task(
-                agents=team_agents,
-            task_like={
-                "id": task_id,
-                "assignee_id": str(state.get("assignee_id") or getattr(task, "assignee_id", "") or ""),
-                "assigned_agent_code": assigned_slot,
-                "labels": state.get("labels") if state.get("labels") is not None else getattr(task, "labels", None),
-                    "status": status,
-                },
-                member_role_by_user_id=membership_roles,
-            )
-            target_slot = str((selected_agent or {}).get("id") or "").strip()
         if is_lead_role(role):
             lead_task_count += 1
-        task_contexts.append((task, state, status, role, assigned_slot, target_slot, instruction, automation_state))
+        task_contexts.append((task, state, status, role, assigned_slot, instruction, automation_state))
 
-    for task, state, status, role, assigned_slot, target_slot, instruction, automation_state in task_contexts:
+    planned_load_by_agent_code = runtime_context.active_agent_load_by_code(agents=team_agents)
+
+    for task, state, status, role, assigned_slot, instruction, automation_state in task_contexts:
         task_id = str(task.id or "").strip()
         dependency_ready, dependency_reason = _team_mode_dispatch_dependency_ready(
             db=db,
@@ -1421,6 +1303,7 @@ def _build_team_mode_dispatch_candidates(
             project_id=normalized_project_id,
             task_id=task_id,
             state=state,
+            runtime_context=runtime_context,
         )
         has_lead_handoff = bool(str(state.get("last_lead_handoff_token") or "").strip())
         recurring_oversight = is_recurring_oversight_task(state)
@@ -1446,6 +1329,16 @@ def _build_team_mode_dispatch_candidates(
                 )
             )
         )
+        target_slot = assigned_slot
+        if not target_slot and role in TEAM_MODE_WORKFLOW_ROLES and team_agents:
+            selected_agent = pick_agent_for_role(
+                agents=team_agents,
+                authority_role=role,
+                current_load_by_agent_code=planned_load_by_agent_code,
+            )
+            target_slot = str((selected_agent or {}).get("id") or "").strip()
+            if target_slot and dispatch_ready:
+                planned_load_by_agent_code[target_slot] = int(planned_load_by_agent_code.get(target_slot) or 0) + 1
         dispatch_candidates.append(
             {
                 "id": task_id,
@@ -1461,7 +1354,7 @@ def _build_team_mode_dispatch_candidates(
                 "dispatch_blocked_reason": dependency_reason,
             }
         )
-        candidate_map[task_id] = (task, state, target_slot)
+        candidate_map[task_id] = (task, state, role, target_slot)
     return dispatch_candidates, candidate_map
 
 
@@ -1511,7 +1404,7 @@ def _queue_team_mode_dispatches(
         candidate = candidate_map.get(task_id)
         if candidate is None:
             continue
-        task, state, target_slot = candidate
+        task, state, role, target_slot = candidate
         instruction = (
             str(state.get("instruction") or "").strip()
             or str(state.get("scheduled_instruction") or "").strip()
@@ -1527,15 +1420,7 @@ def _queue_team_mode_dispatches(
                     workspace_id=workspace_id,
                     project_id=normalized_project_id,
                     task_id=task_id,
-                    assignee_role=_resolve_assignee_project_role(
-                        db=db,
-                        workspace_id=workspace_id,
-                        project_id=normalized_project_id,
-                        assignee_id=str(state.get("assignee_id") or getattr(task, "assignee_id", "") or ""),
-                        assigned_agent_code=str(state.get("assigned_agent_code") or getattr(task, "assigned_agent_code", "") or ""),
-                        task_labels=state.get("labels") if state.get("labels") is not None else getattr(task, "labels", None),
-                        task_status=str(state.get("status") or getattr(task, "status", "") or ""),
-                    ),
+                    assignee_role=role,
                 )
                 or ""
             ).strip()
@@ -1591,15 +1476,7 @@ def _queue_team_mode_dispatches(
                 "last_dispatch_decision": {
                     "source": source,
                     "mode": str(plan.get("mode") or "").strip() or None,
-                    "role": _resolve_assignee_project_role(
-                        db=db,
-                        workspace_id=workspace_id,
-                        project_id=normalized_project_id,
-                        assignee_id=str(state.get("assignee_id") or getattr(task, "assignee_id", "") or ""),
-                        assigned_agent_code=str(state.get("assigned_agent_code") or getattr(task, "assigned_agent_code", "") or ""),
-                        task_labels=state.get("labels") if state.get("labels") is not None else getattr(task, "labels", None),
-                        task_status=str(state.get("status") or getattr(task, "status", "") or ""),
-                    ),
+                    "role": role,
                     "priority": str(getattr(task, "priority", "") or "").strip() or None,
                     "slot": target_slot or None,
                     "selected_at": requested_at_iso,
@@ -1622,33 +1499,23 @@ def _rearm_blocked_team_mode_lead_tasks(
     if not workspace_id or not normalized_project_id:
         return 0
 
-    tasks = db.execute(
-        select(Task).where(
-            Task.workspace_id == workspace_id,
-            Task.project_id == normalized_project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-        )
-    ).scalars().all()
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
 
     rearmed = 0
-    for task in tasks:
+    for entry in runtime_context.task_entries():
+        task = entry.task
         task_id = str(task.id or "").strip()
         if not task_id:
             continue
-        task_state, _ = rebuild_state(db, "Task", task_id)
+        task_state = entry.state
         task_status = str(task_state.get("status") or getattr(task, "status", "") or "").strip()
         if semantic_status_key(status=task_status) != "blocked":
             continue
-        task_role = _resolve_assignee_project_role(
-            db=db,
-            workspace_id=workspace_id,
-            project_id=normalized_project_id,
-            assignee_id=str(task_state.get("assignee_id") or getattr(task, "assignee_id", "") or ""),
-            assigned_agent_code=str(task_state.get("assigned_agent_code") or getattr(task, "assigned_agent_code", "") or ""),
-            task_labels=task_state.get("labels") if task_state.get("labels") is not None else getattr(task, "labels", None),
-            task_status=task_status,
-        )
+        task_role = str(entry.workflow_role or "").strip()
         if not is_lead_role(task_role):
             continue
         deploy_snapshot = derive_deploy_execution_snapshot(
@@ -1670,6 +1537,7 @@ def _rearm_blocked_team_mode_lead_tasks(
             project_id=normalized_project_id,
             task_id=task_id,
             state=task_state,
+            runtime_context=runtime_context,
         )
         if not dispatch_ready:
             continue
@@ -1710,7 +1578,13 @@ def _team_mode_dispatch_dependency_ready(
     project_id: str,
     task_id: str,
     state: dict[str, object],
+    runtime_context: TeamModeProjectRuntimeContext | None = None,
 ) -> tuple[bool, str | None]:
+    effective_runtime_context = runtime_context or TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=str(workspace_id),
+        project_id=str(project_id),
+    )
     task_relationships = normalize_task_relationships(state.get("task_relationships"))
     if task_relationships:
         dependency_clauses: list[tuple[bool, str]] = []
@@ -1730,17 +1604,13 @@ def _team_mode_dispatch_dependency_ready(
             if not source_task_ids or not statuses:
                 continue
             match_mode = str(relationship.get("match_mode") or STATUS_MATCH_ALL).strip().lower()
-            matched_sources = 0
-            total_sources = 0
-            for source_task_id in source_task_ids:
-                source_state, _ = rebuild_state(db, "Task", source_task_id)
-                if str(source_state.get("workspace_id") or "").strip() != workspace_id:
-                    continue
-                if str(source_state.get("project_id") or "").strip() != project_id:
-                    continue
-                total_sources += 1
-                if any(task_matches_dependency_requirement(source_state, required) for required in statuses):
-                    matched_sources += 1
+            source_entries = effective_runtime_context.source_task_entries(source_task_ids, exclude_task_id=task_id)
+            total_sources = len(source_entries)
+            matched_sources = sum(
+                1
+                for source_entry in source_entries
+                if any(task_matches_dependency_requirement(source_entry.state, required) for required in statuses)
+            )
             if total_sources <= 0:
                 continue
             if match_mode == STATUS_MATCH_ALL:
@@ -1806,18 +1676,13 @@ def _team_mode_dispatch_dependency_ready(
         if not to_statuses:
             continue
         match_mode = str(trigger.get("match_mode") or STATUS_MATCH_ANY).strip().lower()
-        matched_sources = 0
-        total_sources = 0
-        for source_task_id in source_task_ids:
-            source_state, _ = rebuild_state(db, "Task", source_task_id)
-            if str(source_state.get("workspace_id") or "").strip() != workspace_id:
-                continue
-            if str(source_state.get("project_id") or "").strip() != project_id:
-                continue
-            total_sources += 1
-            source_status = str(source_state.get("status") or "").strip()
-            if source_status in to_statuses:
-                matched_sources += 1
+        source_entries = effective_runtime_context.source_task_entries(source_task_ids, exclude_task_id=task_id)
+        total_sources = len(source_entries)
+        matched_sources = sum(
+            1
+            for source_entry in source_entries
+            if str(source_entry.state.get("status") or "").strip() in to_statuses
+        )
         if total_sources <= 0:
             continue
         if match_mode == STATUS_MATCH_ALL:
@@ -1859,6 +1724,7 @@ def _infer_team_mode_dispatch_source_task_id(
     project_id: str | None,
     task_id: str,
     assignee_role: str | None,
+    runtime_context: TeamModeProjectRuntimeContext | None = None,
 ) -> str | None:
     normalized_project_id = str(project_id or "").strip()
     normalized_task_id = str(task_id or "").strip()
@@ -1870,6 +1736,11 @@ def _infer_team_mode_dispatch_source_task_id(
         or normalized_role not in TEAM_MODE_WORKFLOW_ROLES
     ):
         return None
+    effective_runtime_context = runtime_context or TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
 
     def _candidate_timestamp(task_row: Task, state: dict[str, object]) -> float:
         for value in (
@@ -1889,29 +1760,14 @@ def _infer_team_mode_dispatch_source_task_id(
         return 0.0
 
     candidates: list[tuple[int, float, str]] = []
-    tasks = db.execute(
-        select(Task).where(
-            Task.workspace_id == workspace_id,
-            Task.project_id == normalized_project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-        )
-    ).scalars().all()
-    for task in tasks:
+    for entry in effective_runtime_context.task_entries():
+        task = entry.task
         candidate_task_id = str(task.id or "").strip()
         if not candidate_task_id or candidate_task_id == normalized_task_id:
             continue
-        candidate_state, _ = rebuild_state(db, "Task", candidate_task_id)
+        candidate_state = entry.state
         candidate_status = str(candidate_state.get("status") or getattr(task, "status", "") or "").strip()
-        candidate_role = _resolve_assignee_project_role(
-            db=db,
-            workspace_id=workspace_id,
-            project_id=normalized_project_id,
-            assignee_id=str(candidate_state.get("assignee_id") or getattr(task, "assignee_id", "") or ""),
-            assigned_agent_code=str(candidate_state.get("assigned_agent_code") or getattr(task, "assigned_agent_code", "") or ""),
-            task_labels=candidate_state.get("labels") if candidate_state.get("labels") is not None else getattr(task, "labels", None),
-            task_status=candidate_status,
-        )
+        candidate_role = str(entry.workflow_role or "").strip()
         candidate_automation_state = str(candidate_state.get("automation_state") or "idle").strip().lower()
         candidate_semantic_status = semantic_status_key(status=candidate_status)
         candidate_rank: int | None = None
@@ -1952,37 +1808,17 @@ def _project_has_lead_task_in_lead_status(
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return False
-    member_role_by_user_id = {
-        str(user_id): str(role or "").strip()
-        for user_id, role in db.execute(
-            select(ProjectMember.user_id, ProjectMember.role).where(
-                ProjectMember.workspace_id == workspace_id,
-                ProjectMember.project_id == normalized_project_id,
-            )
-        ).all()
-    }
-    rows = db.execute(
-        select(Task.id, Task.assignee_id, Task.assigned_agent_code, Task.labels, Task.status).where(
-            Task.workspace_id == workspace_id,
-            Task.project_id == normalized_project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-        )
-    ).all()
-    for task_id, assignee_id, assigned_agent_code, labels, status in rows:
-        normalized_status = str(status or "").strip()
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    for task in runtime_context.tasks:
+        task_like = runtime_context.task_like(task)
+        normalized_status = str(task_like.get("status") or "").strip()
         if semantic_status_key(status=normalized_status) == "completed":
             continue
-        role = derive_task_role(
-            task_like={
-                "id": str(task_id or "").strip(),
-                "assignee_id": str(assignee_id or "").strip(),
-                "assigned_agent_code": str(assigned_agent_code or "").strip(),
-                "labels": labels,
-                "status": normalized_status,
-            },
-            member_role_by_user_id=member_role_by_user_id,
-        )
+        role = runtime_context.derive_workflow_role(task_like=task_like)
         if role == "Lead":
             return True
     return False
@@ -1999,20 +1835,14 @@ def _project_has_merge_to_main_evidence(
         return False
     project_row = db.get(Project, normalized_project_id)
     project_name = str(getattr(project_row, "name", "") or "").strip() or None
-    task_ids = [
-        str(item or "").strip()
-        for item in db.execute(
-            select(Task.id).where(
-                Task.workspace_id == workspace_id,
-                Task.project_id == normalized_project_id,
-                Task.is_deleted == False,  # noqa: E712
-                Task.archived == False,  # noqa: E712
-            )
-        ).scalars().all()
-        if str(item or "").strip()
-    ]
-    for task_id in task_ids:
-        state, _ = rebuild_state(db, "Task", task_id)
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    for entry in runtime_context.task_entries():
+        task_id = str(getattr(entry.task, "id", "") or "").strip()
+        state = entry.state
         external_refs = state.get("external_refs")
         if has_merge_to_main_ref(external_refs):
             return True
@@ -2083,21 +1913,15 @@ def _project_active_deploy_lock(
     if not workspace_id or not normalized_project_id:
         return None
     reference_now = now_utc or datetime.now(timezone.utc)
-    candidate_ids = [
-        str(item or "").strip()
-        for item in db.execute(
-            select(Task.id).where(
-                Task.workspace_id == workspace_id,
-                Task.project_id == normalized_project_id,
-                Task.is_deleted == False,  # noqa: E712
-                Task.archived == False,  # noqa: E712
-            )
-        ).scalars().all()
-        if str(item or "").strip()
-    ]
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
     active_lock: dict[str, object] | None = None
-    for task_id in candidate_ids:
-        state, _ = rebuild_state(db, "Task", task_id)
+    for entry in runtime_context.task_entries():
+        task_id = str(getattr(entry.task, "id", "") or "").strip()
+        state = entry.state
         lock_id = str(state.get("deploy_lock_id") or "").strip()
         acquired_at = _parse_iso_utc_datetime(state.get("deploy_lock_acquired_at"))
         released_at = _parse_iso_utc_datetime(state.get("deploy_lock_released_at"))
@@ -2332,9 +2156,15 @@ def _current_nonblocking_gate_key(
     normalized_semantic = semantic_status_key(status=normalized_status)
     normalized_project_id = str(project_id or "").strip()
     project_name = None
+    runtime_context = None
     if workspace_id and normalized_project_id:
         project_row = db.get(Project, normalized_project_id)
         project_name = str(getattr(project_row, "name", "") or "").strip() or None
+        runtime_context = TeamModeProjectRuntimeContext(
+            db=db,
+            workspace_id=workspace_id,
+            project_id=normalized_project_id,
+        )
     if (
         is_lead_role(assignee_role)
         and normalized_semantic in {"todo", "active", "blocked", "awaiting_decision"}
@@ -2349,26 +2179,11 @@ def _current_nonblocking_gate_key(
             project_id=normalized_project_id,
             state=task_state if isinstance(task_state, dict) else None,
         )
-        if not has_current_merge_evidence and workspace_id and normalized_project_id:
-            rows = db.execute(
-                select(Task.id, Task.status).where(
-                    Task.workspace_id == workspace_id,
-                    Task.project_id == normalized_project_id,
-                    Task.is_deleted == False,  # noqa: E712
-                    Task.archived == False,  # noqa: E712
-                )
-            ).all()
-            for developer_task_id, developer_status in rows:
-                developer_state, _ = rebuild_state(db, "Task", str(developer_task_id or "").strip())
-                role = _resolve_assignee_project_role(
-                    db=db,
-                    workspace_id=workspace_id,
-                    project_id=normalized_project_id,
-                    assignee_id=str(developer_state.get("assignee_id") or ""),
-                    assigned_agent_code=str(developer_state.get("assigned_agent_code") or ""),
-                    task_labels=developer_state.get("labels"),
-                    task_status=str(developer_status or ""),
-                )
+        if not has_current_merge_evidence and runtime_context is not None:
+            for entry in runtime_context.task_entries():
+                developer_state = entry.state
+                developer_status = str(developer_state.get("status") or getattr(entry.task, "status", "") or "").strip()
+                role = str(entry.workflow_role or "").strip()
                 if not is_developer_role(role):
                     continue
                 if semantic_status_key(status=developer_status) in {"todo", "active", "blocked"}:
@@ -2389,27 +2204,10 @@ def _current_nonblocking_gate_key(
         if not str(qa_state.get("last_lead_handoff_token") or "").strip():
             return "qa_waiting_lead_handoff"
         latest_lead_deploy_at = None
-        normalized_project_id = str(project_id or "").strip()
-        if workspace_id and normalized_project_id:
-            rows = db.execute(
-                select(Task.id, Task.status).where(
-                    Task.workspace_id == workspace_id,
-                    Task.project_id == normalized_project_id,
-                    Task.is_deleted == False,  # noqa: E712
-                    Task.archived == False,  # noqa: E712
-                )
-            ).all()
-            for lead_task_id, lead_status in rows:
-                lead_state, _ = rebuild_state(db, "Task", str(lead_task_id or "").strip())
-                role = _resolve_assignee_project_role(
-                    db=db,
-                    workspace_id=workspace_id,
-                    project_id=normalized_project_id,
-                    assignee_id=str(lead_state.get("assignee_id") or ""),
-                    assigned_agent_code=str(lead_state.get("assigned_agent_code") or ""),
-                    task_labels=lead_state.get("labels"),
-                    task_status=str(lead_status or ""),
-                )
+        if runtime_context is not None:
+            for entry in runtime_context.task_entries():
+                lead_state = entry.state
+                role = str(entry.workflow_role or "").strip()
                 if not is_lead_role(role):
                     continue
                 deploy_execution = (
@@ -3058,26 +2856,15 @@ def _runner_can_apply_team_mode_transition(
     normalized_project_id = str(project_id or "").strip()
     if not normalized_project_id:
         return True
-    row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == str(workspace_id),
-            ProjectPluginConfig.project_id == normalized_project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).first()
-    if row is None:
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=str(workspace_id),
+        project_id=normalized_project_id,
+    )
+    if not runtime_context.enabled:
         return True
-    try:
-        config = json.loads(str(row[0] or "").strip() or "{}")
-    except Exception:
-        config = {}
-    status_semantics = config.get("status_semantics") if isinstance(config, dict) else {}
-    if not isinstance(status_semantics, dict):
-        status_semantics = dict(REQUIRED_SEMANTIC_STATUSES)
     allowed, _reason = evaluate_team_mode_transition(
-        status_semantics=status_semantics,
+        status_semantics=runtime_context.status_semantics,
         from_status=str(from_status or "").strip(),
         to_status=str(to_status or "").strip(),
         actor_role=str(actor_role or "").strip() or None,
@@ -3094,23 +2881,14 @@ def _team_mode_review_required_for_project(
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return False
-    row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == str(workspace_id),
-            ProjectPluginConfig.project_id == normalized_project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).first()
-    if row is None:
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=str(workspace_id),
+        project_id=normalized_project_id,
+    )
+    if not runtime_context.enabled:
         return False
-    try:
-        config = json.loads(str(row[0] or "").strip() or "{}")
-    except Exception:
-        config = {}
-    review_policy = normalize_review_policy(config.get("review_policy") if isinstance(config, dict) else {})
-    return bool(review_policy.get("require_code_review"))
+    return runtime_context.review_required
 
 
 def _append_task_status_transition_if_allowed(
@@ -3261,25 +3039,14 @@ def _effective_blocked_status_for_project(
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return "Blocked"
-    row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == workspace_id,
-            ProjectPluginConfig.project_id == normalized_project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).first()
-    if row is None:
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    if not runtime_context.enabled:
         return "Blocked"
-    try:
-        config = json.loads(str(row[0] or "").strip() or "{}")
-    except Exception:
-        config = {}
-    status_semantics = config.get("status_semantics") if isinstance(config, dict) else {}
-    if not isinstance(status_semantics, dict):
-        status_semantics = dict(REQUIRED_SEMANTIC_STATUSES)
-    return str(status_semantics.get("blocked") or REQUIRED_SEMANTIC_STATUSES["blocked"]).strip() or "Blocked"
+    return runtime_context.blocked_status or "Blocked"
 
 
 def _should_resume_team_mode_agent_task_as_active(*, assignee_role: str | None, status: str | None) -> bool:
@@ -4068,14 +3835,25 @@ def _is_lead_deploy_topology_reconciliation_error(error: str | None) -> bool:
     )
 
 
-def _collect_handoff_refs_from_tasks(*, db, task_ids: list[str]) -> list[dict[str, str]]:
+def _collect_handoff_refs_from_tasks(
+    *,
+    db,
+    task_ids: list[str],
+    runtime_context: TeamModeProjectRuntimeContext | None = None,
+) -> list[dict[str, str]]:
     refs: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     normalized_ids = [str(item or "").strip() for item in task_ids if str(item or "").strip()]
     if not normalized_ids:
         return refs
     for task_id in normalized_ids:
-        state, _ = rebuild_state(db, "Task", task_id)
+        if runtime_context is not None:
+            entry = runtime_context.task_entry(task_id)
+            if entry is None:
+                continue
+            state = entry.state
+        else:
+            state, _ = rebuild_state(db, "Task", task_id)
         external_refs = state.get("external_refs")
         if not isinstance(external_refs, list):
             continue
@@ -4107,11 +3885,20 @@ def _queue_qa_handoff_requests(
     lead_handoff_token: str,
     lead_handoff_at: str,
     lead_handoff_refs: list[dict[str, str]],
+    runtime_context: TeamModeProjectRuntimeContext | None = None,
 ) -> int:
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return 0
-    lead_state, _ = rebuild_state(db, "Task", lead_task_id)
+    effective_runtime_context = runtime_context or TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    lead_entry = effective_runtime_context.task_entry(lead_task_id)
+    if lead_entry is None:
+        return 0
+    lead_state = lead_entry.state
     qa_assignee_id, qa_agent_code = _resolve_team_agent_assignment_by_role(
         db=db,
         workspace_id=workspace_id,
@@ -4212,28 +3999,12 @@ def _queue_qa_handoff_requests(
         return True
 
     queued = 0
-    rows = db.execute(
-        select(Task.id, Task.status).where(
-            Task.workspace_id == workspace_id,
-            Task.project_id == normalized_project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-        )
-    ).all()
-    for qa_task_id_value, qa_status in rows:
-        qa_task_id = str(qa_task_id_value or "").strip()
+    for entry in effective_runtime_context.task_entries():
+        qa_task_id = str(getattr(entry.task, "id", "") or "").strip()
         if not qa_task_id or qa_task_id == str(lead_task_id or "").strip():
             continue
-        qa_state, _ = rebuild_state(db, "Task", qa_task_id)
-        qa_role = _resolve_assignee_project_role(
-            db=db,
-            workspace_id=workspace_id,
-            project_id=normalized_project_id,
-            assignee_id=str(qa_state.get("assignee_id") or ""),
-            assigned_agent_code=str(qa_state.get("assigned_agent_code") or ""),
-            task_labels=qa_state.get("labels"),
-            task_status=str(qa_status or ""),
-        )
+        qa_state = entry.state
+        qa_role = str(entry.workflow_role or "").strip()
         if not is_qa_role(qa_role):
             continue
         relationships = qa_state.get("task_relationships")
@@ -4313,66 +4084,28 @@ def _merge_ready_developer_branches_to_main(
     if code_checkout != 0:
         return {"ok": False, "error": f"Runner error: failed to checkout main for merge: {err_checkout[:220]}"}
 
-    member_role_by_user_id = {
-        str(user_id): str(role or "").strip()
-        for user_id, role in db.execute(
-            select(ProjectMember.user_id, ProjectMember.role).where(
-                ProjectMember.workspace_id == workspace_id,
-                ProjectMember.project_id == project_id,
-            )
-        ).all()
-    }
-    team_mode_row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == workspace_id,
-            ProjectPluginConfig.project_id == project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).first()
-    config_obj: dict[str, object] = {}
-    if team_mode_row is not None:
-        try:
-            parsed_cfg = json.loads(str(team_mode_row[0] or "").strip() or "{}")
-            if isinstance(parsed_cfg, dict):
-                config_obj = parsed_cfg
-        except Exception:
-            config_obj = {}
-    team_agents = normalize_team_agents(config_obj.get("team"))
-    agent_role_by_code = {
-        str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-        for agent in team_agents
-        if str(agent.get("id") or "").strip()
-    }
-
-    candidates = db.execute(
-        select(Task.id, Task.assignee_id, Task.assigned_agent_code, Task.labels, Task.status, Task.external_refs).where(
-            Task.workspace_id == workspace_id,
-            Task.project_id == project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-            Task.status != REQUIRED_SEMANTIC_STATUSES["completed"],
-        )
-    ).all()
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
 
     merged_task_ids: list[str] = []
     merged_at = to_iso_utc(datetime.now(timezone.utc))
-    for task_id, assignee_id, assigned_agent_code, labels, status, external_refs_raw in candidates:
-        task_id_text = str(task_id or "").strip()
-        task_state = {
-            "assignee_id": str(assignee_id or "").strip(),
-            "assigned_agent_code": str(assigned_agent_code or "").strip(),
-            "labels": labels,
-            "status": str(status or "").strip(),
-            "external_refs": json.loads(str(external_refs_raw or "[]")),
-        }
-        role = derive_task_role(
-            task_like=task_state,
-            member_role_by_user_id=member_role_by_user_id,
-            agent_role_by_code=agent_role_by_code,
-        )
-        phase = str((rebuild_state(db, "Task", task_id_text)[0] or {}).get("team_mode_phase") or "").strip()
+    for entry in runtime_context.task_entries():
+        task = entry.task
+        task_id_text = str(task.id or "").strip()
+        if not task_id_text:
+            continue
+        task_state = dict(entry.state)
+        task_state.setdefault("assignee_id", str(task.assignee_id or "").strip())
+        task_state.setdefault("assigned_agent_code", str(task.assigned_agent_code or "").strip())
+        task_state.setdefault("labels", task.labels)
+        task_state.setdefault("status", str(task.status or "").strip())
+        if semantic_status_key(status=task_state.get("status")) == "completed":
+            continue
+        role = str(entry.workflow_role or "").strip()
+        phase = str(task_state.get("team_mode_phase") or "").strip()
         if role != "Lead" and phase != "deploy_ready":
             continue
         refs = task_state.get("external_refs")
@@ -4577,52 +4310,28 @@ def _resolve_team_mode_human_owner_user_id(*, db, workspace_id: str, project_id:
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return None
-    row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == str(workspace_id),
-            ProjectPluginConfig.project_id == normalized_project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).first()
-    if row is None:
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=str(workspace_id),
+        project_id=normalized_project_id,
+    )
+    if not runtime_context.enabled:
         return None
-    try:
-        config = json.loads(str(row[0] or "").strip() or "{}")
-    except Exception:
-        config = {}
-    oversight = config.get("oversight") if isinstance(config, dict) and isinstance(config.get("oversight"), dict) else {}
-    user_id = str(oversight.get("human_owner_user_id") or "").strip()
-    return user_id or None
+    return runtime_context.human_owner_user_id
 
 
 def _resolve_team_mode_reviewer_user_id(*, db, workspace_id: str, project_id: str | None) -> str | None:
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return None
-    row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == str(workspace_id),
-            ProjectPluginConfig.project_id == normalized_project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).first()
-    if row is None:
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=str(workspace_id),
+        project_id=normalized_project_id,
+    )
+    if not runtime_context.enabled:
         return None
-    try:
-        config = json.loads(str(row[0] or "").strip() or "{}")
-    except Exception:
-        config = {}
-    review_policy = config.get("review_policy") if isinstance(config, dict) and isinstance(config.get("review_policy"), dict) else {}
-    reviewer_user_id = str(review_policy.get("reviewer_user_id") or "").strip()
-    if reviewer_user_id:
-        return reviewer_user_id
-    oversight = config.get("oversight") if isinstance(config, dict) and isinstance(config.get("oversight"), dict) else {}
-    human_owner_user_id = str(oversight.get("human_owner_user_id") or "").strip()
-    return human_owner_user_id or None
+    return runtime_context.reviewer_user_id
 
 
 def _team_mode_review_gate_pending(*, state: dict[str, Any] | None, project_requires_review: bool) -> bool:
@@ -4958,6 +4667,11 @@ def _team_mode_progress_comment_fingerprint(
         return None
     if not workspace_id or not normalized_project_id or not task_id:
         return None
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
 
     gate_key = _current_nonblocking_gate_key(
         db=db,
@@ -4976,8 +4690,9 @@ def _team_mode_progress_comment_fingerprint(
                 related_task_ids.add(normalized_related_id)
 
     related_snapshots: list[dict[str, object]] = []
-    for related_task_id in sorted(related_task_ids):
-        related_state, _ = rebuild_state(db, "Task", related_task_id)
+    for related_entry in runtime_context.source_task_entries(sorted(related_task_ids)):
+        related_task_id = str(getattr(related_entry.task, "id", "") or "").strip()
+        related_state = related_entry.state
         related_snapshots.append(
             {
                 "id": related_task_id,
@@ -5031,25 +4746,30 @@ def _should_persist_team_mode_progress_comment(
     return True, fingerprint
 
 
-def _project_completion_snapshot(*, db, workspace_id: str, project_id: str | None) -> dict[str, object]:
+def _project_completion_snapshot(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+    runtime_context: TeamModeProjectRuntimeContext | None = None,
+) -> dict[str, object]:
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return {"all_done": False, "total": 0, "done": 0, "task_ids": []}
-    task_ids = [
-        str(item or "").strip()
-        for item in db.execute(
-            select(Task.id).where(
-                Task.workspace_id == workspace_id,
-                Task.project_id == normalized_project_id,
-                Task.is_deleted == False,  # noqa: E712
-                Task.archived == False,  # noqa: E712
-            )
-        ).scalars().all()
-        if str(item or "").strip()
-    ]
+    effective_runtime_context = runtime_context or TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    task_entries = effective_runtime_context.task_entries()
+    task_ids = sorted(
+        str(getattr(entry.task, "id", "") or "").strip()
+        for entry in task_entries
+        if str(getattr(entry.task, "id", "") or "").strip()
+    )
     done = 0
-    for task_id in task_ids:
-        state, _ = rebuild_state(db, "Task", task_id)
+    for entry in task_entries:
+        state = entry.state
         status_text = str(state.get("status") or "").strip()
         completed_at = str(state.get("completed_at") or "").strip()
         if semantic_status_key(status=status_text) == "completed" or status_text.casefold() == "done" or completed_at:
@@ -5078,30 +4798,33 @@ def _parse_json_list_value(raw: object) -> list[dict[str, object]]:
     return [item for item in parsed if isinstance(item, dict)]
 
 
-def _project_completion_task_snapshots(*, db, workspace_id: str, project_id: str) -> dict[str, object]:
+def _project_completion_task_snapshots(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str,
+    runtime_context: TeamModeProjectRuntimeContext | None = None,
+) -> dict[str, object]:
     project = db.get(Project, project_id)
     project_name = str(getattr(project, "name", "") or "").strip() or project_id
-    task_rows = db.execute(
-        select(Task.id, Task.title, Task.external_refs).where(
-            Task.workspace_id == workspace_id,
-            Task.project_id == project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-        )
-    ).all()
+    effective_runtime_context = runtime_context or TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
     tasks: list[dict[str, object]] = []
-    for task_id, title, external_refs_raw in task_rows:
-        normalized_task_id = str(task_id or "").strip()
+    for entry in effective_runtime_context.task_entries():
+        normalized_task_id = str(getattr(entry.task, "id", "") or "").strip()
         if not normalized_task_id:
             continue
-        state, _ = rebuild_state(db, "Task", normalized_task_id)
+        state = entry.state
         refs = state.get("external_refs")
         if not isinstance(refs, list):
-            refs = _parse_json_list_value(external_refs_raw)
+            refs = _parse_json_list_value(getattr(entry.task, "external_refs", None))
         tasks.append(
             {
                 "id": normalized_task_id,
-                "title": str(state.get("title") or title or normalized_task_id).strip(),
+                "title": str(state.get("title") or getattr(entry.task, "title", "") or normalized_task_id).strip(),
                 "status": str(state.get("status") or "").strip(),
                 "completed_at": str(state.get("completed_at") or "").strip() or None,
                 "project_completion_finalized_at": str(state.get("project_completion_finalized_at") or "").strip()
@@ -5434,13 +5157,24 @@ def _finalize_project_completion(
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return False
-    snapshot = _project_completion_snapshot(db=db, workspace_id=workspace_id, project_id=normalized_project_id)
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    snapshot = _project_completion_snapshot(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        runtime_context=runtime_context,
+    )
     if not bool(snapshot.get("all_done")):
         return False
     detail_snapshot = _project_completion_task_snapshots(
         db=db,
         workspace_id=workspace_id,
         project_id=normalized_project_id,
+        runtime_context=runtime_context,
     )
     task_snapshots = list(detail_snapshot.get("tasks") or [])
     if not task_snapshots:
@@ -5576,6 +5310,11 @@ def _enqueue_team_lead_blocker_escalation(
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return 0
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
     effective_blocked_status = _effective_blocked_status_for_project(
         db=db,
         workspace_id=workspace_id,
@@ -5584,46 +5323,16 @@ def _enqueue_team_lead_blocker_escalation(
     lead_role = lead_role_for_escalation(db=db, workspace_id=workspace_id, project_id=normalized_project_id)
     if not str(lead_role or "").strip():
         return 0
-    member_role_by_user_id = {
-        str(user_id): str(role or "").strip()
-        for user_id, role in db.execute(
-            select(ProjectMember.user_id, ProjectMember.role).where(
-                ProjectMember.workspace_id == workspace_id,
-                ProjectMember.project_id == normalized_project_id,
-            )
-        ).all()
-    }
-    all_tasks = db.execute(
-        select(Task).where(
-            Task.workspace_id == workspace_id,
-            Task.project_id == normalized_project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-        )
-        .order_by(Task.created_at.asc())
-    ).scalars().all()
-    all_tasks = [
-        task
-        for task in all_tasks
-        if semantic_status_key(status=getattr(task, "status", None)) != "completed"
-    ]
-    lead_tasks = [
-        task
-        for task in all_tasks
-        if derive_task_role(
-            task_like={
-                "assignee_id": str(task.assignee_id or "").strip(),
-                "assigned_agent_code": str(task.assigned_agent_code or "").strip(),
-                "labels": task.labels,
-                "status": str(task.status or "").strip(),
-            },
-            member_role_by_user_id=member_role_by_user_id,
-        )
-        == str(lead_role)
+    lead_entries = [
+        entry
+        for entry in runtime_context.task_entries()
+        if semantic_status_key(status=entry.state.get("status") or getattr(entry.task, "status", None)) != "completed"
+        and str(entry.workflow_role or "").strip() == str(lead_role)
     ]
     queued = 0
-    for lead_task in lead_tasks:
-        lead_state, _ = rebuild_state(db, "Task", lead_task.id)
+    for lead_entry in lead_entries:
+        lead_task = lead_entry.task
+        lead_state = lead_entry.state
         current_automation_state = str(lead_state.get("automation_state") or "").strip().lower()
         active_same_request = (
             current_automation_state in {"queued", "running"}
@@ -5671,7 +5380,7 @@ def _enqueue_team_lead_blocker_escalation(
         )
         queued += 1
 
-    lead_assignee = str(lead_tasks[0].assignee_id or "").strip() if lead_tasks else AGENT_SYSTEM_USER_ID
+    lead_assignee = str(lead_entries[0].task.assignee_id or "").strip() if lead_entries else AGENT_SYSTEM_USER_ID
     if not lead_assignee:
         lead_assignee = AGENT_SYSTEM_USER_ID
     blocked_summary = str(blocked_error or "").strip()[:300]
@@ -6810,9 +6519,15 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
 
             lead_handoff_at = completed_at
             lead_handoff_token = f"lead:{run.task_id}:{lead_handoff_at}"
+            handoff_runtime_context = TeamModeProjectRuntimeContext(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=str(project_id),
+            )
             handoff_refs = _collect_handoff_refs_from_tasks(
                 db=db,
                 task_ids=[run.task_id, *[str(item or "").strip() for item in (merge_result.get("merged_task_ids") or [])]],
+                runtime_context=handoff_runtime_context,
             )
             if task_requires_deploy(normalize_delivery_mode(state.get("delivery_mode"))) and not is_strict_deploy_success_snapshot(
                 state.get("last_deploy_execution") if isinstance(state.get("last_deploy_execution"), dict) else {}
@@ -6830,6 +6545,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 lead_handoff_token=lead_handoff_token,
                 lead_handoff_at=lead_handoff_at,
                 lead_handoff_refs=handoff_refs,
+                runtime_context=handoff_runtime_context,
             )
             if queued_qa_handoffs <= 0:
                 raise RuntimeError(
@@ -7006,6 +6722,12 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
     queued_blocker_escalations = 0
     with SessionLocal() as db:
         state, _ = rebuild_state(db, "Task", run.task_id)
+
+        def refresh_state() -> dict[str, object]:
+            nonlocal state
+            state, _ = rebuild_state(db, "Task", run.task_id)
+            return state
+
         workspace_id = str(state.get("workspace_id") or run.workspace_id or "").strip()
         if not workspace_id:
             return
@@ -7049,7 +6771,7 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                 state=state,
                 actor_user_id=actor_user_id,
             )
-            state, _ = rebuild_state(db, "Task", run.task_id)
+            refresh_state()
             effective_assignee_role = _resolve_assignee_project_role(
                 db=db,
                 workspace_id=workspace_id,
@@ -7314,7 +7036,7 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
                     failure_reason=str(error),
                 )
         if lead_developer_triage_queued or lead_human_escalation:
-            state, _ = rebuild_state(db, "Task", run.task_id)
+            refresh_state()
         lead_workflow_resolved = bool(
             team_mode_enabled
             and canonicalize_role(effective_assignee_role) == "Lead"
@@ -7388,7 +7110,7 @@ def _record_automation_failure(run: QueuedAutomationRun, error: Exception) -> No
         elif lead_developer_triage_queued:
             rerun_source = "lead_triage_return"
         if rerun_source:
-            state, _ = rebuild_state(db, "Task", run.task_id)
+            refresh_state()
             actor = db.get(UserModel, actor_user_id) or db.get(UserModel, AGENT_SYSTEM_USER_ID)
             if actor is not None and bool(getattr(actor, "is_active", False)):
                 from features.tasks.application import TaskApplicationService
@@ -7742,36 +7464,60 @@ def _execute_claimed_automation(run: QueuedAutomationRun) -> None:
         _record_automation_failure(run, exc)
 
 
-def run_queued_automation_once(limit: int = 10, *, allow_fresh_kickoff: bool = False) -> int:
-    normalized_limit = max(1, int(limit))
-    scan_limit = max(normalized_limit * 50, normalized_limit, AGENT_RUNNER_MAX_CONCURRENCY * 20)
-    queued_event_task_ids: list[str] = []
-    with SessionLocal() as db:
+def _ordered_task_ids_for_runner_scan(
+    *,
+    db,
+    scan_limit: int,
+    event_types: list[str] | tuple[str, ...] | None = None,
+    fallback_order: str = "desc",
+) -> list[str]:
+    event_task_ids: list[str] = []
+    if event_types:
         try:
             from shared.models import StoredEvent
 
-            queued_event_task_ids = db.execute(
+            event_task_ids = db.execute(
                 select(StoredEvent.aggregate_id)
                 .where(
                     StoredEvent.aggregate_type == "Task",
-                    StoredEvent.event_type == EVENT_AUTOMATION_REQUESTED,
+                    StoredEvent.event_type.in_([str(item) for item in event_types if str(item or "").strip()]),
                 )
                 .order_by(StoredEvent.occurred_at.desc())
                 .limit(scan_limit)
             ).scalars().all()
         except Exception:
-            queued_event_task_ids = []
-        candidate_ids = db.execute(
-            select(Task.id).where(Task.is_deleted == False).order_by(Task.updated_at.desc()).limit(scan_limit)
-        ).scalars().all()
+            event_task_ids = []
+
+    fallback_query = select(Task.id).where(Task.is_deleted == False)  # noqa: E712
+    if str(fallback_order or "").strip().lower() == "asc":
+        fallback_query = fallback_query.order_by(Task.updated_at.asc())
+    else:
+        fallback_query = fallback_query.order_by(Task.updated_at.desc())
+    fallback_task_ids = db.execute(
+        fallback_query.limit(scan_limit)
+    ).scalars().all()
+
     ordered_ids: list[str] = []
     seen_ids: set[str] = set()
-    for task_id in [*queued_event_task_ids, *candidate_ids]:
+    for task_id in [*event_task_ids, *fallback_task_ids]:
         normalized_task_id = str(task_id or "").strip()
         if not normalized_task_id or normalized_task_id in seen_ids:
             continue
         seen_ids.add(normalized_task_id)
         ordered_ids.append(normalized_task_id)
+    return ordered_ids
+
+
+def run_queued_automation_once(limit: int = 10, *, allow_fresh_kickoff: bool = False) -> int:
+    normalized_limit = max(1, int(limit))
+    scan_limit = max(normalized_limit * 50, normalized_limit, AGENT_RUNNER_MAX_CONCURRENCY * 20)
+    with SessionLocal() as db:
+        ordered_ids = _ordered_task_ids_for_runner_scan(
+            db=db,
+            scan_limit=scan_limit,
+            event_types=[EVENT_AUTOMATION_REQUESTED],
+            fallback_order="desc",
+        )
 
     claimed_runs: list[QueuedAutomationRun] = []
     for task_id in ordered_ids:
@@ -7805,6 +7551,7 @@ def queue_satisfied_external_status_triggers_once(limit: int = 20) -> int:
     queued = 0
     now_iso = to_iso_utc(datetime.now(timezone.utc))
     with SessionLocal() as db:
+        runtime_context_cache: dict[tuple[str, str], TeamModeProjectRuntimeContext] = {}
         candidate_tasks = db.execute(
             select(Task)
             .where(
@@ -7820,13 +7567,44 @@ def queue_satisfied_external_status_triggers_once(limit: int = 20) -> int:
         def _workspace_states(workspace_id: str) -> list[dict[str, object]]:
             if workspace_id not in workspace_cache:
                 rows = db.execute(
-                    select(Task).where(
+                    select(
+                        Task.id,
+                        Task.workspace_id,
+                        Task.project_id,
+                        Task.specification_id,
+                        Task.assignee_id,
+                        Task.labels,
+                        Task.status,
+                        Task.updated_at,
+                    ).where(
                         Task.workspace_id == workspace_id,
                         Task.is_deleted == False,  # noqa: E712
                         Task.archived == False,  # noqa: E712
                     )
-                ).scalars().all()
-                workspace_cache[workspace_id] = [_task_state_for_selector(row) for row in rows]
+                ).all()
+                workspace_cache[workspace_id] = [
+                    {
+                        "id": str(task_id or "").strip(),
+                        "workspace_id": str(task_workspace_id or "").strip(),
+                        "project_id": str(task_project_id or "").strip(),
+                        "specification_id": str(task_specification_id or "").strip(),
+                        "assignee_id": str(task_assignee_id or "").strip(),
+                        "labels": _parse_task_labels(task_labels),
+                        "status": str(task_status or "").strip(),
+                        "updated_at": to_iso_utc(task_updated_at) if task_updated_at else None,
+                    }
+                    for (
+                        task_id,
+                        task_workspace_id,
+                        task_project_id,
+                        task_specification_id,
+                        task_assignee_id,
+                        task_labels,
+                        task_status,
+                        task_updated_at,
+                    ) in rows
+                    if str(task_id or "").strip()
+                ]
             return workspace_cache[workspace_id]
 
         for task in candidate_tasks:
@@ -7844,7 +7622,20 @@ def queue_satisfied_external_status_triggers_once(limit: int = 20) -> int:
             if not _project_team_mode_execution_enabled(db=db, workspace_id=workspace_id, project_id=project_id):
                 continue
 
-            state, _ = rebuild_state(db, "Task", task_id)
+            runtime_context_key = (workspace_id, str(project_id))
+            runtime_context = runtime_context_cache.get(runtime_context_key)
+            if runtime_context is None:
+                runtime_context = TeamModeProjectRuntimeContext(
+                    db=db,
+                    workspace_id=workspace_id,
+                    project_id=str(project_id),
+                )
+                runtime_context_cache[runtime_context_key] = runtime_context
+            entry = runtime_context.task_entry(task_id)
+            if entry is not None:
+                state = entry.state
+            else:
+                state, _ = rebuild_state(db, "Task", task_id)
             if str(state.get("automation_state") or "idle").strip() in {"queued", "running"}:
                 continue
             instruction = (
@@ -8014,7 +7805,7 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                 candidate_bundle = candidate_map.get(task_id)
                 if candidate_bundle is None:
                     continue
-                _task, state, _target_slot = candidate_bundle
+                _task, state, _candidate_role, _target_slot = candidate_bundle
                 if not _eligible_for_team_mode_auto_queue(
                     state,
                     db=db,
@@ -8040,7 +7831,7 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                 candidate_bundle = candidate_map.get(str(task_id or "").strip())
                 if candidate_bundle is None:
                     continue
-                task, state, target_slot = candidate_bundle
+                task, state, normalized_role, target_slot = candidate_bundle
                 task_id = str(task.id or "").strip()
                 actor_user_id = _resolve_task_actor_user_id(db=db, task_id=task_id, state=state)
                 actor = db.get(UserModel, actor_user_id)
@@ -8057,15 +7848,6 @@ def queue_team_mode_happy_path_once(limit: int = 20) -> int:
                     project_id[:8],
                     task_id[:8],
                     int(now_utc.timestamp()),
-                )
-                normalized_role = _resolve_assignee_project_role(
-                    db=db,
-                    workspace_id=workspace_id,
-                    project_id=project_id,
-                    assignee_id=str(state.get("assignee_id") or getattr(task, "assignee_id", "") or ""),
-                    assigned_agent_code=str(state.get("assigned_agent_code") or getattr(task, "assigned_agent_code", "") or ""),
-                    task_labels=state.get("labels") if state.get("labels") is not None else getattr(task, "labels", None),
-                    task_status=str(state.get("status") or getattr(task, "status", "") or ""),
                 )
                 inferred_source_task_id = _infer_team_mode_dispatch_source_task_id(
                     db=db,
@@ -8158,42 +7940,22 @@ def closeout_team_mode_tasks_once(limit: int = 20) -> int:
             if not bool((verification or {}).get("ok")):
                 continue
 
-            member_role_by_user_id = {
-                str(user_id): str(role or "").strip()
-                for user_id, role in db.execute(
-                    select(ProjectMember.user_id, ProjectMember.role).where(
-                        ProjectMember.workspace_id == workspace_id,
-                        ProjectMember.project_id == project_id,
-                    )
-                ).all()
-            }
-            rows = db.execute(
-                select(Task)
-                .where(
-                    Task.workspace_id == workspace_id,
-                    Task.project_id == project_id,
-                    Task.is_deleted == False,  # noqa: E712
-                    Task.archived == False,  # noqa: E712
-                )
-                .order_by(Task.created_at.asc())
-            ).scalars().all()
-            if not rows:
+            runtime_context = TeamModeProjectRuntimeContext(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            entries = runtime_context.task_entries()
+            if not entries:
                 continue
 
             lead_rows_count = 0
             ordered_candidates: list[tuple[Task, str, dict[str, object]]] = []
             priority = {"Developer": 0, "QA": 1, "Lead": 2}
-            for task in rows:
-                state, _ = rebuild_state(db, "Task", str(task.id))
-                normalized_role = derive_task_role(
-                    task_like={
-                        "assignee_id": str(task.assignee_id or "").strip(),
-                        "assigned_agent_code": str(task.assigned_agent_code or "").strip(),
-                        "labels": state.get("labels", task.labels),
-                        "status": str(state.get("status") or task.status or "").strip(),
-                    },
-                    member_role_by_user_id=member_role_by_user_id,
-                )
+            for entry in entries:
+                task = entry.task
+                state = entry.state
+                normalized_role = str(entry.workflow_role or "").strip()
                 if normalized_role not in TEAM_MODE_WORKFLOW_ROLES:
                     continue
                 if semantic_status_key(status=state.get("status") or task.status) == "completed":
@@ -8284,11 +8046,15 @@ def recover_stale_running_automation_once(limit: int = 20, stale_after_seconds_o
         return None
 
     with SessionLocal() as db:
-        candidate_ids = db.execute(
-            select(Task.id).where(Task.is_deleted == False).order_by(Task.updated_at.asc()).limit(max(limit * 10, limit))
-        ).scalars().all()
+        scan_limit = max(limit * 20, limit)
+        ordered_ids = _ordered_task_ids_for_runner_scan(
+            db=db,
+            scan_limit=scan_limit,
+            event_types=[EVENT_AUTOMATION_STARTED, EVENT_SCHEDULE_STARTED],
+            fallback_order="asc",
+        )
 
-        for task_id in candidate_ids:
+        for task_id in ordered_ids:
             state, _ = rebuild_state(db, "Task", task_id)
             if state.get("automation_state") != "running":
                 continue
@@ -8356,6 +8122,29 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
     queued = 0
     now = datetime.now(timezone.utc)
     with SessionLocal() as db:
+        scan_limit = max(limit * 20, limit)
+        recent_schedule_event_task_ids: list[str] = []
+        try:
+            from shared.models import StoredEvent
+
+            recent_schedule_event_task_ids = db.execute(
+                select(StoredEvent.aggregate_id)
+                .where(
+                    StoredEvent.aggregate_type == "Task",
+                    StoredEvent.event_type.in_(
+                        [
+                            EVENT_SCHEDULE_QUEUED,
+                            EVENT_SCHEDULE_STARTED,
+                            EVENT_SCHEDULE_COMPLETED,
+                            EVENT_SCHEDULE_FAILED,
+                        ]
+                    ),
+                )
+                .order_by(StoredEvent.occurred_at.desc())
+                .limit(scan_limit)
+            ).scalars().all()
+        except Exception:
+            recent_schedule_event_task_ids = []
         candidate_tasks = db.execute(
             select(Task)
             .where(
@@ -8364,10 +8153,43 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
                 Task.schedule_state == "idle",
             )
             .order_by(Task.scheduled_at_utc.asc())
-            .limit(max(limit * 10, limit))
+            .limit(scan_limit)
         ).scalars().all()
+        recent_event_task_ids = [
+            str(task_id or "").strip()
+            for task_id in recent_schedule_event_task_ids
+            if str(task_id or "").strip()
+        ]
+        if recent_event_task_ids:
+            event_tasks = db.execute(
+                select(Task).where(
+                    Task.id.in_(recent_event_task_ids),
+                    Task.is_deleted == False,  # noqa: E712
+                    Task.task_type == "scheduled_instruction",
+                    Task.schedule_state == "idle",
+                )
+            ).scalars().all()
+            candidate_tasks.extend(event_tasks)
+        candidate_tasks_by_id: dict[str, Task] = {
+            str(task.id or "").strip(): task
+            for task in candidate_tasks
+            if str(task.id or "").strip()
+        }
+        ordered_task_ids: list[str] = []
+        seen_task_ids: set[str] = set()
+        for task_id in [*recent_schedule_event_task_ids, *list(candidate_tasks_by_id.keys())]:
+            normalized_task_id = str(task_id or "").strip()
+            if not normalized_task_id or normalized_task_id in seen_task_ids:
+                continue
+            seen_task_ids.add(normalized_task_id)
+            ordered_task_ids.append(normalized_task_id)
 
-        for task in candidate_tasks:
+        for task_id in ordered_task_ids:
+            task = candidate_tasks_by_id.get(task_id)
+            if task is None or bool(getattr(task, "is_deleted", False)):
+                continue
+            if str(getattr(task, "task_type", "") or "").strip() != "scheduled_instruction":
+                continue
             state, _ = rebuild_state(db, "Task", task.id)
             if state.get("schedule_state", "idle") != "idle":
                 continue
@@ -8384,7 +8206,6 @@ def queue_due_scheduled_tasks_once(limit: int = 20) -> int:
             workspace_id = state.get("workspace_id")
             if not workspace_id:
                 continue
-            project_id = state.get("project_id")
             # Kickoff guard applies only to recurring oversight schedules.
             # Generic scheduled tasks should run normally.
             if is_recurring_oversight_task(state):

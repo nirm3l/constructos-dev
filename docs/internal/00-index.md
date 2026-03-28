@@ -17,7 +17,8 @@ It is organized as a single reading path, with each document containing:
 4. `03-agent-runtime-and-automation.md`
 5. `04-frontend-control-plane-and-ops.md`
 6. `05-testing-and-quality.md`
-7. `99-glossary.md`
+7. `06-omc-patterns-and-adoption.md`
+8. `99-glossary.md`
 
 Use `90-policy-appendix.md` when you need full legacy policy details.
 
@@ -28,8 +29,9 @@ flowchart TD
   C --> D[03 Agent Runtime]
   D --> E[04 Frontend and Ops]
   E --> F[05 Testing and Quality]
-  F --> G[99 Glossary]
-  D --> H[90 Policy Appendix when deep policy detail is needed]
+  F --> G[06 OMC Patterns and Adoption]
+  G --> H[99 Glossary]
+  D --> I[90 Policy Appendix when deep policy detail is needed]
 ```
 
 ## Document Ownership Map
@@ -41,6 +43,7 @@ flowchart TD
 | Team Mode, setup orchestration, automation execution | `03-agent-runtime-and-automation.md` | Team Mode v2 + project setup orchestration policy |
 | UI surfaces, control-plane boundary, deploy safety | `04-frontend-control-plane-and-ops.md` | Team Mode + testing policy |
 | Test structure and enforcement | `05-testing-and-quality.md` | testing and quality policy |
+| OMC-inspired adoption roadmap | `06-omc-patterns-and-adoption.md` | orchestration pattern adoption policy |
 
 ## Non-Negotiable Boundaries
 

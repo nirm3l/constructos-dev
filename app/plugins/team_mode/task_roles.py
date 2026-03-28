@@ -130,11 +130,94 @@ def normalize_team_agents(raw_team: Any) -> list[dict[str, str]]:
     return out
 
 
+def pick_agent_for_role(
+    *,
+    agents: list[dict[str, str]],
+    authority_role: str | None,
+    current_load_by_agent_code: dict[str, int] | None = None,
+) -> dict[str, str] | None:
+    normalized_role = canonicalize_role(authority_role)
+    if not agents or normalized_role not in TEAM_MODE_ROLES:
+        return None
+    normalized_loads = {
+        str(agent.get("id") or "").strip(): 0
+        for agent in agents
+        if str(agent.get("id") or "").strip()
+    }
+    for agent_code, raw_load in dict(current_load_by_agent_code or {}).items():
+        normalized_agent_code = str(agent_code or "").strip()
+        if not normalized_agent_code or normalized_agent_code not in normalized_loads:
+            continue
+        try:
+            normalized_loads[normalized_agent_code] = max(0, int(raw_load))
+        except Exception:
+            normalized_loads[normalized_agent_code] = 0
+    candidates: list[tuple[int, int, dict[str, str]]] = []
+    for index, agent in enumerate(agents):
+        agent_id = str(agent.get("id") or "").strip()
+        agent_role = canonicalize_role(agent.get("authority_role"))
+        if not agent_id or agent_role != normalized_role:
+            continue
+        candidates.append((int(normalized_loads.get(agent_id) or 0), index, agent))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return candidates[0][2]
+
+
+def build_active_agent_load_by_code(
+    *,
+    agents: list[dict[str, str]],
+    task_likes: list[dict[str, Any]],
+    member_role_by_user_id: dict[str, str] | None = None,
+    agent_role_by_code: dict[str, str] | None = None,
+) -> dict[str, int]:
+    load_by_agent_code = {
+        str(agent.get("id") or "").strip(): 0
+        for agent in agents
+        if str(agent.get("id") or "").strip()
+    }
+    if not load_by_agent_code:
+        return {}
+    for task_like in task_likes:
+        if not isinstance(task_like, dict):
+            continue
+        automation_state = str(task_like.get("automation_state") or "idle").strip().lower()
+        if automation_state not in {"queued", "running"}:
+            continue
+        assigned_agent_code = str(task_like.get("assigned_agent_code") or "").strip()
+        dispatch_slot = str(task_like.get("dispatch_slot") or "").strip()
+        if assigned_agent_code in load_by_agent_code:
+            load_by_agent_code[assigned_agent_code] = int(load_by_agent_code.get(assigned_agent_code) or 0) + 1
+            continue
+        if dispatch_slot in load_by_agent_code:
+            load_by_agent_code[dispatch_slot] = int(load_by_agent_code.get(dispatch_slot) or 0) + 1
+            continue
+        role = derive_task_role(
+            task_like=task_like,
+            member_role_by_user_id=member_role_by_user_id,
+            agent_role_by_code=agent_role_by_code,
+            allow_status_fallback=False,
+        )
+        selected_agent = pick_agent_for_role(
+            agents=agents,
+            authority_role=role,
+            current_load_by_agent_code=load_by_agent_code,
+        )
+        selected_agent_code = str((selected_agent or {}).get("id") or "").strip()
+        if not selected_agent_code:
+            continue
+        load_by_agent_code[selected_agent_code] = int(load_by_agent_code.get(selected_agent_code) or 0) + 1
+    return load_by_agent_code
+
+
 def pick_agent_for_task(
     *,
     agents: list[dict[str, str]],
     task_like: dict[str, Any],
     member_role_by_user_id: dict[str, str] | None = None,
+    agent_role_by_code: dict[str, str] | None = None,
+    current_load_by_agent_code: dict[str, int] | None = None,
 ) -> dict[str, str] | None:
     if not agents:
         return None
@@ -143,15 +226,16 @@ def pick_agent_for_task(
         for agent in agents:
             if str(agent.get("id") or "").strip() == explicit_code:
                 return agent
-    role = derive_task_role(task_like=task_like, member_role_by_user_id=member_role_by_user_id, allow_status_fallback=False)
+    role = derive_task_role(
+        task_like=task_like,
+        member_role_by_user_id=member_role_by_user_id,
+        agent_role_by_code=agent_role_by_code,
+        allow_status_fallback=False,
+    )
     if not role:
         return None
-    candidates = [agent for agent in agents if str(agent.get("authority_role") or "").strip() == role]
-    if not candidates:
-        return None
-    # Deterministic spread by task id when multiple slots share the same role.
-    task_id = str(task_like.get("id") or "").strip()
-    if task_id and len(candidates) > 1:
-        idx = sum(ord(ch) for ch in task_id) % len(candidates)
-        return candidates[idx]
-    return candidates[0]
+    return pick_agent_for_role(
+        agents=agents,
+        authority_role=role,
+        current_load_by_agent_code=current_load_by_agent_code,
+    )

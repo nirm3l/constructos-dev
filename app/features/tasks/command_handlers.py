@@ -17,10 +17,11 @@ from sqlalchemy.orm import Session
 
 from plugins import task_policy as plugin_task_policy
 from plugins.registry import list_workflow_plugins
+from plugins.team_mode.runtime_context import TeamModeProjectRuntimeContext
 from plugins.team_mode.task_roles import (
     derive_task_role,
     ensure_team_mode_labels,
-    normalize_team_agents,
+    pick_agent_for_role,
 )
 from plugins.team_mode.state_machine import evaluate_team_mode_transition
 from plugins.team_mode.gates import evaluate_team_mode_gates
@@ -246,24 +247,14 @@ def _load_team_mode_agents_for_project(
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return []
-    config_row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == workspace_id,
-            ProjectPluginConfig.project_id == normalized_project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).scalar_one_or_none()
-    if not config_row:
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    if not runtime_context.enabled:
         return []
-    try:
-        config_obj = json.loads(str(config_row or "").strip() or "{}")
-    except Exception:
-        return []
-    if not isinstance(config_obj, dict):
-        return []
-    return normalize_team_agents(config_obj.get("team"))
+    return runtime_context.team_agents
 
 
 def _load_team_mode_status_semantics_for_project(
@@ -275,24 +266,14 @@ def _load_team_mode_status_semantics_for_project(
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return None
-    config_row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == workspace_id,
-            ProjectPluginConfig.project_id == normalized_project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).scalar_one_or_none()
-    if not config_row:
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    if not runtime_context.enabled:
         return None
-    try:
-        config_obj = json.loads(str(config_row or "").strip() or "{}")
-    except Exception:
-        return dict(REQUIRED_SEMANTIC_STATUSES)
-    if not isinstance(config_obj, dict):
-        return dict(REQUIRED_SEMANTIC_STATUSES)
-    return normalize_status_semantics(config_obj.get("status_semantics"))
+    return runtime_context.status_semantics
 
 
 def _effective_completed_status_for_project(
@@ -399,18 +380,12 @@ def _team_mode_enabled_for_project(
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return False
-    return (
-        db.execute(
-            select(ProjectPluginConfig.id).where(
-                ProjectPluginConfig.workspace_id == str(workspace_id),
-                ProjectPluginConfig.project_id == normalized_project_id,
-                ProjectPluginConfig.plugin_key == "team_mode",
-                ProjectPluginConfig.enabled == True,  # noqa: E712
-                ProjectPluginConfig.is_deleted == False,  # noqa: E712
-            )
-        ).scalar_one_or_none()
-        is not None
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=str(workspace_id),
+        project_id=normalized_project_id,
     )
+    return runtime_context.enabled
 
 
 def _should_default_new_task_to_team_mode_developer(
@@ -688,33 +663,25 @@ def _normalize_external_refs(values: list[dict] | None) -> list[dict]:
 def _team_mode_project_is_unstarted(
     db: Session,
     *,
+    workspace_id: str | None = None,
     project_id: str,
     exclude_task_id: str,
+    runtime_context: TeamModeProjectRuntimeContext | None = None,
 ) -> bool:
-    task_ids = [
-        str(item or "").strip()
-        for item in db.execute(
-            select(Task.id).where(
-                Task.project_id == project_id,
-                Task.is_deleted == False,  # noqa: E712
-            )
-        ).scalars().all()
-        if str(item or "").strip()
-    ]
-    for task_id in task_ids:
-        if task_id == exclude_task_id:
-            continue
-        state, _ = rebuild_state(db, "Task", task_id)
-        if str(state.get("last_requested_source") or "").strip():
-            return False
-        if str(state.get("last_lead_handoff_token") or "").strip():
-            return False
-        if isinstance(state.get("last_deploy_execution"), dict) and state.get("last_deploy_execution"):
-            return False
-        refs = state.get("external_refs")
-        if isinstance(refs, list) and any(isinstance(item, dict) and str(item.get("url") or "").strip() for item in refs):
-            return False
-    return True
+    effective_runtime_context = runtime_context
+    if effective_runtime_context is None:
+        normalized_workspace_id = str(workspace_id or "").strip()
+        if not normalized_workspace_id:
+            project = db.get(Project, str(project_id))
+            normalized_workspace_id = str(getattr(project, "workspace_id", "") or "").strip()
+        if not normalized_workspace_id:
+            return True
+        effective_runtime_context = TeamModeProjectRuntimeContext(
+            db=db,
+            workspace_id=normalized_workspace_id,
+            project_id=str(project_id),
+        )
+    return not effective_runtime_context.project_has_runtime_activity(exclude_task_id=exclude_task_id)
 
 
 def _verify_team_mode_project_topology(
@@ -723,34 +690,13 @@ def _verify_team_mode_project_topology(
     workspace_id: str,
     project_id: str,
 ) -> dict[str, object] | None:
-    plugin_row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == str(workspace_id),
-            ProjectPluginConfig.project_id == str(project_id),
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).first()
-    if plugin_row is None:
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=str(workspace_id),
+        project_id=str(project_id),
+    )
+    if not runtime_context.enabled:
         return None
-
-    config_obj: dict[str, object] = {}
-    try:
-        parsed_cfg = json.loads(str(plugin_row[0] or "").strip() or "{}")
-        if isinstance(parsed_cfg, dict):
-            config_obj = parsed_cfg
-    except Exception:
-        config_obj = {}
-
-    member_role_by_user_id = {
-        str(user_id): str(role or "").strip()
-        for user_id, role in db.execute(
-            select(ProjectMember.user_id, ProjectMember.role).where(
-                ProjectMember.project_id == str(project_id),
-            )
-        ).all()
-    }
     task_rows = db.execute(
         select(
             Task.id,
@@ -786,10 +732,10 @@ def _verify_team_mode_project_topology(
         workspace_id=str(workspace_id),
         event_storming_enabled=bool(getattr(project_row, "event_storming_enabled", False)),
         expected_event_storming_enabled=None,
-        plugin_policy=config_obj,
+        plugin_policy=runtime_context.config,
         plugin_policy_source="project_plugin_config",
         tasks=tasks,
-        member_role_by_user_id=member_role_by_user_id,
+        member_role_by_user_id=runtime_context.member_role_by_user_id,
         notes_by_task={},
         comments_by_task={},
         extract_deploy_ports=lambda _value: set(),
@@ -1112,43 +1058,18 @@ def _enforce_team_mode_transition_policy(
     normalized_project_id = str(project_id or "").strip()
     if not normalized_project_id:
         return
-    row = db.execute(
-        select(ProjectPluginConfig).where(
-            ProjectPluginConfig.workspace_id == str(workspace_id),
-            ProjectPluginConfig.project_id == normalized_project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).scalar_one_or_none()
-    if row is None:
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=str(workspace_id),
+        project_id=normalized_project_id,
+    )
+    if not runtime_context.enabled:
         return
-    try:
-        config = json.loads(str(row.config_json or "").strip() or "{}")
-    except Exception:
-        config = {}
-    if not isinstance(config, dict):
-        config = {}
-    status_semantics = config.get("status_semantics")
-    if not isinstance(status_semantics, dict):
-        status_semantics = dict(REQUIRED_SEMANTIC_STATUSES)
-    member_role_by_user_id = {
-        str(user_id): str(role or "").strip()
-        for user_id, role in db.execute(
-            select(ProjectMember.user_id, ProjectMember.role).where(
-                ProjectMember.project_id == normalized_project_id,
-            )
-        ).all()
-    }
+    status_semantics = runtime_context.status_semantics
+    member_role_by_user_id = runtime_context.member_role_by_user_id
     actor_role = member_role_by_user_id.get(str(actor_user_id), "")
     normalized_actor_role = str(actor_role or "").strip()
     if task_id:
-        team_agents = normalize_team_agents(config.get("team"))
-        agent_role_by_code = {
-            str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-            for agent in team_agents
-            if str(agent.get("id") or "").strip()
-        }
         task_row = db.execute(
             select(Task.assignee_id, Task.assigned_agent_code, Task.status, Task.labels).where(
                 Task.id == str(task_id),
@@ -1158,15 +1079,13 @@ def _enforce_team_mode_transition_policy(
         ).first()
         if task_row is not None:
             assignee_id, assigned_agent_code, task_status, task_labels = task_row
-            task_workflow_role = derive_task_role(
+            task_workflow_role = runtime_context.derive_workflow_role(
                 task_like={
                     "assignee_id": str(assignee_id or "").strip(),
                     "assigned_agent_code": str(assigned_agent_code or "").strip(),
                     "labels": task_labels,
                     "status": str(task_status or "").strip(),
-                },
-                member_role_by_user_id=member_role_by_user_id,
-                agent_role_by_code=agent_role_by_code,
+                }
             )
             if task_workflow_role in {"Developer", "Lead", "QA"}:
                 # Team Mode workflow transitions are governed by task role, not human project membership role.
@@ -1213,22 +1132,14 @@ def _load_enabled_team_mode_config(
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return None
-    row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == str(workspace_id),
-            ProjectPluginConfig.project_id == normalized_project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).scalar_one_or_none()
-    if row is None:
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=str(workspace_id),
+        project_id=normalized_project_id,
+    )
+    if not runtime_context.enabled:
         return None
-    try:
-        parsed = json.loads(str(row or "").strip() or "{}")
-    except Exception:
-        parsed = {}
-    return parsed if isinstance(parsed, dict) else {}
+    return runtime_context.config
 
 
 def _resolve_team_mode_human_owner_user_id(
@@ -1238,16 +1149,21 @@ def _resolve_team_mode_human_owner_user_id(
     project_id: str | None,
     team_mode_config: dict[str, Any] | None = None,
 ) -> str | None:
-    config = team_mode_config if isinstance(team_mode_config, dict) else _load_enabled_team_mode_config(
-        db,
-        workspace_id=workspace_id,
-        project_id=project_id,
-    )
-    if not isinstance(config, dict):
+    if isinstance(team_mode_config, dict):
+        oversight = team_mode_config.get("oversight") if isinstance(team_mode_config.get("oversight"), dict) else {}
+        user_id = str(oversight.get("human_owner_user_id") or "").strip()
+        return user_id or None
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
         return None
-    oversight = config.get("oversight") if isinstance(config.get("oversight"), dict) else {}
-    user_id = str(oversight.get("human_owner_user_id") or "").strip()
-    return user_id or None
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    if not runtime_context.enabled:
+        return None
+    return runtime_context.human_owner_user_id
 
 
 def _resolve_team_mode_reviewer_user_id(
@@ -1257,23 +1173,28 @@ def _resolve_team_mode_reviewer_user_id(
     project_id: str | None,
     team_mode_config: dict[str, Any] | None = None,
 ) -> str | None:
-    config = team_mode_config if isinstance(team_mode_config, dict) else _load_enabled_team_mode_config(
-        db,
-        workspace_id=workspace_id,
-        project_id=project_id,
-    )
-    if not isinstance(config, dict):
+    if isinstance(team_mode_config, dict):
+        review_policy = normalize_review_policy(team_mode_config.get("review_policy"))
+        reviewer_user_id = str(review_policy.get("reviewer_user_id") or "").strip()
+        if reviewer_user_id:
+            return reviewer_user_id
+        return _resolve_team_mode_human_owner_user_id(
+            db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            team_mode_config=team_mode_config,
+        )
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
         return None
-    review_policy = normalize_review_policy(config.get("review_policy"))
-    reviewer_user_id = str(review_policy.get("reviewer_user_id") or "").strip()
-    if reviewer_user_id:
-        return reviewer_user_id
-    return _resolve_team_mode_human_owner_user_id(
-        db,
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
         workspace_id=workspace_id,
-        project_id=project_id,
-        team_mode_config=config,
+        project_id=normalized_project_id,
     )
+    if not runtime_context.enabled:
+        return None
+    return runtime_context.reviewer_user_id
 
 
 def _resolve_team_agent_assignment_by_role(
@@ -1287,18 +1208,19 @@ def _resolve_team_agent_assignment_by_role(
     normalized_role = str(authority_role or "").strip()
     if not workspace_id or not normalized_project_id or not normalized_role:
         return None, None
-    team_agents = _load_team_mode_agents_for_project(
-        db,
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
         workspace_id=workspace_id,
         project_id=normalized_project_id,
     )
-    matching_agent = next(
-        (
-            agent
-            for agent in team_agents
-            if str(agent.get("authority_role") or "").strip() == normalized_role
-        ),
-        None,
+    if not runtime_context.enabled:
+        return None, None
+    team_agents = runtime_context.team_agents
+    current_load_by_agent_code = runtime_context.active_agent_load_by_code(agents=team_agents)
+    matching_agent = pick_agent_for_role(
+        agents=team_agents,
+        authority_role=normalized_role,
+        current_load_by_agent_code=current_load_by_agent_code,
     )
     if matching_agent is None:
         return None, None
@@ -1360,54 +1282,27 @@ def _infer_team_mode_request_origin(
     task_id: str,
     task_view: dict | None,
     state_snapshot: dict[str, object],
+    runtime_context: TeamModeProjectRuntimeContext | None = None,
 ) -> tuple[str | None, str | None]:
     normalized_project_id = str(project_id or "").strip()
     normalized_task_id = str(task_id or "").strip()
     if not workspace_id or not normalized_project_id or not normalized_task_id:
         return None, None
 
-    team_mode_row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == str(workspace_id),
-            ProjectPluginConfig.project_id == normalized_project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).scalar_one_or_none()
-    if team_mode_row is None:
+    effective_runtime_context = runtime_context or TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=str(workspace_id),
+        project_id=normalized_project_id,
+    )
+    if not effective_runtime_context.enabled:
         return None, None
-    try:
-        config_obj = json.loads(str(team_mode_row or "").strip() or "{}")
-    except Exception:
-        config_obj = {}
-    if not isinstance(config_obj, dict):
-        config_obj = {}
-
-    member_role_by_user_id = {
-        str(user_id): str(role or "").strip()
-        for user_id, role in db.execute(
-            select(ProjectMember.user_id, ProjectMember.role).where(
-                ProjectMember.workspace_id == str(workspace_id),
-                ProjectMember.project_id == normalized_project_id,
-            )
-        ).all()
-    }
-    team_agents = normalize_team_agents(config_obj.get("team"))
-    agent_role_by_code = {
-        str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-        for agent in team_agents
-        if str(agent.get("id") or "").strip()
-    }
-    workflow_role = derive_task_role(
+    workflow_role = effective_runtime_context.derive_workflow_role(
         task_like={
             "assignee_id": str(state_snapshot.get("assignee_id") or (task_view or {}).get("assignee_id") or "").strip(),
             "assigned_agent_code": str(state_snapshot.get("assigned_agent_code") or (task_view or {}).get("assigned_agent_code") or "").strip(),
             "labels": state_snapshot.get("labels") if state_snapshot.get("labels") is not None else (task_view or {}).get("labels"),
             "status": str(state_snapshot.get("status") or (task_view or {}).get("status") or "").strip(),
-        },
-        member_role_by_user_id=member_role_by_user_id,
-        agent_role_by_code=agent_role_by_code,
+        }
     )
     if workflow_role not in {"Developer", "Lead", "QA"}:
         return None, None
@@ -1431,30 +1326,13 @@ def _infer_team_mode_request_origin(
         return 0.0
 
     candidates: list[tuple[int, float, str, str]] = []
-    rows = db.execute(
-        select(Task.id, Task.assignee_id, Task.assigned_agent_code, Task.status, Task.labels, Task.created_at).where(
-            Task.workspace_id == str(workspace_id),
-            Task.project_id == normalized_project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-        )
-    ).all()
-    for candidate_id, assignee_id, assigned_agent_code, status, labels, created_at in rows:
-        source_task_id = str(candidate_id or "").strip()
+    for entry in effective_runtime_context.task_entries():
+        source_task_id = str(getattr(entry.task, "id", "") or "").strip()
         if not source_task_id or source_task_id == normalized_task_id:
             continue
-        source_state, _ = rebuild_state(db, "Task", source_task_id)
-        source_status = str(source_state.get("status") or status or "").strip()
-        source_role = derive_task_role(
-            task_like={
-                "assignee_id": str(source_state.get("assignee_id") or assignee_id or "").strip(),
-                "assigned_agent_code": str(source_state.get("assigned_agent_code") or assigned_agent_code or "").strip(),
-                "labels": source_state.get("labels") if source_state.get("labels") is not None else labels,
-                "status": source_status,
-            },
-            member_role_by_user_id=member_role_by_user_id,
-            agent_role_by_code=agent_role_by_code,
-        )
+        source_state = entry.state
+        source_status = str(source_state.get("status") or getattr(entry.task, "status", "") or "").strip()
+        source_role = str(entry.workflow_role or "").strip()
         source_automation_state = str(source_state.get("automation_state") or "idle").strip().lower()
         source_semantic_status = semantic_status_key(status=source_status)
         candidate_source: str | None = None
@@ -1489,7 +1367,14 @@ def _infer_team_mode_request_origin(
                 candidate_rank = 0
         if candidate_source is None or candidate_rank is None:
             continue
-        candidates.append((candidate_rank, -_candidate_timestamp(source_state, created_at), candidate_source, source_task_id))
+        candidates.append(
+            (
+                candidate_rank,
+                -_candidate_timestamp(source_state, getattr(entry.task, "created_at", None)),
+                candidate_source,
+                source_task_id,
+            )
+        )
 
     candidates.sort()
     if not candidates:
@@ -1679,6 +1564,11 @@ def _validate_dependency_status_contract(
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=str(workspace_id),
+        project_id=normalized_project_id,
+    )
     normalized_task_id = str(task_id or "").strip()
     relationships = normalize_task_relationships(task_relationships)
     for relationship in relationships:
@@ -1697,11 +1587,10 @@ def _validate_dependency_status_contract(
             if str(item or "").strip() and str(item or "").strip() != normalized_task_id
         ]
         for source_task_id in source_task_ids:
-            source_state, _ = rebuild_state(db, "Task", source_task_id)
-            if str(source_state.get("workspace_id") or "").strip() != workspace_id:
+            source_entry = runtime_context.task_entry(source_task_id)
+            if source_entry is None:
                 continue
-            if str(source_state.get("project_id") or "").strip() != normalized_project_id:
-                continue
+            source_state = source_entry.state
             source_delivery_mode = normalize_delivery_mode(source_state.get("delivery_mode"))
             if source_delivery_mode == DELIVERY_MODE_DEPLOYABLE_SLICE:
                 continue
@@ -1722,7 +1611,13 @@ def _team_mode_task_dependency_ready(
     project_id: str,
     task_id: str,
     state: dict[str, object],
+    runtime_context: TeamModeProjectRuntimeContext | None = None,
 ) -> tuple[bool, str | None]:
+    effective_runtime_context = runtime_context or TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=str(workspace_id),
+        project_id=str(project_id),
+    )
     task_relationships = normalize_task_relationships(state.get("task_relationships"))
     if not task_relationships:
         return True, None
@@ -1743,17 +1638,13 @@ def _team_mode_task_dependency_ready(
         if not source_task_ids or not statuses:
             continue
         match_mode = str(relationship.get("match_mode") or STATUS_MATCH_ALL).strip().lower()
-        matched_sources = 0
-        total_sources = 0
-        for source_task_id in source_task_ids:
-            source_state, _ = rebuild_state(db, "Task", source_task_id)
-            if str(source_state.get("workspace_id") or "").strip() != workspace_id:
-                continue
-            if str(source_state.get("project_id") or "").strip() != project_id:
-                continue
-            total_sources += 1
-            if any(task_matches_dependency_requirement(source_state, required) for required in statuses):
-                matched_sources += 1
+        source_entries = effective_runtime_context.source_task_entries(source_task_ids, exclude_task_id=task_id)
+        total_sources = len(source_entries)
+        matched_sources = sum(
+            1
+            for source_entry in source_entries
+            if any(task_matches_dependency_requirement(source_entry.state, required) for required in statuses)
+        )
         if total_sources <= 0:
             continue
         if match_mode == STATUS_MATCH_ALL:
@@ -2450,22 +2341,25 @@ class PatchTaskHandler:
             event_payload["schedule_state"] = current_schedule_state or "idle"
 
         requested_status = str(event_payload.get("status") or "").strip()
-        team_mode_config = _load_enabled_team_mode_config(
-            self.ctx.db,
-            workspace_id=workspace_id,
-            project_id=str(event_payload.get("project_id") or project_id or "").strip() or None,
+        effective_project_id = str(event_payload.get("project_id") or project_id or "").strip() or None
+        runtime_context = (
+            TeamModeProjectRuntimeContext(
+                db=self.ctx.db,
+                workspace_id=workspace_id,
+                project_id=str(effective_project_id),
+            )
+            if effective_project_id
+            else None
         )
-        status_semantics = normalize_status_semantics(
-            team_mode_config.get("status_semantics") if isinstance(team_mode_config, dict) else None
-        )
+        team_mode_config = runtime_context.config if runtime_context is not None and runtime_context.enabled else None
+        status_semantics = runtime_context.status_semantics if runtime_context is not None and runtime_context.enabled else dict(REQUIRED_SEMANTIC_STATUSES)
         current_semantic_status = semantic_status_key(status=current_status, status_semantics=status_semantics)
         requested_semantic_status = semantic_status_key(status=requested_status, status_semantics=status_semantics)
-        review_policy = normalize_review_policy(
-            team_mode_config.get("review_policy") if isinstance(team_mode_config, dict) else None
-        )
+        review_policy = runtime_context.review_policy if runtime_context is not None and runtime_context.enabled else {}
         if (
             requested_semantic_status == "in_review"
-            and isinstance(team_mode_config, dict)
+            and runtime_context is not None
+            and runtime_context.enabled
             and not bool(review_policy.get("require_code_review"))
         ):
             requested_status = str(status_semantics.get("active") or REQUIRED_SEMANTIC_STATUSES["active"])
@@ -2493,7 +2387,7 @@ class PatchTaskHandler:
             reviewer_user_id = _resolve_team_mode_reviewer_user_id(
                 self.ctx.db,
                 workspace_id=workspace_id,
-                project_id=str(event_payload.get("project_id") or project_id or "").strip() or None,
+                project_id=effective_project_id,
                 team_mode_config=team_mode_config,
             )
             if not reviewer_user_id:
@@ -2517,7 +2411,7 @@ class PatchTaskHandler:
             lead_assignee_id, lead_agent_code = _resolve_team_agent_assignment_by_role(
                 self.ctx.db,
                 workspace_id=workspace_id,
-                project_id=str(event_payload.get("project_id") or project_id or "").strip() or None,
+                project_id=effective_project_id,
                 authority_role="Lead",
             )
             event_payload["assignee_id"] = reviewer_user_id
@@ -2627,14 +2521,15 @@ class ReviewTaskHandler:
         normalized_project_id = str(project_id or "").strip()
         if not normalized_project_id:
             raise HTTPException(status_code=409, detail="Review actions require a project task.")
-        team_mode_config = _load_enabled_team_mode_config(
-            self.ctx.db,
+        runtime_context = TeamModeProjectRuntimeContext(
+            db=self.ctx.db,
             workspace_id=workspace_id,
             project_id=normalized_project_id,
         )
-        if not isinstance(team_mode_config, dict):
+        if not runtime_context.enabled:
             raise HTTPException(status_code=409, detail="Review actions require Team Mode to be enabled.")
-        status_semantics = normalize_status_semantics(team_mode_config.get("status_semantics"))
+        team_mode_config = runtime_context.config
+        status_semantics = runtime_context.status_semantics
         if semantic_status_key(status=status, status_semantics=status_semantics) != "in_review":
             raise HTTPException(status_code=409, detail="Review action is only allowed when the task is In Review.")
 
@@ -2642,7 +2537,7 @@ class ReviewTaskHandler:
         if normalized_action not in {"approve", "request_changes"}:
             raise HTTPException(status_code=422, detail='action must be "approve" or "request_changes"')
 
-        state_snapshot, _ = rebuild_state(self.ctx.db, "Task", self.task_id)
+        state_snapshot = runtime_context.task_state(self.task_id)
         review_source_assignee_id = str(state_snapshot.get("review_source_assignee_id") or "").strip() or None
         review_source_assigned_agent_code = str(state_snapshot.get("review_source_assigned_agent_code") or "").strip() or None
         review_next_lead_assignee_id = str(state_snapshot.get("review_next_lead_assignee_id") or "").strip() or None
@@ -3138,6 +3033,15 @@ class RequestAutomationRunHandler:
                 "skipped": True,
                 "reason": "Task automation is already in progress with the same instruction.",
             }
+        runtime_context = (
+            TeamModeProjectRuntimeContext(
+                db=self.ctx.db,
+                workspace_id=str(workspace_id),
+                project_id=str(project_id),
+            )
+            if project_id
+            else None
+        )
         requested_source = str(self.source or "").strip().lower()
         requested_source_task_id = str(self.source_task_id or "").strip() or None
         if requested_source_task_id == str(self.task_id or "").strip():
@@ -3172,6 +3076,7 @@ class RequestAutomationRunHandler:
                 task_id=self.task_id,
                 task_view=task_view,
                 state_snapshot=state_snapshot,
+                runtime_context=runtime_context if project_id else None,
             )
             if inferred_source_task_id:
                 requested_source_task_id = inferred_source_task_id
@@ -3214,52 +3119,21 @@ class RequestAutomationRunHandler:
             and project_id
             and not explicit_execution_classification
         ):
-            team_mode_row = self.ctx.db.execute(
-                select(ProjectPluginConfig.config_json).where(
-                    ProjectPluginConfig.workspace_id == str(workspace_id),
-                    ProjectPluginConfig.project_id == str(project_id),
-                    ProjectPluginConfig.plugin_key == "team_mode",
-                    ProjectPluginConfig.enabled == True,  # noqa: E712
-                    ProjectPluginConfig.is_deleted == False,  # noqa: E712
-                )
-            ).first()
-            if team_mode_row is not None:
-                config_obj: dict[str, object] = {}
-                try:
-                    parsed_cfg = json.loads(str(team_mode_row[0] or "").strip() or "{}")
-                    if isinstance(parsed_cfg, dict):
-                        config_obj = parsed_cfg
-                except Exception:
-                    config_obj = {}
-                member_role_by_user_id = {
-                    str(user_id): str(role or "").strip()
-                    for user_id, role in self.ctx.db.execute(
-                        select(ProjectMember.user_id, ProjectMember.role).where(
-                            ProjectMember.workspace_id == str(workspace_id),
-                            ProjectMember.project_id == str(project_id),
-                        )
-                    ).all()
-                }
-                team_agents = normalize_team_agents(config_obj.get("team"))
-                agent_role_by_code = {
-                    str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-                    for agent in team_agents
-                    if str(agent.get("id") or "").strip()
-                }
-                default_kickoff_workflow_role = derive_task_role(
+            if runtime_context is not None and runtime_context.enabled:
+                default_kickoff_workflow_role = runtime_context.derive_workflow_role(
                     task_like={
                         "assignee_id": str(state_snapshot.get("assignee_id") or (task_view or {}).get("assignee_id") or "").strip(),
                         "assigned_agent_code": str(state_snapshot.get("assigned_agent_code") or (task_view or {}).get("assigned_agent_code") or "").strip(),
                         "labels": state_snapshot.get("labels") if state_snapshot.get("labels") is not None else (task_view or {}).get("labels"),
                         "status": str(state_snapshot.get("status") or (task_view or {}).get("status") or "").strip(),
-                    },
-                    member_role_by_user_id=member_role_by_user_id,
-                    agent_role_by_code=agent_role_by_code,
+                    }
                 )
             if str(default_kickoff_workflow_role or "").strip() == "Lead" and _team_mode_project_is_unstarted(
                 self.ctx.db,
+                workspace_id=str(workspace_id),
                 project_id=str(project_id),
                 exclude_task_id=self.task_id,
+                runtime_context=runtime_context,
             ):
                 should_default_to_team_mode_kickoff = True
         if should_default_to_team_mode_kickoff:
@@ -3306,46 +3180,14 @@ class RequestAutomationRunHandler:
             }
 
         if project_id:
-            plugin_row = self.ctx.db.execute(
-                select(ProjectPluginConfig.config_json).where(
-                    ProjectPluginConfig.workspace_id == str(workspace_id),
-                    ProjectPluginConfig.project_id == str(project_id),
-                    ProjectPluginConfig.plugin_key == "team_mode",
-                    ProjectPluginConfig.enabled == True,  # noqa: E712
-                    ProjectPluginConfig.is_deleted == False,  # noqa: E712
-                )
-            ).first()
-            if plugin_row is not None:
-                config_obj: dict[str, object] = {}
-                try:
-                    parsed_cfg = json.loads(str(plugin_row[0] or "").strip() or "{}")
-                    if isinstance(parsed_cfg, dict):
-                        config_obj = parsed_cfg
-                except Exception:
-                    config_obj = {}
-                member_role_by_user_id = {
-                    str(user_id): str(role or "").strip()
-                    for user_id, role in self.ctx.db.execute(
-                        select(ProjectMember.user_id, ProjectMember.role).where(
-                            ProjectMember.project_id == str(project_id),
-                        )
-                    ).all()
-                }
-                team_agents = normalize_team_agents(config_obj.get("team"))
-                agent_role_by_code = {
-                    str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-                    for agent in team_agents
-                    if str(agent.get("id") or "").strip()
-                }
-                workflow_role = derive_task_role(
+            if runtime_context is not None and runtime_context.enabled:
+                workflow_role = runtime_context.derive_workflow_role(
                     task_like={
                         "assignee_id": str(state_snapshot.get("assignee_id") or (task_view or {}).get("assignee_id") or "").strip(),
                         "assigned_agent_code": str(state_snapshot.get("assigned_agent_code") or (task_view or {}).get("assigned_agent_code") or "").strip(),
                         "labels": state_snapshot.get("labels") if state_snapshot.get("labels") is not None else (task_view or {}).get("labels"),
                         "status": str(state_snapshot.get("status") or (task_view or {}).get("status") or "").strip(),
-                    },
-                    member_role_by_user_id=member_role_by_user_id,
-                    agent_role_by_code=agent_role_by_code,
+                    }
                 )
                 if (
                     str(workflow_role or "").strip() in {"Developer", "QA"}
@@ -3416,6 +3258,7 @@ class RequestAutomationRunHandler:
                         project_id=str(project_id),
                         task_id=self.task_id,
                         state=state_snapshot,
+                        runtime_context=runtime_context,
                     )
                     if not dependency_ready:
                         return {

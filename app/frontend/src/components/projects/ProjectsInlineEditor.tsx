@@ -899,6 +899,78 @@ export function ProjectsInlineEditor({
     () => gateConfigScopes.find((scope) => scope.scopeKey === 'team_mode'),
     [gateConfigScopes]
   )
+  const teamModeRuntimeSnapshot = React.useMemo(() => {
+    const raw = projectChecksSnapshot?.team_mode_runtime
+    if (!raw || typeof raw !== 'object') return null
+    const summaryRaw = raw.summary && typeof raw.summary === 'object' ? raw.summary : {}
+    const dispatchRaw = raw.dispatch && typeof raw.dispatch === 'object' ? raw.dispatch : {}
+    const kickoffRaw = raw.kickoff && typeof raw.kickoff === 'object' ? raw.kickoff : {}
+    const tasksRaw = Array.isArray(raw.tasks) ? raw.tasks : []
+    const agentsRaw = Array.isArray(raw.agents) ? raw.agents : []
+    const tasks = tasksRaw
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const row = item as Record<string, unknown>
+        const id = String(row.id || '').trim()
+        if (!id) return null
+        return {
+          id,
+          title: String(row.title || '').trim() || id,
+          status: String(row.status || '').trim(),
+          semantic_status: String(row.semantic_status || '').trim(),
+          role: String(row.role || '').trim(),
+          phase: String(row.phase || '').trim(),
+          automation_state: String(row.automation_state || '').trim() || 'idle',
+          runtime_state: String(row.runtime_state || '').trim() || 'waiting',
+          blocker_reason: String(row.blocker_reason || row.dependency_reason || '').trim() || null,
+          assigned_agent_code: String(row.assigned_agent_code || '').trim() || null,
+          selected_for_dispatch: Boolean(row.selected_for_dispatch),
+          selected_for_kickoff: Boolean(row.selected_for_kickoff),
+        }
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    const agents = agentsRaw
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const row = item as Record<string, unknown>
+        const id = String(row.id || '').trim()
+        if (!id) return null
+        return {
+          id,
+          name: String(row.name || '').trim() || id,
+          authority_role: String(row.authority_role || '').trim(),
+          status: String(row.status || '').trim() || 'idle',
+          busy_task_count: Number(row.busy_task_count || 0),
+        }
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    return {
+      active: Boolean(raw.active),
+      parallel_limit: Number(raw.parallel_limit || 0),
+      tasks,
+      agents,
+      summary: {
+        tasks_total: Number(summaryRaw.tasks_total || 0),
+        team_tasks_total: Number(summaryRaw.team_tasks_total || 0),
+        active_tasks_total: Number(summaryRaw.active_tasks_total || 0),
+        runnable_tasks_total: Number(summaryRaw.runnable_tasks_total || 0),
+        blocked_tasks_total: Number(summaryRaw.blocked_tasks_total || 0),
+        waiting_tasks_total: Number(summaryRaw.waiting_tasks_total || 0),
+        missing_instruction_total: Number(summaryRaw.missing_instruction_total || 0),
+        active_agents_total: Number(summaryRaw.active_agents_total || 0),
+        idle_agents_total: Number(summaryRaw.idle_agents_total || 0),
+      },
+      dispatch: {
+        mode: String(dispatchRaw.mode || '').trim() || 'idle',
+        queue_task_ids: Array.isArray(dispatchRaw.queue_task_ids) ? dispatchRaw.queue_task_ids.map((item) => String(item || '').trim()).filter(Boolean) : [],
+        blocked_reasons: Array.isArray(dispatchRaw.blocked_reasons) ? dispatchRaw.blocked_reasons.map((item) => String(item || '').trim()).filter(Boolean) : [],
+      },
+      kickoff: {
+        kickoff_task_ids: Array.isArray(kickoffRaw.kickoff_task_ids) ? kickoffRaw.kickoff_task_ids.map((item) => String(item || '').trim()).filter(Boolean) : [],
+        blocked_reasons: Array.isArray(kickoffRaw.blocked_reasons) ? kickoffRaw.blocked_reasons.map((item) => String(item || '').trim()).filter(Boolean) : [],
+      },
+    }
+  }, [projectChecksSnapshot?.team_mode_runtime])
   const deliveryKickoffRequired = Boolean(projectChecksSnapshot?.delivery?.kickoff_required)
   const deliveryKickoffHint = String(projectChecksSnapshot?.delivery?.kickoff_hint || '').trim()
   const deliveryRuntimeDeployHealth = React.useMemo(() => {
@@ -2903,6 +2975,59 @@ export function ProjectsInlineEditor({
                     )}
                   </div>
                 ) : null}
+                {teamModeRuntimeSnapshot?.active ? (
+                  <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
+                    <div style={{ fontWeight: 600, marginBottom: 6 }}>Team Mode Runtime</div>
+                    <div className="row wrap" style={{ gap: 6 }}>
+                      <span className="badge">Parallel limit: {teamModeRuntimeSnapshot.parallel_limit}</span>
+                      <span className="badge">Team tasks: {teamModeRuntimeSnapshot.summary.team_tasks_total}</span>
+                      <span className="badge">Active: {teamModeRuntimeSnapshot.summary.active_tasks_total}</span>
+                      <span className="badge">Runnable: {teamModeRuntimeSnapshot.summary.runnable_tasks_total}</span>
+                      {teamModeRuntimeSnapshot.summary.blocked_tasks_total > 0 ? (
+                        <span className="badge status-blocked">Blocked: {teamModeRuntimeSnapshot.summary.blocked_tasks_total}</span>
+                      ) : null}
+                      {teamModeRuntimeSnapshot.summary.missing_instruction_total > 0 ? (
+                        <span className="badge">Missing instruction: {teamModeRuntimeSnapshot.summary.missing_instruction_total}</span>
+                      ) : null}
+                    </div>
+                    <div className="row wrap" style={{ marginTop: 8, gap: 8 }}>
+                      {teamModeRuntimeSnapshot.agents.map((agent) => (
+                        <span
+                          key={`tm-runtime-agent-checks-${agent.id}`}
+                          className={`badge ${agent.status === 'busy' ? 'status-blocked' : 'status-done'}`}
+                        >
+                          {agent.name} ({agent.authority_role || 'role'}) · {agent.status}
+                          {agent.busy_task_count > 0 ? ` · ${agent.busy_task_count} task` : ''}
+                        </span>
+                      ))}
+                    </div>
+                    {teamModeRuntimeSnapshot.tasks.length > 0 ? (
+                      <div className="gates-check-list" style={{ marginTop: 8 }}>
+                        {teamModeRuntimeSnapshot.tasks
+                          .filter((task) => task.role === 'Developer' || task.role === 'Lead' || task.role === 'QA')
+                          .slice(0, 10)
+                          .map((task) => (
+                            <div key={`tm-runtime-task-checks-${task.id}`} className="gates-check-row">
+                              <div className="gates-check-copy">
+                                <a href={`?tab=tasks&project=${selectedProject.id}&task=${task.id}`}>{task.title}</a>
+                                <span className="meta">
+                                  role={task.role || 'n/a'}; runtime={task.runtime_state}; automation={task.automation_state}; status={task.status || 'Unknown'}
+                                  {task.assigned_agent_code ? <>; slot={task.assigned_agent_code}</> : null}
+                                  {task.selected_for_dispatch ? <>; next dispatch</> : null}
+                                  {task.selected_for_kickoff ? <>; kickoff target</> : null}
+                                  {task.blocker_reason ? <>; reason={task.blocker_reason}</> : null}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                      </div>
+                    ) : (
+                      <div className="meta" style={{ marginTop: 8 }}>
+                        No Team Mode tasks are currently visible in the runtime snapshot.
+                      </div>
+                    )}
+                  </div>
+                ) : null}
               </div>
               {projectChecksQuery.isLoading ? (
                 <div className="meta">Loading check verification...</div>
@@ -3074,6 +3199,48 @@ export function ProjectsInlineEditor({
               <div className="meta" style={{ marginTop: 6 }}>
                 Task-level deterministic execution gates are visible in each task Execution tab.
               </div>
+              {teamModeRuntimeSnapshot?.active ? (
+                <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>Task-First Runtime Snapshot</div>
+                  <div className="row wrap" style={{ gap: 6 }}>
+                    <span className="badge">Parallel limit: {teamModeRuntimeSnapshot.parallel_limit}</span>
+                    <span className="badge">Active tasks: {teamModeRuntimeSnapshot.summary.active_tasks_total}</span>
+                    <span className="badge">Runnable tasks: {teamModeRuntimeSnapshot.summary.runnable_tasks_total}</span>
+                    <span className="badge">Dispatch queue: {teamModeRuntimeSnapshot.dispatch.queue_task_ids.length}</span>
+                    <span className="badge">Kickoff targets: {teamModeRuntimeSnapshot.kickoff.kickoff_task_ids.length}</span>
+                  </div>
+                  {teamModeRuntimeSnapshot.dispatch.blocked_reasons.length > 0 ? (
+                    <div className="meta" style={{ marginTop: 8 }}>
+                      Dispatch blockers: {teamModeRuntimeSnapshot.dispatch.blocked_reasons.join(' | ')}
+                    </div>
+                  ) : null}
+                  {teamModeRuntimeSnapshot.kickoff.blocked_reasons.length > 0 ? (
+                    <div className="meta" style={{ marginTop: 6 }}>
+                      Kickoff blockers: {teamModeRuntimeSnapshot.kickoff.blocked_reasons.join(' | ')}
+                    </div>
+                  ) : null}
+                  <div className="gates-check-list" style={{ marginTop: 8 }}>
+                    {teamModeRuntimeSnapshot.tasks
+                      .filter((task) => task.role === 'Developer' || task.role === 'Lead' || task.role === 'QA')
+                      .slice(0, 12)
+                      .map((task) => (
+                        <div key={`tm-runtime-task-team-mode-${task.id}`} className="gates-check-row">
+                          <div className="gates-check-copy">
+                            <a className="status-chip" href={`?tab=tasks&project=${selectedProject.id}&task=${task.id}`}>
+                              {task.title}
+                            </a>
+                            <span className="meta">
+                              Role: <code>{task.role || 'n/a'}</code> | Runtime: <code>{task.runtime_state}</code> | Automation: <code>{task.automation_state}</code> | Phase: <code>{task.phase || 'n/a'}</code>
+                              {task.assigned_agent_code ? <> | Slot: <code>{task.assigned_agent_code}</code></> : null}
+                              {task.blocker_reason ? <> | Reason: {task.blocker_reason}</> : null}
+                            </span>
+                          </div>
+                          {task.selected_for_dispatch ? <span className="badge status-done">Next dispatch</span> : null}
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              ) : null}
               <div className="meta" style={{ marginTop: 6 }}>{deliveryKickoffSummaryLine}</div>
               {deliveryRuntimeDeployHealth ? (
                 <div className="row wrap" style={{ marginTop: 6, gap: 8 }}>

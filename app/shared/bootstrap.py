@@ -19,6 +19,7 @@ from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
 from features.projects.domain import EVENT_UPDATED as PROJECT_EVENT_UPDATED
 from features.rules.domain import EVENT_CREATED as PROJECT_RULE_EVENT_CREATED
 from features.notes.domain import EVENT_CREATED as NOTE_EVENT_CREATED
+from features.notes.domain import EVENT_UPDATED as NOTE_EVENT_UPDATED
 from features.specifications.domain import EVENT_CREATED as SPECIFICATION_EVENT_CREATED
 from features.tasks.domain import EVENT_CREATED as TASK_EVENT_CREATED
 from features.tasks.domain import EVENT_UPDATED as TASK_EVENT_UPDATED

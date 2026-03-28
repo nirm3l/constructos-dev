@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from features.agents.gates import run_runtime_deploy_health_check
 from features.agents.gates import plugin_check_catalog_by_scope
 from features.agents.gateway import build_ui_gateway
+from plugins.team_mode.runtime_snapshot import build_team_mode_runtime_snapshot
 from shared.core import (
     Project,
     ProjectCreate,
@@ -321,6 +322,7 @@ def _project_execution_gate_snapshot(*, db: Session, user, project_id: str) -> d
         reverse=True,
     )
     return {
+        "team_mode_runtime": build_team_mode_runtime_snapshot(db=db, user=user, project_id=project_id),
         "execution_gates": {
             "tasks": tasks,
             "totals": totals,
@@ -847,6 +849,7 @@ def project_checks_verify(
     return {
         "project_id": project_id,
         "team_mode": team_mode,
+        "team_mode_runtime": project_execution_snapshot.get("team_mode_runtime") or {"active": False, "agents": [], "tasks": [], "summary": {}},
         "delivery": delivery,
         "execution_gates": project_execution_snapshot.get("execution_gates") or {"tasks": [], "totals": {}},
         "workflow_communication": project_execution_snapshot.get("workflow_communication")

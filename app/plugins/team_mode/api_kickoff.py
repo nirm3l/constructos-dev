@@ -1,20 +1,16 @@
 from __future__ import annotations
 
-import json
 from typing import Any, Callable
 
 from fastapi import HTTPException
-from sqlalchemy import select
 
 from shared.core import User, append_event
-from shared.eventing import rebuild_state
-from shared.models import Project, ProjectMember, ProjectPluginConfig, SessionLocal, Task
+from shared.models import Project, SessionLocal, Task
 from shared.settings import AGENT_RUNNER_MAX_CONCURRENCY
 from shared.task_automation import normalize_execution_triggers
 from shared.task_relationships import normalize_task_relationships
 from shared.typed_notifications import append_notification_created_event
-from .task_roles import derive_task_role
-from .task_roles import normalize_team_agents
+from .runtime_context import TeamModeProjectRuntimeContext
 from .gates import evaluate_team_mode_gates
 from .workflow_orchestrator import TEAM_MODE_WORKFLOW_ROLES, plan_kickoff_targets
 from .semantics import REQUIRED_SEMANTIC_STATUSES, semantic_status_key
@@ -25,42 +21,26 @@ def _collect_team_mode_developer_dispatch_state(
     db: Any,
     workspace_id: str,
     project_id: str,
-    member_role_by_user_id: dict[str, str],
-    agent_role_by_code: dict[str, str],
 ) -> dict[str, Any]:
-    tasks = db.execute(
-        select(Task).where(
-            Task.workspace_id == workspace_id,
-            Task.project_id == project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-        )
-        .order_by(Task.created_at.asc())
-    ).scalars().all()
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )
     developer_task_ids: list[str] = []
     active_task_ids: list[str] = []
     idle_task_ids: list[str] = []
-    for task in tasks:
+    for task in runtime_context.tasks:
         task_id = str(task.id or "").strip()
         if not task_id:
             continue
-        role = derive_task_role(
-            task_like={
-                "id": task_id,
-                "assignee_id": str(task.assignee_id or "").strip(),
-                "assigned_agent_code": str(task.assigned_agent_code or "").strip(),
-                "labels": task.labels,
-                "status": str(task.status or "").strip(),
-            },
-            member_role_by_user_id=member_role_by_user_id,
-            agent_role_by_code=agent_role_by_code,
-        )
+        role = runtime_context.derive_workflow_role(task=task)
         if role != "Developer":
             continue
         if semantic_status_key(status=task.status) == "completed":
             continue
         developer_task_ids.append(task_id)
-        state, _version = rebuild_state(db, "Task", task_id)
+        state = runtime_context.task_state(task_id)
         automation_state = str(state.get("automation_state") or "idle").strip().lower()
         if automation_state == "idle":
             idle_task_ids.append(task_id)
@@ -103,25 +83,15 @@ def maybe_dispatch_execution_kickoff(
     if not should_dispatch_kickoff:
         return None
 
-    team_mode_plugin_row = db.execute(
-        select(ProjectPluginConfig.id, ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == workspace_id,
-            ProjectPluginConfig.project_id == normalized_project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).first()
-    if team_mode_plugin_row is None:
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    if not runtime_context.enabled:
         return None
-    team_mode_config_obj: dict[str, Any] = {}
-    try:
-        parsed = json.loads(str(team_mode_plugin_row[1] or "").strip() or "{}")
-        if isinstance(parsed, dict):
-            team_mode_config_obj = parsed
-    except Exception:
-        team_mode_config_obj = {}
-    team_agents = normalize_team_agents(team_mode_config_obj.get("team"))
+    team_mode_config_obj = runtime_context.config
+    team_agents = runtime_context.team_agents
     project_row = db.get(Project, normalized_project_id)
     raw_parallel_limit = getattr(project_row, "automation_max_parallel_tasks", None) if project_row is not None else None
     try:
@@ -129,11 +99,7 @@ def maybe_dispatch_execution_kickoff(
     except Exception:
         max_parallel_dispatch = 4
     max_parallel_dispatch = max(1, min(max_parallel_dispatch, int(AGENT_RUNNER_MAX_CONCURRENCY)))
-    agent_role_by_code = {
-        str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-        for agent in team_agents
-        if str(agent.get("id") or "").strip()
-    }
+    agent_role_by_code = runtime_context.agent_role_by_code
 
     promote_plugin_policy_to_execution_mode_if_needed(
         db=db,
@@ -143,23 +109,8 @@ def maybe_dispatch_execution_kickoff(
         command_id=command_id,
     )
 
-    member_role_by_user_id = {
-        str(user_id): str(role or "").strip()
-        for user_id, role in db.execute(
-            select(ProjectMember.user_id, ProjectMember.role).where(
-                ProjectMember.project_id == normalized_project_id
-            )
-        ).all()
-    }
-    tasks = db.execute(
-        select(Task).where(
-            Task.workspace_id == workspace_id,
-            Task.project_id == normalized_project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-        )
-        .order_by(Task.created_at.asc())
-    ).scalars().all()
+    member_role_by_user_id = runtime_context.member_role_by_user_id
+    tasks = runtime_context.tasks
 
     def _task_instruction(task: Task) -> str:
         return str(task.instruction or "").strip() or str(task.scheduled_instruction or "").strip()
@@ -174,25 +125,12 @@ def maybe_dispatch_execution_kickoff(
         task_id = str(task.id or "").strip()
         if not task_id:
             continue
-        try:
-            state, _version = rebuild_state(db, "Task", task_id)
-        except Exception:
-            state = {}
-        task_state_by_id[task_id] = dict(state) if isinstance(state, dict) else {}
+        task_state_by_id[task_id] = runtime_context.task_state(task_id)
         automation_state = str((task_state_by_id.get(task_id) or {}).get("automation_state") or "idle").strip().lower()
         if automation_state in {"queued", "running"}:
             active_task_ids_before_dispatch.append(task_id)
 
-        normalized_role = derive_task_role(
-            task_like={
-                "assignee_id": str(task.assignee_id or "").strip(),
-                "assigned_agent_code": str(task.assigned_agent_code or "").strip(),
-                "labels": task.labels,
-                "status": str(task.status or "").strip(),
-            },
-            member_role_by_user_id=member_role_by_user_id,
-            agent_role_by_code=agent_role_by_code,
-        )
+        normalized_role = runtime_context.derive_workflow_role(task=task)
         if normalized_role not in TEAM_MODE_WORKFLOW_ROLES:
             continue
         normalized_status = str(task.status or "").strip()
@@ -476,8 +414,6 @@ def maybe_dispatch_execution_kickoff(
                     db=verify_db,
                     workspace_id=workspace_id,
                     project_id=normalized_project_id,
-                    member_role_by_user_id=member_role_by_user_id,
-                    agent_role_by_code=agent_role_by_code,
                 )
         except Exception as exc:  # pragma: no cover
             kickoff_processing_error = str(exc)[:300]
