@@ -10,6 +10,7 @@ import signal
 from pathlib import Path
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import lru_cache
 
 from sqlalchemy import select
 
@@ -964,6 +965,96 @@ def _sanitize_prompt_segment_chars(raw_value: object) -> dict[str, int]:
     return out
 
 
+def _sanitize_skill_trace(raw_value: object) -> list[dict[str, str]]:
+    if not isinstance(raw_value, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in raw_value:
+        if not isinstance(item, dict):
+            continue
+        skill_key = str(item.get("skill_key") or "").strip()
+        name = str(item.get("name") or "").strip()
+        mode = str(item.get("mode") or "").strip().lower()
+        trust_level = str(item.get("trust_level") or "").strip().lower()
+        reason = str(item.get("reason") or "").strip()
+        source_locator = str(item.get("source_locator") or "").strip()
+        if not skill_key and not name:
+            continue
+        out.append(
+            {
+                "skill_key": skill_key,
+                "name": name or skill_key,
+                "mode": mode,
+                "trust_level": trust_level,
+                "reason": reason,
+                "source_locator": source_locator,
+            }
+        )
+    return out
+
+
+def _sanitize_non_negative_float(value: object) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric < 0:
+        return None
+    return numeric
+
+
+@lru_cache(maxsize=1)
+def _load_usage_cost_rate_card() -> dict[str, object]:
+    raw = str(os.getenv("AGENT_USAGE_COST_RATE_CARD_JSON", "")).strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _estimate_usage_cost_usd_from_rate_card(
+    *,
+    usage_raw: dict[str, object],
+    provider: str,
+    model: str,
+) -> float | None:
+    rate_card = _load_usage_cost_rate_card()
+    provider_table_raw = rate_card.get(provider) if isinstance(rate_card, dict) else None
+    provider_table = dict(provider_table_raw) if isinstance(provider_table_raw, dict) else {}
+    model_key = str(model or "").strip()
+    rate_row_raw = provider_table.get(model_key) if model_key else None
+    if not isinstance(rate_row_raw, dict):
+        rate_row_raw = provider_table.get("*")
+    rate_row = dict(rate_row_raw) if isinstance(rate_row_raw, dict) else {}
+    if not rate_row:
+        return None
+
+    input_rate = _sanitize_non_negative_float(rate_row.get("input_per_1k"))
+    cached_input_rate = _sanitize_non_negative_float(rate_row.get("cached_input_per_1k"))
+    output_rate = _sanitize_non_negative_float(rate_row.get("output_per_1k"))
+    if input_rate is None and cached_input_rate is None and output_rate is None:
+        return None
+
+    input_tokens = max(0, int(usage_raw.get("input_tokens") or 0))
+    cached_input_tokens = max(0, int(usage_raw.get("cached_input_tokens") or 0))
+    output_tokens = max(0, int(usage_raw.get("output_tokens") or 0))
+    billable_input_tokens = max(0, input_tokens - cached_input_tokens)
+
+    estimated = 0.0
+    if input_rate is not None:
+        estimated += (float(billable_input_tokens) / 1000.0) * float(input_rate)
+    if cached_input_rate is not None:
+        estimated += (float(cached_input_tokens) / 1000.0) * float(cached_input_rate)
+    if output_rate is not None:
+        estimated += (float(output_tokens) / 1000.0) * float(output_rate)
+    if estimated <= 0:
+        return None
+    return round(estimated, 8)
+
+
 def build_automation_usage_metadata(outcome: AutomationOutcome) -> dict[str, object]:
     usage_raw = outcome.usage if isinstance(outcome.usage, dict) else {}
     usage: dict[str, object] = {}
@@ -992,6 +1083,34 @@ def build_automation_usage_metadata(outcome: AutomationOutcome) -> dict[str, obj
     frame_revision = str(usage_raw.get("graph_context_frame_revision") or "").strip()
     if frame_revision:
         usage["graph_context_frame_revision"] = frame_revision
+    execution_provider = str(usage_raw.get("execution_provider") or "").strip().lower()
+    if execution_provider:
+        usage["execution_provider"] = execution_provider
+    execution_model = str(usage_raw.get("execution_model") or "").strip()
+    if execution_model:
+        usage["execution_model"] = execution_model
+    cost_usd = _sanitize_non_negative_float(
+        usage_raw.get("total_cost_usd")
+        if usage_raw.get("total_cost_usd") is not None
+        else usage_raw.get("cost_usd")
+    )
+    cost_estimated = False
+    if cost_usd is None and execution_provider:
+        estimated_cost = _estimate_usage_cost_usd_from_rate_card(
+            usage_raw=usage_raw,
+            provider=execution_provider,
+            model=execution_model,
+        )
+        if estimated_cost is not None:
+            cost_usd = estimated_cost
+            cost_estimated = True
+    if cost_usd is not None:
+        usage["cost_usd"] = cost_usd
+        usage["cost_estimated_from_rate_card"] = bool(cost_estimated)
+    skill_trace = _sanitize_skill_trace(usage_raw.get("project_skill_trace"))
+    if skill_trace:
+        usage["project_skill_trace"] = skill_trace
+        usage["project_skill_trace_count"] = len(skill_trace)
 
     codex_session_id = str(outcome.codex_session_id or "").strip() or None
     payload: dict[str, object] = {

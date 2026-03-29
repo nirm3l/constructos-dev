@@ -94,6 +94,42 @@ It is also grounded against the current ConstructOS implementation, especially:
 | Governance hooks | Guardrails stop orchestrator from doing worker work directly | Plugin checks and task role semantics exist | Partially adopt where it improves chat/runtime boundaries |
 | tmux/CLI team runtime | Real worker panes and local session files | Server-side automation runner and MCP tools | Do not copy directly |
 
+## Marketing Claims Reality Check (Code-Verified)
+
+This section validates the additional "Why oh-my-claudecode?" claims against actual implementation.
+
+### Core Claims
+
+| Claim | Code Reality | Evidence | ConstructOS Adoption |
+| --- | --- | --- | --- |
+| Zero configuration required | Mostly true for local defaults; still has optional config + env tuning | `src/config/loader.ts` (`buildDefaultConfig`, deep merge, env overrides) | Adopt: keep starter-first defaults, remove optional setup friction where possible |
+| Team-first orchestration | True; team pipeline and runtime are first-class | `src/hooks/team-pipeline/types.ts`, `src/team/runtime-v2.ts`, `src/cli/team.ts` | Adopt strongly at persisted run/session layer |
+| Natural language interface | Partial; there is keyword and skill routing, with explicit-only Team trigger now | `src/hooks/keyword-detector/index.ts` (team keyword disabled, explicit `/team`) | Adopt intent classification via structured LLM outputs, not keyword routing |
+| Automatic parallelization | True in Team runtime and monitor loops | `src/team/task-router.ts`, `src/team/runtime-v2.ts` (`Promise.all` worker scanning) | Adopt via backend dispatcher + role capacity planner |
+| Persistent execution until complete | True with stop-hook continuation and verify/fix loops | `src/hooks/persistent-mode/index.ts`, `src/hooks/ralph/loop.ts`, `src/hooks/ralph/verifier.ts` | Adopt strongly with bounded retries and explicit failure reasons |
+| Cost optimization (30-50%) | Partial; routing and usage telemetry exist, percentage claim is not code-verifiable | `src/config/loader.ts` (routing), `src/team/usage-tracker.ts`, `src/hud/usage-api.ts` | Adopt usage-based routing and budgets; do not promise fixed savings |
+| Learn from experience | True; auto-learner detects reusable patterns | `src/hooks/learner/auto-learner.ts` | Adopt by extending existing project/workspace skills and trigger matching |
+| Real-time visibility (HUD) | True; dedicated HUD state/render/watch system exists | `src/hud/index.ts`, `src/hud/state.ts`, `src/cli/hud-watch.ts` | Adopt as web runtime board and SSE updates, not terminal HUD clone |
+
+### Orchestration Modes
+
+| Claimed Mode | Code Reality | Evidence | ConstructOS Decision |
+| --- | --- | --- | --- |
+| Team (team-plan -> team-prd -> team-exec -> team-verify -> team-fix) | Implemented | `src/hooks/team-pipeline/types.ts`, `src/hooks/team-pipeline/transitions.ts` | Keep equivalent phases in persisted execution sessions |
+| `omc team` CLI (tmux workers) | Implemented | `src/cli/team.ts`, `src/team/runtime-v2.ts`, `src/team/tmux-session.ts` | Do not copy tmux runtime |
+| CCG (Claude/Codex/Gemini advisory surface) | Partially implemented (keyword and routing surface present) | `src/hooks/keyword-detector/index.ts` (`ccg`), `src/team/model-contract.ts` | Adopt multi-model routing through existing backend runner contracts |
+| Autopilot | Implemented | `src/hooks/autopilot/*` | Adopt as optional execution profile inside existing orchestration |
+| Ultrawork | Implemented | `src/hooks/ultrawork/index.ts`, persistent-mode integration | Adopt only as controlled high-parallel profile |
+| Ralph | Implemented | `src/hooks/ralph/*`, `src/hooks/persistent-mode/index.ts` | Adopt verify/fix pattern, not brand/magic keyword UX |
+| Pipeline | Deprecated alias/legacy references remain | `src/lib/mode-names.ts` (`DEPRECATED_MODE_NAMES.PIPELINE`) | No adoption as standalone mode |
+| Ultrapilot | Deprecated | `src/lib/mode-names.ts` (`DEPRECATED_MODE_NAMES.ULTRAPILOT`) | No adoption |
+
+### Specialized Agents Claim
+
+- The "32 specialized agents" claim is not reflected in current source layout as a stable 32-agent runtime inventory.
+- Current explicit core agent definitions are materially fewer and concentrated in `src/agents/*` plus Team role routing surfaces.
+- For ConstructOS, the correct target is not raw agent count; it is deterministic role coverage + observable ownership + policy-safe dispatch.
+
 ## Team Mode: What Stays And What Changes
 
 ### What Should Stay

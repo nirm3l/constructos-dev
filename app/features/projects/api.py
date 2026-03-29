@@ -13,6 +13,10 @@ from features.agents.gates import run_runtime_deploy_health_check
 from features.agents.gates import plugin_check_catalog_by_scope
 from features.agents.gateway import build_ui_gateway
 from plugins.team_mode.runtime_snapshot import build_team_mode_runtime_snapshot
+from plugins.team_mode.execution_sessions import (
+    get_latest_team_mode_execution_session,
+    serialize_team_mode_execution_session,
+)
 from shared.core import (
     Project,
     ProjectCreate,
@@ -843,6 +847,9 @@ def project_checks_verify(
 ):
     with SessionLocal() as db:
         project_execution_snapshot = _project_execution_gate_snapshot(db=db, user=user, project_id=project_id)
+        latest_execution_session = serialize_team_mode_execution_session(
+            get_latest_team_mode_execution_session(db=db, project_id=project_id)
+        )
     gateway = build_ui_gateway(actor_user_id=user.id)
     team_mode = gateway.verify_team_mode_workflow(project_id=project_id)
     delivery = gateway.verify_delivery_workflow(project_id=project_id)
@@ -851,6 +858,7 @@ def project_checks_verify(
         "team_mode": team_mode,
         "team_mode_runtime": project_execution_snapshot.get("team_mode_runtime") or {"active": False, "agents": [], "tasks": [], "summary": {}},
         "delivery": delivery,
+        "team_mode_execution_session": latest_execution_session,
         "execution_gates": project_execution_snapshot.get("execution_gates") or {"tasks": [], "totals": {}},
         "workflow_communication": project_execution_snapshot.get("workflow_communication")
         or {"events": [], "totals": {}, "events_total": 0},

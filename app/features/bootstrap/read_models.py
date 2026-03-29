@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from features.agents.execution_provider import encode_execution_model, parse_execution_model
-from features.agents.model_registry import list_available_agent_models
+from features.agents.model_registry import list_available_agent_models, model_registry_cache_status
 from features.agents.provider_auth import resolve_provider_effective_auth_source
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from features.agents.mcp_registry import list_available_mcp_servers
+from features.agents.mcp_registry import list_available_mcp_servers, mcp_registry_cache_status
+from features.bootstrap.cache import bootstrap_cache_status, clear_bootstrap_cache, get_or_compute_bootstrap_cache
 from shared.models import (
     Notification,
     Project,
@@ -32,6 +34,53 @@ from shared.settings import (
     agent_default_reasoning_effort_for_provider,
 )
 from shared.vector_store import normalize_embedding_model, project_embedding_index_snapshot, vector_store_enabled
+
+
+def _load_positive_float_env(name: str, default: float) -> float:
+    raw = str(os.getenv(name, "")).strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except Exception:
+        return default
+    if value <= 0:
+        return default
+    return value
+
+
+_BOOTSTRAP_DISCOVERY_CACHE_TTL_SECONDS = _load_positive_float_env("BOOTSTRAP_DISCOVERY_CACHE_TTL_SECONDS", 30.0)
+_BOOTSTRAP_DISCOVERY_CACHE_KEY = "bootstrap_discovery_registry"
+
+
+def _clear_bootstrap_discovery_cache_for_tests() -> None:
+    clear_bootstrap_cache(key=_BOOTSTRAP_DISCOVERY_CACHE_KEY)
+
+
+def _bootstrap_discovery_snapshot(*, force_refresh: bool = False) -> dict[str, Any]:
+    def _compute() -> dict[str, Any]:
+        discovered_agent_chat_models, discovered_default_agent_chat_model = list_available_agent_models(
+            allow_runtime_discovery=False
+        )
+        agent_chat_available_mcp_servers = list_available_mcp_servers(include_codex_cli=False)
+        return {
+            "discovered_agent_chat_models": list(discovered_agent_chat_models),
+            "discovered_default_agent_chat_model": str(discovered_default_agent_chat_model or "").strip(),
+            "agent_chat_available_mcp_servers": list(agent_chat_available_mcp_servers),
+            "cache_ttl_seconds": float(_BOOTSTRAP_DISCOVERY_CACHE_TTL_SECONDS),
+            "model_registry": model_registry_cache_status(),
+            "mcp_registry": mcp_registry_cache_status(),
+        }
+
+    snapshot, cache_hit = get_or_compute_bootstrap_cache(
+        key=_BOOTSTRAP_DISCOVERY_CACHE_KEY,
+        ttl_seconds=_BOOTSTRAP_DISCOVERY_CACHE_TTL_SECONDS,
+        force_refresh=force_refresh,
+        compute=_compute,
+    )
+    snapshot["cache_hit"] = bool(cache_hit)
+    snapshot["cache_status"] = bootstrap_cache_status(key=_BOOTSTRAP_DISCOVERY_CACHE_KEY)
+    return snapshot
 
 
 def _normalize_reasoning_effort(raw: object) -> str:
@@ -193,7 +242,9 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             }
         )
     vector_enabled = bool(vector_store_enabled())
-    discovered_agent_chat_models, discovered_default_agent_chat_model = list_available_agent_models()
+    discovery_snapshot = _bootstrap_discovery_snapshot()
+    discovered_agent_chat_models = list(discovery_snapshot.get("discovered_agent_chat_models") or [])
+    discovered_default_agent_chat_model = str(discovery_snapshot.get("discovered_default_agent_chat_model") or "").strip()
     preferred_default_provider = _resolve_available_default_provider()
     default_agent_chat_model = _normalize_agent_chat_model(
         agent_default_model_for_provider(preferred_default_provider)
@@ -229,7 +280,26 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
         default_embedding_model = embedding_models[0]
     if not embedding_models and default_embedding_model:
         embedding_models = [default_embedding_model]
-    agent_chat_available_mcp_servers = list_available_mcp_servers()
+    agent_chat_available_mcp_servers = list(discovery_snapshot.get("agent_chat_available_mcp_servers") or [])
+    agent_chat_registry_debug = {
+        "cache_hit": bool(discovery_snapshot.get("cache_hit")),
+        "cache_ttl_seconds": float(discovery_snapshot.get("cache_ttl_seconds") or _BOOTSTRAP_DISCOVERY_CACHE_TTL_SECONDS),
+        "cache_status": (
+            dict(discovery_snapshot.get("cache_status") or {})
+            if isinstance(discovery_snapshot.get("cache_status"), dict)
+            else {}
+        ),
+        "model_registry": (
+            dict(discovery_snapshot.get("model_registry") or {})
+            if isinstance(discovery_snapshot.get("model_registry"), dict)
+            else {}
+        ),
+        "mcp_registry": (
+            dict(discovery_snapshot.get("mcp_registry") or {})
+            if isinstance(discovery_snapshot.get("mcp_registry"), dict)
+            else {}
+        ),
+    }
     return {
         "current_user": {
             "id": user.id,
@@ -255,6 +325,7 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
         "agent_chat_default_reasoning_effort": default_agent_chat_reasoning_effort,
         "agent_chat_available_models": agent_chat_available_models,
         "agent_chat_available_mcp_servers": agent_chat_available_mcp_servers,
+        "agent_chat_registry_debug": agent_chat_registry_debug,
         # Backward-compatible mirror for older UI bundles reading bootstrap.config.*
         "config": {
             "embedding_allowed_models": embedding_models,
@@ -266,6 +337,7 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             "agent_chat_default_reasoning_effort": default_agent_chat_reasoning_effort,
             "agent_chat_available_models": agent_chat_available_models,
             "agent_chat_available_mcp_servers": agent_chat_available_mcp_servers,
+            "agent_chat_registry_debug": agent_chat_registry_debug,
         },
         "users": [{"id": u.id, "username": u.username, "full_name": u.full_name, "user_type": u.user_type} for u in users],
         "project_members": [

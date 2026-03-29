@@ -383,7 +383,11 @@ def list_available_opencode_models(*, force_refresh: bool = False) -> tuple[list
         return copy.deepcopy(_CACHE_OPENCODE_MODELS), _CACHE_OPENCODE_DEFAULT_MODEL
 
 
-def list_available_agent_models(*, force_refresh: bool = False) -> tuple[list[str], str]:
+def list_available_agent_models(
+    *,
+    force_refresh: bool = False,
+    allow_runtime_discovery: bool = True,
+) -> tuple[list[str], str]:
     combined: list[str] = []
     seen: set[str] = set()
 
@@ -397,13 +401,17 @@ def list_available_agent_models(*, force_refresh: bool = False) -> tuple[list[st
         seen.add(key)
         combined.append(encoded)
 
-    codex_models, codex_default = list_available_codex_models(force_refresh=force_refresh)
+    if allow_runtime_discovery:
+        codex_models, codex_default = list_available_codex_models(force_refresh=force_refresh)
+        opencode_models, opencode_default = list_available_opencode_models(force_refresh=force_refresh)
+    else:
+        codex_models, codex_default = _load_codex_models_from_env()
+        opencode_models, opencode_default = _load_opencode_models_from_env()
     for model in codex_models:
         _append("codex", model)
     claude_models, claude_default = list_available_claude_models()
     for model in claude_models:
         _append("claude", model)
-    opencode_models, opencode_default = list_available_opencode_models(force_refresh=force_refresh)
     for model in opencode_models:
         _append("opencode", model)
 
@@ -417,3 +425,23 @@ def list_available_agent_models(*, force_refresh: bool = False) -> tuple[list[st
     elif combined:
         default_model = combined[0]
     return combined, default_model
+
+
+def model_registry_cache_status() -> dict[str, object]:
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        codex_expires_in = max(0.0, float(_CACHE_EXPIRES_AT or 0.0) - now) if _CACHE_EXPIRES_AT else 0.0
+        opencode_expires_in = (
+            max(0.0, float(_CACHE_OPENCODE_EXPIRES_AT or 0.0) - now) if _CACHE_OPENCODE_EXPIRES_AT else 0.0
+        )
+        codex_count = len(_CACHE_CODEX_MODELS)
+        opencode_count = len(_CACHE_OPENCODE_MODELS)
+    return {
+        "codex_cache_ttl_seconds": float(_CACHE_TTL_SECONDS),
+        "opencode_cache_ttl_seconds": float(_OPENCODE_CACHE_TTL_SECONDS),
+        "codex_list_timeout_seconds": float(_MODEL_LIST_TIMEOUT_SECONDS),
+        "codex_cached_model_count": int(codex_count),
+        "opencode_cached_model_count": int(opencode_count),
+        "codex_cache_expires_in_seconds": round(codex_expires_in, 3),
+        "opencode_cache_expires_in_seconds": round(opencode_expires_in, 3),
+    }

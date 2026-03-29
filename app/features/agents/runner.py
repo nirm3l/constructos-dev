@@ -3073,6 +3073,25 @@ def _effective_blocked_status_for_project(
     return runtime_context.blocked_status or "Blocked"
 
 
+def _effective_active_status_for_project(
+    *,
+    db,
+    workspace_id: str,
+    project_id: str | None,
+) -> str:
+    normalized_project_id = str(project_id or "").strip()
+    if not workspace_id or not normalized_project_id:
+        return REQUIRED_SEMANTIC_STATUSES["active"]
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
+    if not runtime_context.enabled:
+        return REQUIRED_SEMANTIC_STATUSES["active"]
+    return str(runtime_context.status_semantics.get("active") or REQUIRED_SEMANTIC_STATUSES["active"]).strip()
+
+
 def _should_resume_team_mode_agent_task_as_active(*, assignee_role: str | None, status: str | None) -> bool:
     if canonicalize_role(assignee_role) not in {"Developer", "Lead", "QA"}:
         return False
@@ -6604,11 +6623,17 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                     "Lead handoff failed: no runnable QA task was queued after merge/deploy cycle."
                 )
             lead_transition = lead_deploy_success_transition()
+            lead_active_status = _effective_active_status_for_project(
+                db=db,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
             _emit_task_patch_via_handler(
                 db=db,
                 actor_user_id=actor_user_id,
                 task_id=run.task_id,
                 changes={
+                    "status": lead_active_status,
                     **_team_mode_progress_payload(phase=str(lead_transition.get("phase") or "qa_validation")),
                     "last_deploy_execution": state.get("last_deploy_execution"),
                     "last_deploy_cycle_id": deploy_cycle_id,
@@ -6622,6 +6647,7 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 },
             )
             state = dict(state)
+            state["status"] = lead_active_status
             state["team_mode_phase"] = str(lead_transition.get("phase") or "qa_validation")
             state["last_deploy_cycle_id"] = deploy_cycle_id
             state["deploy_lock_id"] = deploy_lock_id

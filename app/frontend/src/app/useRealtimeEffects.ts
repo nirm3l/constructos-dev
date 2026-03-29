@@ -39,6 +39,8 @@ export function useRealtimeEffects(c: any) {
   const chatLiveResumeAbortRef = React.useRef<AbortController | null>(null)
   const shouldStickChatToBottomRef = React.useRef(true)
   const lastRealtimeRefreshAtRef = React.useRef(0)
+  const bootstrapRefreshTimerRef = React.useRef<number | null>(null)
+  const lastBootstrapRefreshAtRef = React.useRef(0)
   const isChatNearBottom = React.useCallback((el: HTMLDivElement) => {
     const distanceToBottom = el.scrollHeight - el.clientHeight - el.scrollTop
     return distanceToBottom <= CHAT_NEAR_BOTTOM_THRESHOLD_PX
@@ -72,6 +74,19 @@ export function useRealtimeEffects(c: any) {
       realtimeRefreshTimerRef.current = null
     }, 250)
   }, [qc, realtimeRefreshTimerRef, selectedProjectId, selectedTaskId, userId])
+
+  const scheduleBootstrapRefresh = React.useCallback(() => {
+    const now = Date.now()
+    if (now - lastBootstrapRefreshAtRef.current < 1500) return
+    if (bootstrapRefreshTimerRef.current !== null) {
+      window.clearTimeout(bootstrapRefreshTimerRef.current)
+    }
+    bootstrapRefreshTimerRef.current = window.setTimeout(() => {
+      lastBootstrapRefreshAtRef.current = Date.now()
+      qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+      bootstrapRefreshTimerRef.current = null
+    }, 220)
+  }, [qc, userId])
 
   const parseTimestampMs = React.useCallback((value: string | null | undefined, fallback: number): number => {
     const parsed = Date.parse(String(value || ''))
@@ -173,8 +188,11 @@ export function useRealtimeEffects(c: any) {
       if (realtimeRefreshTimerRef.current !== null) {
         window.clearTimeout(realtimeRefreshTimerRef.current)
       }
+      if (bootstrapRefreshTimerRef.current !== null) {
+        window.clearTimeout(bootstrapRefreshTimerRef.current)
+      }
     }
-  }, [realtimeRefreshTimerRef])
+  }, [bootstrapRefreshTimerRef, realtimeRefreshTimerRef])
 
   React.useEffect(() => {
     return () => {
@@ -444,7 +462,7 @@ export function useRealtimeEffects(c: any) {
         || actionLower.includes('project_updated')
         || actionLower.includes('project_deleted')
       if (isProjectLifecycleEvent) {
-        qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+        scheduleBootstrapRefresh()
       }
       if (projectId && selectedProjectId && projectId !== selectedProjectId) {
         if (isProjectLifecycleEvent) return
@@ -457,7 +475,7 @@ export function useRealtimeEffects(c: any) {
         selectedProjectId &&
         projectId === selectedProjectId
       ) {
-        qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+        scheduleBootstrapRefresh()
         return
       }
       scheduleRealtimeRefresh()
@@ -503,7 +521,7 @@ export function useRealtimeEffects(c: any) {
       es.removeEventListener('auth_event', onAuthEvent as EventListener)
       es.close()
     }
-  }, [qc, scheduleRealtimeRefresh, selectedProjectId, setCodexChatLastTaskEventAt, showCodexChat, tab, userId, workspaceId])
+  }, [qc, scheduleBootstrapRefresh, scheduleRealtimeRefresh, selectedProjectId, setCodexChatLastTaskEventAt, showCodexChat, tab, userId, workspaceId])
 
   React.useEffect(() => {
     if (!isCodexChatRunning || !codexChatRunStartedAt) return

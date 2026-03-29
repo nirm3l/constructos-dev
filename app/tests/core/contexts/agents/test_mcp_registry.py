@@ -72,8 +72,15 @@ def test_list_available_mcp_servers_returns_stale_cache_while_refreshing(monkeyp
     assert elapsed < 0.2
     assert payload and payload[0]["auth_status"] is None
     assert refresh_called.wait(timeout=1.0) is True
+    status_during_refresh = mcp_registry.mcp_registry_cache_status()
+    assert isinstance(status_during_refresh.get("stale_serve_count"), int)
+    assert status_during_refresh.get("stale_serve_count", 0) >= 1
 
     # Give the background refresh a moment to commit cache.
     time.sleep(0.35)
     refreshed_payload = mcp_registry.list_available_mcp_servers()
     assert refreshed_payload and refreshed_payload[0]["auth_status"] == "ok"
+    status_after_refresh = mcp_registry.mcp_registry_cache_status()
+    assert isinstance(status_after_refresh.get("refresh_count"), int)
+    assert status_after_refresh.get("refresh_count", 0) >= 1
+    assert status_after_refresh.get("cache_refresh_in_progress") in {True, False}

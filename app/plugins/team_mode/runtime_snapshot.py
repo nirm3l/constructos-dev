@@ -25,6 +25,20 @@ def _normalize_parallel_limit(value: Any) -> int:
     return max(1, min(normalized, int(AGENT_RUNNER_MAX_CONCURRENCY)))
 
 
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 0
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
+
 def _dependency_statuses(relationship: dict[str, Any]) -> set[str]:
     raw_statuses = relationship.get("statuses")
     if not isinstance(raw_statuses, list):
@@ -89,27 +103,36 @@ def _task_runtime_state(
     task: dict[str, Any],
     dependency_ready: bool,
     dependency_reason: str | None,
-) -> tuple[str, str | None, bool]:
+) -> tuple[str, str | None, str | None, bool]:
     role = str(task.get("role") or "").strip()
     semantic = str(task.get("semantic_status") or "").strip()
     automation_state = str(task.get("automation_state") or "idle").strip().lower()
     has_instruction = bool(task.get("has_instruction"))
     dispatch_ready = bool(task.get("dispatch_ready", True))
     if role not in TEAM_MODE_WORKFLOW_ROLES:
-        return "out_of_scope", "task is not assigned to a Team Mode workflow role", False
+        return "out_of_scope", "task is not assigned to a Team Mode workflow role", "out_of_scope", False
     if automation_state in {"queued", "running"}:
-        return "active", None, False
+        return "active", None, None, False
+    # Terminal tasks should never be represented as runtime-blocked, even if
+    # historical dependency metadata no longer validates post-completion.
+    if semantic == "completed":
+        return "waiting", None, None, False
     if not has_instruction:
-        return "missing_instruction", "task has no instruction", False
+        return "missing_instruction", "task has no instruction", "missing_instruction", False
     if not dispatch_ready:
-        return "waiting", "task is not dispatch-ready", False
+        return "waiting", "task is not dispatch-ready", "dispatch_not_ready", False
     if not dependency_ready:
-        return "blocked", dependency_reason or "task is blocked by dependencies", False
+        return "blocked", dependency_reason or "task is blocked by dependencies", "dependency_not_satisfied", False
     if role in {"Developer", "Lead"} and semantic not in {"todo", "active", "blocked"}:
-        return "waiting", f"{role} tasks run only from To Do/In Progress/Blocked semantic states", False
+        return (
+            "waiting",
+            f"{role} tasks run only from To Do/In Progress/Blocked semantic states",
+            "status_semantics_mismatch",
+            False,
+        )
     if role == "QA" and semantic not in {"active", "blocked"}:
-        return "waiting", "QA tasks run only from In Progress/Blocked semantic states", False
-    return "runnable", None, True
+        return "waiting", "QA tasks run only from In Progress/Blocked semantic states", "status_semantics_mismatch", False
+    return "runnable", None, None, True
 
 
 def build_team_mode_runtime_snapshot(*, db: Session, user: Any, project_id: str) -> dict[str, Any]:
@@ -194,6 +217,16 @@ def build_team_mode_runtime_snapshot(*, db: Session, user: Any, project_id: str)
             "Lead": {"total": 0, "active": 0, "runnable": 0, "blocked": 0},
             "QA": {"total": 0, "active": 0, "runnable": 0, "blocked": 0},
         },
+        "usage_totals": {
+            "tasks_with_usage": 0,
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+            "by_provider": {},
+            "by_model": {},
+            "tasks_with_skill_trace": 0,
+        },
     }
     planned_load_by_agent_code = (
         runtime_context.active_agent_load_by_code(agents=team_agents)
@@ -201,7 +234,7 @@ def build_team_mode_runtime_snapshot(*, db: Session, user: Any, project_id: str)
 
     for task in base_tasks:
         dependency_ready, dependency_reason = _task_dependency_ready(task=task, task_by_id=task_by_id)
-        runtime_state, blocker_reason, runnable = _task_runtime_state(
+        runtime_state, blocker_reason, blocker_code, runnable = _task_runtime_state(
             task=task,
             dependency_ready=dependency_ready,
             dependency_reason=dependency_reason,
@@ -210,7 +243,40 @@ def build_team_mode_runtime_snapshot(*, db: Session, user: Any, project_id: str)
         task["dependency_reason"] = dependency_reason
         task["runtime_state"] = runtime_state
         task["blocker_reason"] = blocker_reason
+        task["blocker_code"] = blocker_code
         task["runnable"] = runnable
+        last_usage = automation_status.get("last_agent_usage") if isinstance(automation_status, dict) else {}
+        usage_payload = dict(last_usage or {}) if isinstance(last_usage, dict) else {}
+        usage_input_tokens = _safe_int(usage_payload.get("input_tokens") or 0)
+        usage_cached_input_tokens = _safe_int(usage_payload.get("cached_input_tokens") or 0)
+        usage_output_tokens = _safe_int(usage_payload.get("output_tokens") or 0)
+        usage_provider = str(usage_payload.get("execution_provider") or "").strip().lower() or None
+        usage_model = str(usage_payload.get("execution_model") or "").strip() or None
+        usage_cost_usd = _safe_float(usage_payload.get("cost_usd") or 0.0)
+        usage_skill_trace_count = _safe_int(usage_payload.get("project_skill_trace_count") or 0)
+        task["usage_input_tokens"] = max(0, usage_input_tokens)
+        task["usage_cached_input_tokens"] = max(0, usage_cached_input_tokens)
+        task["usage_output_tokens"] = max(0, usage_output_tokens)
+        task["usage_provider"] = usage_provider
+        task["usage_model"] = usage_model
+        task["usage_cost_usd"] = max(0.0, usage_cost_usd)
+        task["usage_skill_trace_count"] = max(0, usage_skill_trace_count)
+        has_usage = bool(task["usage_input_tokens"] or task["usage_cached_input_tokens"] or task["usage_output_tokens"])
+        if has_usage:
+            usage_totals = summary["usage_totals"]
+            usage_totals["tasks_with_usage"] = int(usage_totals["tasks_with_usage"]) + 1
+            usage_totals["input_tokens"] = int(usage_totals["input_tokens"]) + int(task["usage_input_tokens"])
+            usage_totals["cached_input_tokens"] = int(usage_totals["cached_input_tokens"]) + int(task["usage_cached_input_tokens"])
+            usage_totals["output_tokens"] = int(usage_totals["output_tokens"]) + int(task["usage_output_tokens"])
+            usage_totals["cost_usd"] = float(usage_totals.get("cost_usd") or 0.0) + float(task["usage_cost_usd"])
+            if usage_provider:
+                by_provider = usage_totals["by_provider"]
+                by_provider[usage_provider] = int(by_provider.get(usage_provider) or 0) + 1
+            if usage_model:
+                by_model = usage_totals["by_model"]
+                by_model[usage_model] = int(by_model.get(usage_model) or 0) + 1
+        if task["usage_skill_trace_count"] > 0:
+            summary["usage_totals"]["tasks_with_skill_trace"] = int(summary["usage_totals"]["tasks_with_skill_trace"]) + 1
         if not str(task.get("dispatch_slot") or "").strip() and str(task.get("role") or "").strip() in TEAM_MODE_WORKFLOW_ROLES:
             selected_agent = pick_agent_for_role(
                 agents=team_agents,
@@ -272,28 +338,52 @@ def build_team_mode_runtime_snapshot(*, db: Session, user: Any, project_id: str)
     }
     dispatch_ids = {str(item or "").strip() for item in list(dispatch.get("queue_task_ids") or []) if str(item or "").strip()}
     kickoff_ids = {str(item or "").strip() for item in list(kickoff.get("kickoff_task_ids") or []) if str(item or "").strip()}
+    runnable_task_ids = {
+        str(task.get("id") or "").strip()
+        for task in base_tasks
+        if bool(task.get("runnable")) and str(task.get("id") or "").strip()
+    }
+    sanitized_dispatch_ids = dispatch_ids.intersection(runnable_task_ids)
+    sanitized_kickoff_ids = kickoff_ids.intersection(runnable_task_ids)
+    if sanitized_dispatch_ids != dispatch_ids:
+        dispatch["queue_task_ids"] = [
+            str(item or "").strip()
+            for item in list(dispatch.get("queue_task_ids") or [])
+            if str(item or "").strip() in sanitized_dispatch_ids
+        ]
+    if sanitized_kickoff_ids != kickoff_ids:
+        kickoff["kickoff_task_ids"] = [
+            str(item or "").strip()
+            for item in list(kickoff.get("kickoff_task_ids") or [])
+            if str(item or "").strip() in sanitized_kickoff_ids
+        ]
     for task in base_tasks:
-        task["selected_for_dispatch"] = str(task.get("id") or "").strip() in dispatch_ids
-        task["selected_for_kickoff"] = str(task.get("id") or "").strip() in kickoff_ids
+        task["selected_for_dispatch"] = str(task.get("id") or "").strip() in sanitized_dispatch_ids
+        task["selected_for_kickoff"] = str(task.get("id") or "").strip() in sanitized_kickoff_ids
 
-    now_task_ids = [
-        str(task.get("id") or "").strip()
-        for task in base_tasks
-        if str(task.get("runtime_state") or "").strip() == "active"
-        or bool(task.get("selected_for_dispatch"))
-    ]
-    now_task_id_set = {task_id for task_id in now_task_ids if task_id}
-    next_task_ids = [
-        str(task.get("id") or "").strip()
-        for task in base_tasks
-        if str(task.get("runtime_state") or "").strip() == "runnable"
-        and str(task.get("id") or "").strip() not in now_task_id_set
-    ]
-    blocked_task_ids = [
-        str(task.get("id") or "").strip()
-        for task in base_tasks
-        if str(task.get("runtime_state") or "").strip() in {"blocked", "missing_instruction"}
-    ]
+    now_task_id_set: set[str] = set()
+    next_task_id_set: set[str] = set()
+    blocked_task_id_set: set[str] = set()
+    for task in base_tasks:
+        task_id = str(task.get("id") or "").strip()
+        if not task_id:
+            continue
+        runtime_state = str(task.get("runtime_state") or "").strip()
+        is_selected_for_dispatch = bool(task.get("selected_for_dispatch"))
+        if runtime_state == "active" or is_selected_for_dispatch:
+            now_task_id_set.add(task_id)
+            continue
+        if runtime_state in {"blocked", "missing_instruction"}:
+            blocked_task_id_set.add(task_id)
+            continue
+        if runtime_state == "runnable":
+            next_task_id_set.add(task_id)
+    next_task_id_set.difference_update(now_task_id_set)
+    blocked_task_id_set.difference_update(now_task_id_set)
+    blocked_task_id_set.difference_update(next_task_id_set)
+    now_task_ids = [task_id for task_id in (str(task.get("id") or "").strip() for task in base_tasks) if task_id in now_task_id_set]
+    next_task_ids = [task_id for task_id in (str(task.get("id") or "").strip() for task in base_tasks) if task_id in next_task_id_set]
+    blocked_task_ids = [task_id for task_id in (str(task.get("id") or "").strip() for task in base_tasks) if task_id in blocked_task_id_set]
     summary["focus"] = {
         "now_task_ids": now_task_ids[:12],
         "next_task_ids": next_task_ids[:12],

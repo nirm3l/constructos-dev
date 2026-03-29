@@ -5493,10 +5493,11 @@ class AgentTaskService:
                 }
 
         blocking = bool(blocking_errors)
+        delivery_required_for_success = bool(kickoff_after_setup)
         workflow_ok = True
         if requested_team:
             workflow_ok = workflow_ok and bool((verification.get("team_mode") or {}).get("ok"))
-        if requested_git:
+        if requested_git and delivery_required_for_success:
             workflow_ok = workflow_ok and bool((verification.get("delivery") or {}).get("ok"))
 
         def _failed_checks_with_descriptions(scope_payload: dict[str, Any] | None) -> list[dict[str, str]]:
@@ -5578,7 +5579,7 @@ class AgentTaskService:
                 else "kickoff_in_progress"
                 if kickoff_in_progress
                 else "delivery_pending"
-                if requested_git and delivery_ok is False
+                if requested_git and delivery_required_for_success and delivery_ok is False
                 else "execution_not_started"
                 if kickoff_required
                 else "none"
@@ -5589,7 +5590,7 @@ class AgentTaskService:
                 else "No setup blockers. Kickoff is still propagating to Developer execution."
                 if kickoff_in_progress
                 else "No setup blockers. Delivery requirements are not satisfied yet."
-                if requested_git and delivery_ok is False
+                if requested_git and delivery_required_for_success and delivery_ok is False
                 else "No setup blockers. Execution has not started yet."
                 if kickoff_required
                 else "No blockers detected."
@@ -5687,6 +5688,7 @@ class AgentTaskService:
                 "team_mode_failed_requirements": _failed_checks_with_descriptions(team_verification),
                 "delivery_status": delivery_verification_status,
                 "delivery_ok": delivery_ok,
+                "delivery_required_for_success": delivery_required_for_success,
                 "delivery_failed_requirements": (
                     []
                     if kickoff_in_progress

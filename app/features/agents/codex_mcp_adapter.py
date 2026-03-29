@@ -853,6 +853,32 @@ def _render_skills_markdown_for_segments(project_skills: list[object]) -> str:
     return "\n".join(lines).strip()
 
 
+def _build_skill_trace_payload(project_skills: list[object]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for item in project_skills:
+        if not isinstance(item, dict):
+            continue
+        skill_key = str(item.get("skill_key") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if not skill_key and not name:
+            continue
+        mode = str(item.get("mode") or "").strip().lower() or "advisory"
+        trust_level = str(item.get("trust_level") or "").strip().lower() or "reviewed"
+        summary = str(item.get("summary") or "").strip()
+        source_locator = str(item.get("source_locator") or "").strip()
+        rows.append(
+            {
+                "skill_key": skill_key,
+                "name": name or skill_key,
+                "mode": mode,
+                "trust_level": trust_level,
+                "reason": summary,
+                "source_locator": source_locator,
+            }
+        )
+    return rows
+
+
 def _prompt_segment_char_stats(
     ctx: dict,
     *,
@@ -3212,6 +3238,12 @@ def main() -> int:
     usage_payload: dict[str, object] | None = dict(usage or {})
     usage_payload["prompt_mode"] = effective_prompt_mode
     usage_payload["prompt_segment_chars"] = effective_prompt_segments
+    usage_payload["execution_provider"] = runtime_provider
+    usage_payload["execution_model"] = str(preferred_model or "").strip() or None
+    skill_trace = _build_skill_trace_payload(ctx.get("project_skills") if isinstance(ctx.get("project_skills"), list) else [])
+    if skill_trace:
+        usage_payload["project_skill_trace"] = skill_trace
+        usage_payload["project_skill_trace_count"] = len(skill_trace)
     print(
         json.dumps(
             {

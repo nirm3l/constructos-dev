@@ -18,7 +18,8 @@ It is organized as a single reading path, with each document containing:
 5. `04-frontend-control-plane-and-ops.md`
 6. `05-testing-and-quality.md`
 7. `06-omc-patterns-and-adoption.md`
-8. `99-glossary.md`
+8. `10-orchestration-hardening-plan.md`
+9. `99-glossary.md`
 
 Use `90-policy-appendix.md` when you need full legacy policy details.
 
@@ -30,7 +31,8 @@ flowchart TD
   D --> E[04 Frontend and Ops]
   E --> F[05 Testing and Quality]
   F --> G[06 OMC Patterns and Adoption]
-  G --> H[99 Glossary]
+  G --> J[10 Orchestration Hardening Plan]
+  J --> H[99 Glossary]
   D --> I[90 Policy Appendix when deep policy detail is needed]
 ```
 
@@ -44,6 +46,7 @@ flowchart TD
 | UI surfaces, control-plane boundary, deploy safety | `04-frontend-control-plane-and-ops.md` | Team Mode + testing policy |
 | Test structure and enforcement | `05-testing-and-quality.md` | testing and quality policy |
 | OMC-inspired adoption roadmap | `06-omc-patterns-and-adoption.md` | orchestration pattern adoption policy |
+| Prompt-agnostic orchestration hardening execution plan | `10-orchestration-hardening-plan.md` | runtime determinism and orchestration quality policy |
 
 ## Non-Negotiable Boundaries
 

@@ -514,6 +514,29 @@ class CommandExecution(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class TeamModeExecutionSession(Base, TimeMixin):
+    __tablename__ = "team_mode_execution_sessions"
+    __table_args__ = (
+        Index("ix_team_mode_execution_sessions_project_started", "project_id", "started_at"),
+        Index("ix_team_mode_execution_sessions_status_started", "status", "started_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    initiated_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    command_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    trigger: Mapped[str] = mapped_column(String(64), default="kickoff")
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    phase: Mapped[str] = mapped_column(String(32), default="team-exec")
+    phase_history_json: Mapped[str] = mapped_column(Text, default="[]")
+    queued_task_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    blocked_reasons_json: Mapped[str] = mapped_column(Text, default="[]")
+    run_summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
 class LicenseInstallation(Base, TimeMixin):
     __tablename__ = "license_installations"
 

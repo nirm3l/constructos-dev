@@ -21,6 +21,12 @@ _CACHE_LOCK = threading.Lock()
 _CACHE_EXPIRES_AT = 0.0
 _CACHE_ROWS: list[dict[str, Any]] = []
 _CACHE_REFRESH_IN_PROGRESS = False
+_CACHE_LAST_REFRESH_STARTED_AT = 0.0
+_CACHE_LAST_REFRESH_FINISHED_AT = 0.0
+_CACHE_LAST_REFRESH_ERROR = ""
+_CACHE_LAST_REFRESH_MODE = ""
+_CACHE_REFRESH_COUNT = 0
+_CACHE_STALE_SERVE_COUNT = 0
 _FALLBACK_SERVER_NAME = "constructos-tools"
 _LEGACY_CORE_SERVER_NAME = "constructos_tools"
 _PLUGIN_SERVER_ALIASES_BY_KEY: dict[str, set[str]] = {
@@ -287,28 +293,39 @@ def _discover_rows_uncached(*, include_codex_cli: bool = True) -> list[dict[str,
 
 def _refresh_rows_worker() -> None:
     global _CACHE_ROWS, _CACHE_EXPIRES_AT, _CACHE_REFRESH_IN_PROGRESS
+    global _CACHE_LAST_REFRESH_FINISHED_AT, _CACHE_LAST_REFRESH_ERROR, _CACHE_REFRESH_COUNT
     try:
         discovered = _discover_rows_uncached(include_codex_cli=True)
         with _CACHE_LOCK:
             _CACHE_ROWS = copy.deepcopy(discovered)
             _CACHE_EXPIRES_AT = time.monotonic() + _CACHE_TTL_SECONDS
             _CACHE_REFRESH_IN_PROGRESS = False
-    except Exception:
+            _CACHE_LAST_REFRESH_FINISHED_AT = time.monotonic()
+            _CACHE_LAST_REFRESH_ERROR = ""
+            _CACHE_REFRESH_COUNT = int(_CACHE_REFRESH_COUNT) + 1
+    except Exception as exc:
         with _CACHE_LOCK:
             _CACHE_REFRESH_IN_PROGRESS = False
+            _CACHE_LAST_REFRESH_FINISHED_AT = time.monotonic()
+            _CACHE_LAST_REFRESH_ERROR = str(exc)[:300]
+            _CACHE_REFRESH_COUNT = int(_CACHE_REFRESH_COUNT) + 1
 
 
 def _schedule_rows_refresh_if_needed() -> None:
-    global _CACHE_REFRESH_IN_PROGRESS
+    global _CACHE_REFRESH_IN_PROGRESS, _CACHE_LAST_REFRESH_STARTED_AT, _CACHE_LAST_REFRESH_MODE
     with _CACHE_LOCK:
         if _CACHE_REFRESH_IN_PROGRESS:
             return
         _CACHE_REFRESH_IN_PROGRESS = True
+        _CACHE_LAST_REFRESH_STARTED_AT = time.monotonic()
+        _CACHE_LAST_REFRESH_MODE = "stale_async"
     threading.Thread(target=_refresh_rows_worker, daemon=True).start()
 
 
 def _get_rows(*, force_refresh: bool = False, include_codex_cli: bool = True) -> list[dict[str, Any]]:
     global _CACHE_ROWS, _CACHE_EXPIRES_AT
+    global _CACHE_LAST_REFRESH_STARTED_AT, _CACHE_LAST_REFRESH_FINISHED_AT, _CACHE_LAST_REFRESH_ERROR
+    global _CACHE_LAST_REFRESH_MODE, _CACHE_REFRESH_COUNT, _CACHE_STALE_SERVE_COUNT
     if not include_codex_cli:
         # OpenCode discovery should not depend on Codex CLI availability.
         return _discover_rows_uncached(include_codex_cli=False)
@@ -321,12 +338,20 @@ def _get_rows(*, force_refresh: bool = False, include_codex_cli: bool = True) ->
             stale_rows = copy.deepcopy(_CACHE_ROWS)
     if stale_rows is not None:
         _schedule_rows_refresh_if_needed()
+        with _CACHE_LOCK:
+            _CACHE_STALE_SERVE_COUNT = int(_CACHE_STALE_SERVE_COUNT) + 1
         return stale_rows
 
+    with _CACHE_LOCK:
+        _CACHE_LAST_REFRESH_STARTED_AT = time.monotonic()
+        _CACHE_LAST_REFRESH_MODE = "sync"
     discovered = _discover_rows_uncached(include_codex_cli=True)
     with _CACHE_LOCK:
         _CACHE_ROWS = copy.deepcopy(discovered)
         _CACHE_EXPIRES_AT = time.monotonic() + _CACHE_TTL_SECONDS
+        _CACHE_LAST_REFRESH_FINISHED_AT = time.monotonic()
+        _CACHE_LAST_REFRESH_ERROR = ""
+        _CACHE_REFRESH_COUNT = int(_CACHE_REFRESH_COUNT) + 1
         return copy.deepcopy(_CACHE_ROWS)
 
 
@@ -344,6 +369,37 @@ def list_available_mcp_servers(*, force_refresh: bool = False, include_codex_cli
             }
         )
     return out
+
+
+def mcp_registry_cache_status() -> dict[str, Any]:
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        expires_at = float(_CACHE_EXPIRES_AT or 0.0)
+        row_count = len(_CACHE_ROWS)
+        refresh_in_progress = bool(_CACHE_REFRESH_IN_PROGRESS)
+        refresh_started_at = float(_CACHE_LAST_REFRESH_STARTED_AT or 0.0)
+        refresh_finished_at = float(_CACHE_LAST_REFRESH_FINISHED_AT or 0.0)
+        refresh_error = str(_CACHE_LAST_REFRESH_ERROR or "").strip() or None
+        refresh_mode = str(_CACHE_LAST_REFRESH_MODE or "").strip() or None
+        refresh_count = int(_CACHE_REFRESH_COUNT or 0)
+        stale_serve_count = int(_CACHE_STALE_SERVE_COUNT or 0)
+    expires_in_seconds = max(0.0, expires_at - now) if expires_at > 0 else 0.0
+    refresh_age_seconds = max(0.0, now - refresh_finished_at) if refresh_finished_at > 0 else None
+    return {
+        "cache_ttl_seconds": float(_CACHE_TTL_SECONDS),
+        "cache_timeout_seconds": float(_MCP_LIST_TIMEOUT_SECONDS),
+        "cache_row_count": int(row_count),
+        "cache_has_rows": bool(row_count > 0),
+        "cache_refresh_in_progress": refresh_in_progress,
+        "cache_expires_in_seconds": round(expires_in_seconds, 3),
+        "last_refresh_mode": refresh_mode,
+        "last_refresh_started_at_monotonic": round(refresh_started_at, 3) if refresh_started_at > 0 else None,
+        "last_refresh_finished_at_monotonic": round(refresh_finished_at, 3) if refresh_finished_at > 0 else None,
+        "last_refresh_age_seconds": round(float(refresh_age_seconds), 3) if refresh_age_seconds is not None else None,
+        "last_refresh_error": refresh_error,
+        "refresh_count": refresh_count,
+        "stale_serve_count": stale_serve_count,
+    }
 
 
 def normalize_chat_mcp_servers(

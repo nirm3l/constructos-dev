@@ -129,8 +129,10 @@ def test_project_checks_verify_exposes_team_mode_runtime_focus_summary(tmp_path:
     payload = checks.json()
 
     runtime = payload.get('team_mode_runtime') or {}
+    execution_session = payload.get('team_mode_execution_session')
     summary = runtime.get('summary') or {}
     focus = summary.get('focus') or {}
+    usage_totals = summary.get('usage_totals') or {}
 
     assert isinstance(focus.get('now_task_ids'), list)
     assert isinstance(focus.get('next_task_ids'), list)
@@ -138,7 +140,36 @@ def test_project_checks_verify_exposes_team_mode_runtime_focus_summary(tmp_path:
     assert isinstance(focus.get('now_total'), int)
     assert isinstance(focus.get('next_total'), int)
     assert isinstance(focus.get('blocked_total'), int)
+    assert isinstance(usage_totals.get('tasks_with_usage', 0), int)
+    assert isinstance(usage_totals.get('input_tokens', 0), int)
+    assert isinstance(usage_totals.get('output_tokens', 0), int)
+    assert isinstance(usage_totals.get('cost_usd', 0.0), (int, float))
 
     assert focus['now_total'] >= len(focus['now_task_ids'])
     assert focus['next_total'] >= len(focus['next_task_ids'])
     assert focus['blocked_total'] >= len(focus['blocked_task_ids'])
+    now_ids = set(str(item or '').strip() for item in focus['now_task_ids'] if str(item or '').strip())
+    next_ids = set(str(item or '').strip() for item in focus['next_task_ids'] if str(item or '').strip())
+    blocked_ids = set(str(item or '').strip() for item in focus['blocked_task_ids'] if str(item or '').strip())
+    assert now_ids.isdisjoint(next_ids)
+    assert now_ids.isdisjoint(blocked_ids)
+    assert next_ids.isdisjoint(blocked_ids)
+
+    tasks = runtime.get('tasks') or []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        runtime_state = str(task.get('runtime_state') or '').strip()
+        if runtime_state in {'blocked', 'missing_instruction'}:
+            blocker_code = str(task.get('blocker_code') or '').strip()
+            assert blocker_code
+    if execution_session is not None:
+        assert isinstance(execution_session, dict)
+        assert isinstance(execution_session.get('id'), str)
+        assert isinstance(execution_session.get('status'), str)
+        assert isinstance(execution_session.get('phase_history'), list)
+        session_summary = execution_session.get('summary')
+        if session_summary is not None:
+            assert isinstance(session_summary, dict)
+            assert isinstance(session_summary.get('verify_fix_attempts'), int)
+            assert isinstance(session_summary.get('verify_fix_fix_attempt_count'), int)

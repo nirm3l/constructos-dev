@@ -596,6 +596,19 @@ export function ProjectsInlineEditor({
     enabled: Boolean(userId && project.id && selectedProject?.id === project.id && shouldShowProjectChecks),
     refetchInterval: 20_000,
   })
+  const refreshProjectChecks = React.useCallback(() => {
+    void projectChecksQuery.refetch()
+  }, [projectChecksQuery])
+  const projectChecksSnapshotUpdatedAtLabel = React.useMemo(() => {
+    if (!projectChecksQuery.dataUpdatedAt) return 'not loaded'
+    return new Date(projectChecksQuery.dataUpdatedAt).toLocaleTimeString()
+  }, [projectChecksQuery.dataUpdatedAt])
+  const projectChecksSnapshotAgeLabel = React.useMemo(() => {
+    if (!projectChecksQuery.dataUpdatedAt) return 'unknown age'
+    const elapsedMs = Math.max(0, Date.now() - Number(projectChecksQuery.dataUpdatedAt || 0))
+    const elapsedSeconds = Math.round(elapsedMs / 1000)
+    return `${elapsedSeconds}s ago`
+  }, [projectChecksQuery.dataUpdatedAt])
   const [dockerRuntimeDialogOpen, setDockerRuntimeDialogOpen] = React.useState(false)
   const [gitRepositoryDialogOpen, setGitRepositoryDialogOpen] = React.useState(false)
   const [gitRepositoryDialogTarget, setGitRepositoryDialogTarget] = React.useState<ProjectGitRepositoryTarget | null>(null)
@@ -902,7 +915,10 @@ export function ProjectsInlineEditor({
   const teamModeRuntimeSnapshot = React.useMemo(() => {
     const raw = projectChecksSnapshot?.team_mode_runtime
     if (!raw || typeof raw !== 'object') return null
-    const summaryRaw = raw.summary && typeof raw.summary === 'object' ? raw.summary : {}
+    const summaryRaw =
+      raw.summary && typeof raw.summary === 'object'
+        ? (raw.summary as Record<string, unknown>)
+        : ({} as Record<string, unknown>)
     const focusRaw =
       summaryRaw && typeof (summaryRaw as Record<string, unknown>).focus === 'object'
         ? ((summaryRaw as Record<string, unknown>).focus as Record<string, unknown>)
@@ -927,9 +943,17 @@ export function ProjectsInlineEditor({
           automation_state: String(row.automation_state || '').trim() || 'idle',
           runtime_state: String(row.runtime_state || '').trim() || 'waiting',
           blocker_reason: String(row.blocker_reason || row.dependency_reason || '').trim() || null,
+          blocker_code: String(row.blocker_code || '').trim() || null,
           assigned_agent_code: String(row.assigned_agent_code || '').trim() || null,
           selected_for_dispatch: Boolean(row.selected_for_dispatch),
           selected_for_kickoff: Boolean(row.selected_for_kickoff),
+          usage_input_tokens: Number(row.usage_input_tokens || 0),
+          usage_cached_input_tokens: Number(row.usage_cached_input_tokens || 0),
+          usage_output_tokens: Number(row.usage_output_tokens || 0),
+          usage_cost_usd: Number(row.usage_cost_usd || 0),
+          usage_provider: String(row.usage_provider || '').trim() || null,
+          usage_model: String(row.usage_model || '').trim() || null,
+          usage_skill_trace_count: Number(row.usage_skill_trace_count || 0),
         }
       })
       .filter((item): item is NonNullable<typeof item> => Boolean(item))
@@ -963,6 +987,24 @@ export function ProjectsInlineEditor({
         missing_instruction_total: Number(summaryRaw.missing_instruction_total || 0),
         active_agents_total: Number(summaryRaw.active_agents_total || 0),
         idle_agents_total: Number(summaryRaw.idle_agents_total || 0),
+        usage_totals:
+          summaryRaw.usage_totals && typeof summaryRaw.usage_totals === 'object'
+            ? {
+                tasks_with_usage: Number((summaryRaw.usage_totals as Record<string, unknown>).tasks_with_usage || 0),
+                input_tokens: Number((summaryRaw.usage_totals as Record<string, unknown>).input_tokens || 0),
+                cached_input_tokens: Number((summaryRaw.usage_totals as Record<string, unknown>).cached_input_tokens || 0),
+                output_tokens: Number((summaryRaw.usage_totals as Record<string, unknown>).output_tokens || 0),
+                cost_usd: Number((summaryRaw.usage_totals as Record<string, unknown>).cost_usd || 0),
+                tasks_with_skill_trace: Number((summaryRaw.usage_totals as Record<string, unknown>).tasks_with_skill_trace || 0),
+              }
+            : {
+                tasks_with_usage: 0,
+                input_tokens: 0,
+                cached_input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: 0,
+                tasks_with_skill_trace: 0,
+              },
         focus: {
           now_task_ids: Array.isArray(focusRaw.now_task_ids)
             ? focusRaw.now_task_ids.map((item) => String(item || '').trim()).filter(Boolean)
@@ -989,6 +1031,31 @@ export function ProjectsInlineEditor({
       },
     }
   }, [projectChecksSnapshot?.team_mode_runtime])
+  const teamModeExecutionSession = React.useMemo(() => {
+    const raw = projectChecksSnapshot?.team_mode_execution_session
+    if (!raw || typeof raw !== 'object') return null
+    const row = raw as Record<string, unknown>
+    const summaryRaw =
+      row.summary && typeof row.summary === 'object' ? (row.summary as Record<string, unknown>) : {}
+    const id = String(row.id || '').trim()
+    if (!id) return null
+    return {
+      id,
+      status: String(row.status || '').trim() || 'unknown',
+      phase: String(row.phase || '').trim() || 'team-exec',
+      started_at: String(row.started_at || '').trim() || null,
+      completed_at: String(row.completed_at || '').trim() || null,
+      queued_task_ids: Array.isArray(row.queued_task_ids)
+        ? row.queued_task_ids.map((item) => String(item || '').trim()).filter(Boolean)
+        : [],
+      blocked_reasons: Array.isArray(row.blocked_reasons)
+        ? row.blocked_reasons.map((item) => String(item || '').trim()).filter(Boolean)
+        : [],
+      verify_fix_attempts: Number(summaryRaw.verify_fix_attempts || 0),
+      verify_fix_fix_attempt_count: Number(summaryRaw.verify_fix_fix_attempt_count || 0),
+      verify_fix_blocked_reason_code: String(summaryRaw.verify_fix_blocked_reason_code || '').trim() || null,
+    }
+  }, [projectChecksSnapshot?.team_mode_execution_session])
   const teamModeRuntimeView = React.useMemo(() => {
     if (!teamModeRuntimeSnapshot?.active) return null
     const workflowTasks = teamModeRuntimeSnapshot.tasks.filter(
@@ -3039,7 +3106,23 @@ export function ProjectsInlineEditor({
                 ) : null}
                 {teamModeRuntimeSnapshot?.active && teamModeRuntimeView ? (
                   <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
-                    <div style={{ fontWeight: 600, marginBottom: 6 }}>Team Mode Runtime</div>
+                    <div className="row wrap" style={{ justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
+                      <div style={{ fontWeight: 600 }}>Team Mode Runtime</div>
+                      <div className="row wrap" style={{ gap: 6 }}>
+                        <span className="badge">
+                          Snapshot: {projectChecksSnapshotUpdatedAtLabel} ({projectChecksSnapshotAgeLabel})
+                        </span>
+                        <button
+                          type="button"
+                          className="status-chip"
+                          onClick={refreshProjectChecks}
+                          disabled={projectChecksQuery.isFetching}
+                          title="Refresh runtime snapshot"
+                        >
+                          {projectChecksQuery.isFetching ? 'Refreshing…' : 'Refresh'}
+                        </button>
+                      </div>
+                    </div>
                     <div className="row wrap" style={{ gap: 6 }}>
                       <span className="badge">Parallel limit: {teamModeRuntimeSnapshot.parallel_limit}</span>
                       <span className="badge">Team tasks: {teamModeRuntimeSnapshot.summary.team_tasks_total}</span>
@@ -3050,6 +3133,21 @@ export function ProjectsInlineEditor({
                       ) : null}
                       {teamModeRuntimeSnapshot.summary.missing_instruction_total > 0 ? (
                         <span className="badge">Missing instruction: {teamModeRuntimeSnapshot.summary.missing_instruction_total}</span>
+                      ) : null}
+                      {teamModeRuntimeSnapshot.summary.usage_totals.tasks_with_usage > 0 ? (
+                        <span className="badge">
+                          Usage: in {teamModeRuntimeSnapshot.summary.usage_totals.input_tokens} · out {teamModeRuntimeSnapshot.summary.usage_totals.output_tokens}
+                        </span>
+                      ) : null}
+                      {teamModeRuntimeSnapshot.summary.usage_totals.cost_usd > 0 ? (
+                        <span className="badge">
+                          Cost: ${teamModeRuntimeSnapshot.summary.usage_totals.cost_usd.toFixed(4)}
+                        </span>
+                      ) : null}
+                      {teamModeRuntimeSnapshot.summary.usage_totals.tasks_with_skill_trace > 0 ? (
+                        <span className="badge">
+                          Skill trace tasks: {teamModeRuntimeSnapshot.summary.usage_totals.tasks_with_skill_trace}
+                        </span>
                       ) : null}
                     </div>
                     <div className="row wrap" style={{ marginTop: 8, gap: 8 }}>
@@ -3070,6 +3168,16 @@ export function ProjectsInlineEditor({
                         Blocked: {teamModeRuntimeView.blockedTasks.length}
                       </span>
                     </div>
+                    {teamModeExecutionSession ? (
+                      <div className="meta" style={{ marginTop: 8 }}>
+                        Session {teamModeExecutionSession.id.slice(0, 8)} · status={teamModeExecutionSession.status} · phase={teamModeExecutionSession.phase}
+                        {teamModeExecutionSession.queued_task_ids.length > 0 ? ` · queued=${teamModeExecutionSession.queued_task_ids.length}` : ''}
+                        {teamModeExecutionSession.verify_fix_attempts > 0 ? ` · verifyAttempts=${teamModeExecutionSession.verify_fix_attempts}` : ''}
+                        {teamModeExecutionSession.verify_fix_fix_attempt_count > 0 ? ` · fixAttempts=${teamModeExecutionSession.verify_fix_fix_attempt_count}` : ''}
+                        {teamModeExecutionSession.verify_fix_blocked_reason_code ? ` · verifyCode=${teamModeExecutionSession.verify_fix_blocked_reason_code}` : ''}
+                        {teamModeExecutionSession.blocked_reasons.length > 0 ? ` · blocked=${teamModeExecutionSession.blocked_reasons[0]}` : ''}
+                      </div>
+                    ) : null}
                     {teamModeRuntimeView.workflowTasks.length > 0 ? (
                       <div className="gates-check-list" style={{ marginTop: 8 }}>
                         {[
@@ -3085,7 +3193,14 @@ export function ProjectsInlineEditor({
                                   {task.task.assigned_agent_code ? <>; slot={task.task.assigned_agent_code}</> : null}
                                   {task.task.selected_for_dispatch ? <>; next dispatch</> : null}
                                   {task.task.selected_for_kickoff ? <>; kickoff target</> : null}
+                                  {task.task.blocker_code ? <>; blocker={task.task.blocker_code}</> : null}
                                   {task.task.blocker_reason ? <>; reason={task.task.blocker_reason}</> : null}
+                                  {task.task.usage_provider ? <>; provider={task.task.usage_provider}</> : null}
+                                  {task.task.usage_model ? <>; model={task.task.usage_model}</> : null}
+                                  {task.task.usage_output_tokens > 0 ? <>; outTokens={task.task.usage_output_tokens}</> : null}
+                                  {task.task.usage_input_tokens > 0 ? <>; inTokens={task.task.usage_input_tokens}</> : null}
+                                  {task.task.usage_cost_usd > 0 ? <>; cost=${task.task.usage_cost_usd.toFixed(4)}</> : null}
+                                  {task.task.usage_skill_trace_count > 0 ? <>; skillTrace={task.task.usage_skill_trace_count}</> : null}
                                 </span>
                               </div>
                               <span className={`badge ${task.kind === 'blocked' ? 'status-blocked' : 'status-done'}`}>

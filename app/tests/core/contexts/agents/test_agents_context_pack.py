@@ -957,6 +957,92 @@ def test_create_mcp_setup_project_orchestration_tool_supports_kickoff_after_setu
         assert "kickoff" in str(kickoff.get("summary") or "").lower()
 
 
+def test_create_mcp_setup_project_orchestration_setup_only_does_not_fail_on_delivery_warning(tmp_path, monkeypatch):
+    from features.agents import mcp_server
+    from features.agents.service import AgentTaskService
+
+    client = build_client(tmp_path)
+    bootstrap = client.get("/api/bootstrap").json()
+    workspace_id = bootstrap["workspaces"][0]["id"]
+    actor_user_id = bootstrap["current_user"]["id"]
+
+    class FakeFastMCP:
+        def __init__(self, name: str):
+            self.name = name
+            self._tools: dict[str, dict[str, object]] = {}
+
+        def tool(self, description: str = ""):
+            def _decorator(fn):
+                self._tools[fn.__name__] = {"fn": fn, "description": description}
+                return fn
+
+            return _decorator
+
+    monkeypatch.setitem(sys.modules, "fastmcp", SimpleNamespace(FastMCP=FakeFastMCP))
+    monkeypatch.setattr(
+        mcp_server,
+        "build_mcp_gateway",
+        lambda: AgentTaskService(
+            require_token=False,
+            actor_user_id=actor_user_id,
+            allowed_workspace_ids={workspace_id},
+            allowed_project_ids=set(),
+            default_workspace_id=workspace_id,
+        ),
+    )
+    monkeypatch.setattr(mcp_server, "MCP_AUTH_TOKEN", "")
+    monkeypatch.setattr(mcp_server, "AGENT_ENABLED_PLUGINS", ["team_mode", "git_delivery", "docker_compose"])
+
+    monkeypatch.setattr(
+        AgentTaskService,
+        "verify_team_mode_workflow",
+        lambda self, **kwargs: {
+            "ok": True,
+            "workspace_id": str(kwargs.get("workspace_id") or ""),
+            "required_failed_checks": [],
+            "check_descriptions": {},
+        },
+    )
+    monkeypatch.setattr(
+        AgentTaskService,
+        "verify_delivery_workflow",
+        lambda self, **kwargs: {
+            "ok": False,
+            "required_failed_checks": ["repo_context_present"],
+            "check_descriptions": {"repo_context_present": "Repository context must be linked."},
+        },
+    )
+
+    mcp = mcp_server.create_mcp()
+    setup_tool = mcp._tools.get("setup_project_orchestration")
+    assert setup_tool is not None
+    fn = setup_tool["fn"]
+    payload = fn(
+        name="MCP Setup-Only Delivery Warning",
+        short_description="Validate setup-only success semantics.",
+        primary_starter_key="web_app",
+        workspace_id=workspace_id,
+        enable_team_mode=True,
+        enable_git_delivery=True,
+        enable_docker_compose=True,
+        docker_port=6768,
+        seed_team_tasks=False,
+        kickoff_after_setup=False,
+        command_id="mcp-setup-only-delivery-warning-001",
+    )
+
+    assert payload["ok"] is True
+    verification = (
+        payload.get("user_facing_summary", {}).get("verification", {})
+        if isinstance(payload.get("user_facing_summary"), dict)
+        else {}
+    )
+    assert verification.get("delivery_status") == "Needs attention"
+    assert verification.get("delivery_required_for_success") is False
+    blocking_state = payload.get("user_facing_summary", {}).get("blocking_state", {})
+    assert blocking_state.get("code") != "delivery_pending"
+
+
 def test_create_mcp_setup_project_orchestration_tool_returns_missing_inputs_contract(tmp_path, monkeypatch):
     from fastapi import HTTPException
     from features.agents import mcp_server

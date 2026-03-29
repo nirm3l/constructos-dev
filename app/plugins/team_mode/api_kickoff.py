@@ -14,6 +14,96 @@ from .runtime_context import TeamModeProjectRuntimeContext
 from .gates import evaluate_team_mode_gates
 from .workflow_orchestrator import TEAM_MODE_WORKFLOW_ROLES, plan_kickoff_targets
 from .semantics import REQUIRED_SEMANTIC_STATUSES, semantic_status_key
+from .execution_sessions import (
+    advance_team_mode_execution_phase,
+    complete_team_mode_execution_session,
+    create_team_mode_execution_session,
+    serialize_team_mode_execution_session,
+)
+
+KICKOFF_VERIFY_FIX_MAX_ATTEMPTS = 3
+
+
+def _run_kickoff_verify_fix_loop(
+    *,
+    max_attempts: int,
+    queue_depth: int,
+    pump_runner: Callable[[int], None],
+    collect_state: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_attempts = max(1, int(max_attempts))
+    normalized_queue_depth = max(0, int(queue_depth))
+    attempts: list[dict[str, Any]] = []
+    fix_attempt_count = 0
+    last_state: dict[str, Any] = {}
+
+    for attempt_index in range(1, normalized_attempts + 1):
+        runner_status = "skipped"
+        runner_error: str | None = None
+        if normalized_queue_depth > 0:
+            try:
+                pump_runner(max(1, normalized_queue_depth))
+                runner_status = "ok"
+            except Exception as exc:  # pragma: no cover
+                runner_status = "error"
+                runner_error = str(exc)[:300]
+        if attempt_index > 1:
+            fix_attempt_count += 1
+
+        state = dict(collect_state() or {})
+        last_state = state
+        developer_task_ids = [str(item or "").strip() for item in list(state.get("developer_task_ids") or []) if str(item or "").strip()]
+        developer_active_task_ids = [str(item or "").strip() for item in list(state.get("developer_active_task_ids") or []) if str(item or "").strip()]
+        developer_idle_task_ids = [str(item or "").strip() for item in list(state.get("developer_idle_task_ids") or []) if str(item or "").strip()]
+        dispatch_confirmed = bool(state.get("developer_dispatch_confirmed"))
+        if not developer_task_ids:
+            dispatch_confirmed = True
+        attempts.append(
+            {
+                "attempt": attempt_index,
+                "runner_status": runner_status,
+                "runner_error": runner_error,
+                "developer_dispatch_confirmed": dispatch_confirmed,
+                "developer_task_count": len(developer_task_ids),
+                "developer_active_count": len(developer_active_task_ids),
+                "developer_idle_count": len(developer_idle_task_ids),
+            }
+        )
+        if dispatch_confirmed:
+            return {
+                "ok": True,
+                "attempts": attempts,
+                "fix_attempt_count": fix_attempt_count,
+                "blocked_reason_code": None,
+                "blocked_reason": None,
+                "developer_dispatch_confirmed": True,
+                "developer_task_ids": developer_task_ids,
+                "developer_active_task_ids": developer_active_task_ids,
+                "developer_idle_task_ids": developer_idle_task_ids,
+            }
+
+    developer_task_ids = [str(item or "").strip() for item in list(last_state.get("developer_task_ids") or []) if str(item or "").strip()]
+    developer_active_task_ids = [
+        str(item or "").strip() for item in list(last_state.get("developer_active_task_ids") or []) if str(item or "").strip()
+    ]
+    developer_idle_task_ids = [str(item or "").strip() for item in list(last_state.get("developer_idle_task_ids") or []) if str(item or "").strip()]
+    if developer_task_ids and not developer_active_task_ids:
+        blocked_reason_code = "developer_dispatch_not_confirmed"
+        blocked_reason = "Kickoff queueing succeeded but no Developer task became active within bounded verify/fix attempts."
+    else:
+        blocked_reason_code = "kickoff_verify_fix_exhausted"
+        blocked_reason = "Kickoff verify/fix attempts were exhausted before dispatch could be confirmed."
+    return {
+        "ok": False,
+        "attempts": attempts,
+        "fix_attempt_count": fix_attempt_count,
+        "blocked_reason_code": blocked_reason_code,
+        "blocked_reason": blocked_reason,
+        "developer_dispatch_confirmed": False,
+        "developer_task_ids": developer_task_ids,
+        "developer_active_task_ids": developer_active_task_ids,
+        "developer_idle_task_ids": developer_idle_task_ids,
+    }
 
 
 def _collect_team_mode_developer_dispatch_state(
@@ -100,6 +190,52 @@ def maybe_dispatch_execution_kickoff(
         max_parallel_dispatch = 4
     max_parallel_dispatch = max(1, min(max_parallel_dispatch, int(AGENT_RUNNER_MAX_CONCURRENCY)))
     agent_role_by_code = runtime_context.agent_role_by_code
+    execution_session = create_team_mode_execution_session(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+        initiated_by=str(user.id),
+        command_id=command_id,
+        trigger="kickoff",
+        phase="team-exec",
+        summary={
+            "kickoff_intent": bool(flags.get("execution_kickoff_intent")),
+            "execution_intent": bool(flags.get("execution_intent")),
+            "parallel_limit": max_parallel_dispatch,
+        },
+    )
+
+    def _finalize_and_return(
+        payload: dict[str, object],
+        *,
+        status: str,
+        blocked_reasons: list[str] | None = None,
+    ) -> dict[str, object]:
+        verify_fix = payload.get("verify_fix") if isinstance(payload.get("verify_fix"), dict) else {}
+        summary_payload = {
+            "ok": bool(payload.get("ok")),
+            "summary": str(payload.get("summary") or "").strip(),
+            "comment": str(payload.get("comment") or "").strip(),
+            "kickoff_dispatched": bool(payload.get("kickoff_dispatched")),
+            "failed_count": len(list(payload.get("failed") or [])) if isinstance(payload.get("failed"), list) else 0,
+            "verify_fix_ok": bool(verify_fix.get("ok")) if verify_fix else None,
+            "verify_fix_attempts": len(list(verify_fix.get("attempts") or [])) if verify_fix else 0,
+            "verify_fix_fix_attempt_count": int(verify_fix.get("fix_attempt_count") or 0) if verify_fix else 0,
+            "verify_fix_blocked_reason_code": (
+                str(verify_fix.get("blocked_reason_code") or "").strip() or None
+                if verify_fix
+                else None
+            ),
+        }
+        complete_team_mode_execution_session(
+            session=execution_session,
+            status=status,
+            summary=summary_payload,
+            queued_task_ids=[str(item or "").strip() for item in list(payload.get("queued_task_ids") or []) if str(item or "").strip()],
+            blocked_reasons=blocked_reasons or [str(item or "").strip() for item in list(payload.get("blocked_reasons") or []) if str(item or "").strip()],
+        )
+        payload["execution_session"] = serialize_team_mode_execution_session(execution_session)
+        return payload
 
     promote_plugin_policy_to_execution_mode_if_needed(
         db=db,
@@ -157,7 +293,7 @@ def maybe_dispatch_execution_kickoff(
     active_count = len(active_task_ids_before_dispatch)
     available_slots_before_dispatch = max(0, max_parallel_dispatch - active_count)
     if available_slots_before_dispatch <= 0:
-        return {
+        return _finalize_and_return({
             "ok": True,
             "action": "comment",
             "summary": "Team Mode kickoff already in progress.",
@@ -172,7 +308,7 @@ def maybe_dispatch_execution_kickoff(
             "failed": [],
             "parallel_limit": max_parallel_dispatch,
             "active_count_before_dispatch": active_count,
-        }
+        }, status="completed")
 
     kickoff_plan = plan_kickoff_targets(
         orchestration_rows,
@@ -200,7 +336,7 @@ def maybe_dispatch_execution_kickoff(
         blocked_reasons = [str(item or "").strip() for item in (kickoff_plan.get("blocked_reasons") or []) if str(item or "").strip()]
         if not blocked_reasons:
             blocked_reasons = ["no runnable kickoff target matched deterministic kickoff criteria"]
-        return {
+        return _finalize_and_return({
             "ok": False,
             "action": "comment",
             "summary": "Team Mode kickoff blocked.",
@@ -212,7 +348,7 @@ def maybe_dispatch_execution_kickoff(
             "blocked_reasons": blocked_reasons,
             "parallel_limit": max_parallel_dispatch,
             "active_count_before_dispatch": active_count,
-        }
+        }, status="failed", blocked_reasons=blocked_reasons)
 
     # Before kickoff, validate Team Mode configuration readiness only.
     if candidates_dev or candidates_qa:
@@ -266,7 +402,7 @@ def maybe_dispatch_execution_kickoff(
                 missing_bits.append("required Team Mode semantic statuses")
             summary = "Team Mode kickoff blocked: Team Mode configuration is incomplete."
             comment = "Missing: " + "; ".join(missing_bits)
-            return {
+            return _finalize_and_return({
                 "ok": False,
                 "action": "comment",
                 "summary": summary,
@@ -276,7 +412,7 @@ def maybe_dispatch_execution_kickoff(
                 "queued_by_role": {"Developer": 0, "Lead": 0, "QA": 0},
                 "failed": [],
                 "blocked_reasons": missing_bits,
-            }
+            }, status="failed", blocked_reasons=missing_bits)
 
     kickoff_instruction = build_team_lead_kickoff_instruction(
         project_id=normalized_project_id,
@@ -300,7 +436,7 @@ def maybe_dispatch_execution_kickoff(
             "A kickoff task is already queued/running. "
             "Wait for current kickoff execution to finish before retrying."
         )
-        return {
+        return _finalize_and_return({
             "ok": True,
             "action": "comment",
             "summary": summary,
@@ -312,7 +448,7 @@ def maybe_dispatch_execution_kickoff(
             "failed": [],
             "parallel_limit": max_parallel_dispatch,
             "active_count_before_dispatch": active_count,
-        }
+        }, status="completed")
 
     queued_task_ids: list[str] = []
     queued_by_role: dict[str, int] = {"Developer": 0, "Lead": 0, "QA": 0}
@@ -403,35 +539,71 @@ def maybe_dispatch_execution_kickoff(
         "developer_idle_task_ids": [],
         "developer_dispatch_confirmed": False,
     }
+    verify_fix_result: dict[str, Any] | None = None
     kickoff_processing_error: str | None = None
     if kickoff_ok and queued_task_ids:
+        advance_team_mode_execution_phase(
+            session=execution_session,
+            phase="team-verify",
+            reason="kickoff-dispatched",
+        )
         try:
             from features.agents.runner import run_queued_automation_once
 
-            run_queued_automation_once(limit=max(1, len(queued_task_ids)), allow_fresh_kickoff=True)
             with SessionLocal() as verify_db:
-                developer_dispatch_state = _collect_team_mode_developer_dispatch_state(
-                    db=verify_db,
-                    workspace_id=workspace_id,
-                    project_id=normalized_project_id,
+                verify_fix_result = _run_kickoff_verify_fix_loop(
+                    max_attempts=KICKOFF_VERIFY_FIX_MAX_ATTEMPTS,
+                    queue_depth=len(queued_task_ids),
+                    pump_runner=lambda limit: run_queued_automation_once(limit=max(1, int(limit)), allow_fresh_kickoff=True),
+                    collect_state=lambda: _collect_team_mode_developer_dispatch_state(
+                        db=verify_db,
+                        workspace_id=workspace_id,
+                        project_id=normalized_project_id,
+                    ),
                 )
+            if int(verify_fix_result.get("fix_attempt_count") or 0) > 0:
+                advance_team_mode_execution_phase(
+                    session=execution_session,
+                    phase="team-fix",
+                    reason="verify-fix-attempts-applied",
+                )
+                advance_team_mode_execution_phase(
+                    session=execution_session,
+                    phase="team-verify",
+                    reason="verify-after-fix",
+                )
+            developer_dispatch_state = {
+                "developer_task_ids": list(verify_fix_result.get("developer_task_ids") or []),
+                "developer_active_task_ids": list(verify_fix_result.get("developer_active_task_ids") or []),
+                "developer_idle_task_ids": list(verify_fix_result.get("developer_idle_task_ids") or []),
+                "developer_dispatch_confirmed": bool(verify_fix_result.get("developer_dispatch_confirmed")),
+            }
+            if not bool(verify_fix_result.get("ok")):
+                blocked_message = str(verify_fix_result.get("blocked_reason") or "").strip()
+                blocked_code = str(verify_fix_result.get("blocked_reason_code") or "").strip()
+                if blocked_message:
+                    kickoff_processing_error = (
+                        f"{blocked_code}: {blocked_message}" if blocked_code else blocked_message
+                    )
         except Exception as exc:  # pragma: no cover
             kickoff_processing_error = str(exc)[:300]
 
     if kickoff_ok:
         if kickoff_processing_error:
-            summary = "Team Mode kickoff dispatched; immediate verification is pending."
+            summary = "Team Mode kickoff failed verification after dispatch."
             comment = (
                 f"Queued tasks: {len(queued_task_ids)} (Dev={queued_dev}, Lead={queued_lead}, QA={queued_qa}). "
-                "Kickoff processing encountered a transient verification error, but queueing succeeded: "
+                "Kickoff queueing succeeded, but bounded verify/fix failed: "
                 f"{kickoff_processing_error}"
             )
+            kickoff_ok = False
         elif not bool(developer_dispatch_state.get("developer_dispatch_confirmed")):
-            summary = "Team Mode kickoff dispatched; Developer execution is still propagating."
+            summary = "Team Mode kickoff verification did not confirm Developer dispatch."
             comment = (
                 f"Queued tasks: {len(queued_task_ids)} (Dev={queued_dev}, Lead={queued_lead}, QA={queued_qa}). "
-                "No Developer task is active yet on the immediate readback; this remains in progress."
+                "No Developer task became active within bounded verify/fix attempts."
             )
+            kickoff_ok = False
         else:
             active_dev = len(developer_dispatch_state.get("developer_active_task_ids") or [])
             summary = "Team Mode kickoff dispatched to task automation."
@@ -445,12 +617,12 @@ def maybe_dispatch_execution_kickoff(
             f"Queued tasks: {len(queued_task_ids)} (Dev={queued_dev}, Lead={queued_lead}, QA={queued_qa}). "
             f"Failed queues: {len(failed)}."
         )
-    return {
+    return _finalize_and_return({
         "ok": kickoff_ok,
         "action": "comment",
         "summary": summary,
         "comment": comment,
-        "kickoff_dispatched": kickoff_ok,
+        "kickoff_dispatched": bool(queued_task_ids),
         "queued_task_ids": queued_task_ids,
         "queued_by_role": queued_by_role,
         "failed": failed,
@@ -461,4 +633,18 @@ def maybe_dispatch_execution_kickoff(
         "developer_task_ids": list(developer_dispatch_state.get("developer_task_ids") or []),
         "developer_active_task_ids": list(developer_dispatch_state.get("developer_active_task_ids") or []),
         "developer_idle_task_ids": list(developer_dispatch_state.get("developer_idle_task_ids") or []),
-    }
+        "verify_fix": (
+            verify_fix_result
+            if isinstance(verify_fix_result, dict)
+            else {
+                "ok": bool(kickoff_ok),
+                "attempts": [],
+                "fix_attempt_count": 0,
+            }
+        ),
+        "blocked_reasons": (
+            [str(verify_fix_result.get("blocked_reason") or "").strip()]
+            if isinstance(verify_fix_result, dict) and str(verify_fix_result.get("blocked_reason") or "").strip()
+            else []
+        ),
+    }, status="completed" if kickoff_ok else "failed")

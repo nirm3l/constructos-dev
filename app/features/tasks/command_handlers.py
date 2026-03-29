@@ -96,6 +96,7 @@ from features.agents.intent_classifier import (
     is_team_mode_kickoff_classification,
     resolve_instruction_intent,
 )
+from features.agents.task_size_classifier import classify_task_size_pre_gate
 from features.agents.execution_provider import parse_execution_model
 from features.agents.provider_auth import resolve_provider_effective_auth_source
 from features.agents.command_runtime_registry import resolve_provider_for_command_id
@@ -3112,6 +3113,7 @@ class RequestAutomationRunHandler:
         )
         should_default_to_team_mode_kickoff = False
         default_kickoff_workflow_role = None
+        kickoff_default_suppressed_reason = ""
         if (
             requested_source in {"manual", "manual_stream"}
             and project_id
@@ -3126,14 +3128,32 @@ class RequestAutomationRunHandler:
                         "status": str(state_snapshot.get("status") or (task_view or {}).get("status") or "").strip(),
                     }
                 )
-            if str(default_kickoff_workflow_role or "").strip() == "Lead" and _team_mode_project_is_unstarted(
-                self.ctx.db,
-                workspace_id=str(workspace_id),
-                project_id=str(project_id),
-                exclude_task_id=self.task_id,
-                runtime_context=runtime_context,
-            ):
-                should_default_to_team_mode_kickoff = True
+            if str(default_kickoff_workflow_role or "").strip() == "Lead":
+                project_unstarted = _team_mode_project_is_unstarted(
+                    self.ctx.db,
+                    workspace_id=str(workspace_id),
+                    project_id=str(project_id),
+                    exclude_task_id=self.task_id,
+                    runtime_context=runtime_context,
+                )
+                if project_unstarted:
+                    pre_gate = classify_task_size_pre_gate(
+                        instruction=effective_instruction or fallback_instruction or "",
+                        workspace_id=str(workspace_id),
+                        project_id=str(project_id),
+                        session_id=None,
+                        actor_user_id=str(self.ctx.user.id or "").strip() or None,
+                    )
+                    pre_gate_small = bool(pre_gate.get("should_avoid_heavy_orchestration"))
+                    pre_gate_reason = str(pre_gate.get("reason") or "").strip()
+                    if pre_gate_small:
+                        should_default_to_team_mode_kickoff = False
+                        kickoff_default_suppressed_reason = (
+                            pre_gate_reason
+                            or "Task-size pre-gate marked this request as small and suppressed default kickoff."
+                        )
+                    else:
+                        should_default_to_team_mode_kickoff = True
         if should_default_to_team_mode_kickoff:
             effective_instruction = f"Team Mode kickoff for project {project_id}. Dispatch-only run."
         effective_instruction = effective_instruction or fallback_instruction
@@ -3176,6 +3196,8 @@ class RequestAutomationRunHandler:
                 "execution_mode": "kickoff_only",
                 "reason": str(classification.get("reason") or "").strip() or "Defaulted to kickoff for fresh Team Mode Lead run.",
             }
+        elif kickoff_default_suppressed_reason and not str(classification.get("reason") or "").strip():
+            classification["reason"] = kickoff_default_suppressed_reason
 
         if project_id:
             if runtime_context is not None and runtime_context.enabled:
