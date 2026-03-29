@@ -416,6 +416,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     queryKey: ['bootstrap', userId],
     queryFn: () => getBootstrap(userId),
     retry: 1,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   })
   const licenseStatus = useQuery({
     queryKey: ['license-status', userId],

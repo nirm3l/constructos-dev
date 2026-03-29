@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from features.tasks.read_models import get_task_automation_status_read_model
-from shared.models import Project, ProjectMember, ProjectPluginConfig, Task
+from shared.models import Project
 from shared.settings import AGENT_RUNNER_MAX_CONCURRENCY
 from shared.task_delivery import task_matches_dependency_requirement
 from shared.task_relationships import normalize_task_relationships
@@ -15,33 +13,8 @@ from shared.team_mode_lifecycle import derive_phase_from_status_and_role
 
 from .runtime_context import TeamModeProjectRuntimeContext
 from .semantics import semantic_status_key
-from .task_roles import build_active_agent_load_by_code, derive_task_role, normalize_team_agents, pick_agent_for_role
+from .task_roles import pick_agent_for_role
 from .workflow_orchestrator import TEAM_MODE_WORKFLOW_ROLES, plan_kickoff_targets, plan_team_mode_dispatch
-
-
-def _load_team_mode_config(*, db: Session, project_id: str) -> tuple[Project | None, bool, dict[str, Any]]:
-    project = db.get(Project, project_id)
-    if project is None or bool(getattr(project, "is_deleted", False)):
-        return None, False, {}
-    row = db.execute(
-        select(ProjectPluginConfig.enabled, ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == str(project.workspace_id),
-            ProjectPluginConfig.project_id == project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).first()
-    if row is None:
-        return project, False, {}
-    enabled = bool(row[0])
-    config: dict[str, Any] = {}
-    try:
-        parsed = json.loads(str(row[1] or "").strip() or "{}")
-        if isinstance(parsed, dict):
-            config = dict(parsed)
-    except Exception:
-        config = {}
-    return project, enabled, config
 
 
 def _normalize_parallel_limit(value: Any) -> int:
@@ -140,7 +113,7 @@ def _task_runtime_state(
 
 
 def build_team_mode_runtime_snapshot(*, db: Session, user: Any, project_id: str) -> dict[str, Any]:
-    project, enabled, config = _load_team_mode_config(db=db, project_id=project_id)
+    project = db.get(Project, project_id)
     if project is None:
         return {
             "active": False,
@@ -157,30 +130,9 @@ def build_team_mode_runtime_snapshot(*, db: Session, user: Any, project_id: str)
         workspace_id=str(project.workspace_id),
         project_id=project_id,
     )
-    team_agents = runtime_context.team_agents if enabled else normalize_team_agents(config.get("team"))
-    agent_role_by_code = runtime_context.agent_role_by_code if enabled else {
-        str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-        for agent in team_agents
-        if str(agent.get("id") or "").strip()
-    }
-    member_role_by_user_id = runtime_context.member_role_by_user_id if enabled else {
-        str(user_id): str(role or "").strip()
-        for user_id, role in db.execute(
-            select(ProjectMember.user_id, ProjectMember.role).where(
-                ProjectMember.workspace_id == str(project.workspace_id),
-                ProjectMember.project_id == project_id,
-            )
-        ).all()
-    }
-    task_rows = runtime_context.tasks[:300] if enabled else db.execute(
-        select(Task).where(
-            Task.project_id == project_id,
-            Task.is_deleted == False,  # noqa: E712
-            Task.archived == False,  # noqa: E712
-        )
-        .order_by(Task.created_at.asc())
-        .limit(300)
-    ).scalars().all()
+    enabled = bool(runtime_context.enabled)
+    team_agents = runtime_context.team_agents
+    task_rows = runtime_context.tasks[:300]
     parallel_limit = _normalize_parallel_limit(getattr(project, "automation_max_parallel_tasks", 1))
 
     base_tasks: list[dict[str, Any]] = []
@@ -193,18 +145,8 @@ def build_team_mode_runtime_snapshot(*, db: Session, user: Any, project_id: str)
             automation_status = get_task_automation_status_read_model(db, user, task_id)
         except Exception:
             automation_status = {}
-        task_like = runtime_context.task_like(task) if enabled else {
-            "id": task_id,
-            "assignee_id": str(task.assignee_id or "").strip(),
-            "assigned_agent_code": str(task.assigned_agent_code or "").strip(),
-            "labels": task.labels,
-            "status": str(task.status or "").strip(),
-        }
-        role = derive_task_role(
-            task_like=task_like,
-            member_role_by_user_id=member_role_by_user_id,
-            agent_role_by_code=agent_role_by_code,
-        )
+        task_like = runtime_context.task_like(task)
+        role = runtime_context.derive_workflow_role(task_like=task_like)
         automation_state = str(automation_status.get("automation_state") or "idle").strip().lower() or "idle"
         if automation_state in {"queued", "running"}:
             active_task_ids.append(task_id)
@@ -214,7 +156,10 @@ def build_team_mode_runtime_snapshot(*, db: Session, user: Any, project_id: str)
                 "id": task_id,
                 "title": str(task.title or "").strip() or task_id,
                 "status": str(task.status or "").strip(),
-                "semantic_status": semantic_status_key(status=task.status),
+                "semantic_status": semantic_status_key(
+                    status=task.status,
+                    status_semantics=runtime_context.status_semantics if enabled else None,
+                ),
                 "role": str(role or "").strip(),
                 "phase": derive_phase_from_status_and_role(
                     status=task.status,
@@ -252,13 +197,6 @@ def build_team_mode_runtime_snapshot(*, db: Session, user: Any, project_id: str)
     }
     planned_load_by_agent_code = (
         runtime_context.active_agent_load_by_code(agents=team_agents)
-        if enabled
-        else build_active_agent_load_by_code(
-            agents=team_agents,
-            task_likes=base_tasks,
-            member_role_by_user_id=member_role_by_user_id,
-            agent_role_by_code=agent_role_by_code,
-        )
     )
 
     for task in base_tasks:
@@ -337,6 +275,33 @@ def build_team_mode_runtime_snapshot(*, db: Session, user: Any, project_id: str)
     for task in base_tasks:
         task["selected_for_dispatch"] = str(task.get("id") or "").strip() in dispatch_ids
         task["selected_for_kickoff"] = str(task.get("id") or "").strip() in kickoff_ids
+
+    now_task_ids = [
+        str(task.get("id") or "").strip()
+        for task in base_tasks
+        if str(task.get("runtime_state") or "").strip() == "active"
+        or bool(task.get("selected_for_dispatch"))
+    ]
+    now_task_id_set = {task_id for task_id in now_task_ids if task_id}
+    next_task_ids = [
+        str(task.get("id") or "").strip()
+        for task in base_tasks
+        if str(task.get("runtime_state") or "").strip() == "runnable"
+        and str(task.get("id") or "").strip() not in now_task_id_set
+    ]
+    blocked_task_ids = [
+        str(task.get("id") or "").strip()
+        for task in base_tasks
+        if str(task.get("runtime_state") or "").strip() in {"blocked", "missing_instruction"}
+    ]
+    summary["focus"] = {
+        "now_task_ids": now_task_ids[:12],
+        "next_task_ids": next_task_ids[:12],
+        "blocked_task_ids": blocked_task_ids[:12],
+        "now_total": len(now_task_ids),
+        "next_total": len(next_task_ids),
+        "blocked_total": len(blocked_task_ids),
+    }
 
     agents: list[dict[str, Any]] = []
     role_agent_counts: dict[str, dict[str, int]] = {

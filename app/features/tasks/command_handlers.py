@@ -77,10 +77,10 @@ from shared.task_automation import (
     STATUS_SCOPE_EXTERNAL,
     STATUS_SCOPE_SELF,
     build_legacy_schedule_trigger,
-    derive_legacy_schedule_fields,
     first_enabled_schedule_trigger,
     has_enabled_schedule_trigger,
     normalize_execution_triggers,
+    resolve_instruction_and_schedule_fields,
 )
 from shared.task_delivery import (
     DELIVERY_MODE_DEPLOYABLE_SLICE,
@@ -238,21 +238,40 @@ def _normalize_tags(values: list[str] | None) -> list[str]:
     return out
 
 
+def _team_mode_runtime_context_for_project(
+    db: Session,
+    *,
+    workspace_id: str | None,
+    project_id: str | None,
+    require_enabled: bool = False,
+) -> TeamModeProjectRuntimeContext | None:
+    normalized_workspace_id = str(workspace_id or "").strip()
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_workspace_id or not normalized_project_id:
+        return None
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=normalized_workspace_id,
+        project_id=normalized_project_id,
+    )
+    if require_enabled and not runtime_context.enabled:
+        return None
+    return runtime_context
+
+
 def _load_team_mode_agents_for_project(
     db: Session,
     *,
     workspace_id: str,
     project_id: str | None,
 ) -> list[dict[str, str]]:
-    normalized_project_id = str(project_id or "").strip()
-    if not workspace_id or not normalized_project_id:
-        return []
-    runtime_context = TeamModeProjectRuntimeContext(
-        db=db,
+    runtime_context = _team_mode_runtime_context_for_project(
+        db,
         workspace_id=workspace_id,
-        project_id=normalized_project_id,
+        project_id=project_id,
+        require_enabled=True,
     )
-    if not runtime_context.enabled:
+    if runtime_context is None:
         return []
     return runtime_context.team_agents
 
@@ -263,15 +282,13 @@ def _load_team_mode_status_semantics_for_project(
     workspace_id: str,
     project_id: str | None,
 ) -> dict[str, str] | None:
-    normalized_project_id = str(project_id or "").strip()
-    if not workspace_id or not normalized_project_id:
-        return None
-    runtime_context = TeamModeProjectRuntimeContext(
-        db=db,
+    runtime_context = _team_mode_runtime_context_for_project(
+        db,
         workspace_id=workspace_id,
-        project_id=normalized_project_id,
+        project_id=project_id,
+        require_enabled=True,
     )
-    if not runtime_context.enabled:
+    if runtime_context is None:
         return None
     return runtime_context.status_semantics
 
@@ -377,15 +394,12 @@ def _team_mode_enabled_for_project(
     workspace_id: str,
     project_id: str | None,
 ) -> bool:
-    normalized_project_id = str(project_id or "").strip()
-    if not workspace_id or not normalized_project_id:
-        return False
-    runtime_context = TeamModeProjectRuntimeContext(
-        db=db,
-        workspace_id=str(workspace_id),
-        project_id=normalized_project_id,
-    )
-    return runtime_context.enabled
+    return _team_mode_runtime_context_for_project(
+        db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        require_enabled=True,
+    ) is not None
 
 
 def _should_default_new_task_to_team_mode_developer(
@@ -469,7 +483,6 @@ def _backfill_team_mode_structural_dependencies(
             task_like=task_like,
             member_role_by_user_id={},
             agent_role_by_code=agent_role_by_code,
-            allow_status_fallback=False,
         ) != "Developer":
             continue
         developer_tasks.append(task_like)
@@ -674,13 +687,13 @@ def _team_mode_project_is_unstarted(
         if not normalized_workspace_id:
             project = db.get(Project, str(project_id))
             normalized_workspace_id = str(getattr(project, "workspace_id", "") or "").strip()
-        if not normalized_workspace_id:
-            return True
-        effective_runtime_context = TeamModeProjectRuntimeContext(
+        effective_runtime_context = _team_mode_runtime_context_for_project(
             db=db,
             workspace_id=normalized_workspace_id,
-            project_id=str(project_id),
+            project_id=project_id,
         )
+    if effective_runtime_context is None:
+        return True
     return not effective_runtime_context.project_has_runtime_activity(exclude_task_id=exclude_task_id)
 
 
@@ -690,12 +703,13 @@ def _verify_team_mode_project_topology(
     workspace_id: str,
     project_id: str,
 ) -> dict[str, object] | None:
-    runtime_context = TeamModeProjectRuntimeContext(
-        db=db,
-        workspace_id=str(workspace_id),
-        project_id=str(project_id),
+    runtime_context = _team_mode_runtime_context_for_project(
+        db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        require_enabled=True,
     )
-    if not runtime_context.enabled:
+    if runtime_context is None:
         return None
     task_rows = db.execute(
         select(
@@ -1055,16 +1069,15 @@ def _enforce_team_mode_transition_policy(
     to_status: str,
     task_id: str | None = None,
 ) -> None:
-    normalized_project_id = str(project_id or "").strip()
-    if not normalized_project_id:
-        return
-    runtime_context = TeamModeProjectRuntimeContext(
-        db=db,
-        workspace_id=str(workspace_id),
-        project_id=normalized_project_id,
+    runtime_context = _team_mode_runtime_context_for_project(
+        db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        require_enabled=True,
     )
-    if not runtime_context.enabled:
+    if runtime_context is None:
         return
+    normalized_project_id = str(project_id or "").strip()
     status_semantics = runtime_context.status_semantics
     member_role_by_user_id = runtime_context.member_role_by_user_id
     actor_role = member_role_by_user_id.get(str(actor_user_id), "")
@@ -1129,15 +1142,13 @@ def _load_enabled_team_mode_config(
     workspace_id: str,
     project_id: str | None,
 ) -> dict[str, Any] | None:
-    normalized_project_id = str(project_id or "").strip()
-    if not workspace_id or not normalized_project_id:
-        return None
-    runtime_context = TeamModeProjectRuntimeContext(
-        db=db,
-        workspace_id=str(workspace_id),
-        project_id=normalized_project_id,
+    runtime_context = _team_mode_runtime_context_for_project(
+        db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        require_enabled=True,
     )
-    if not runtime_context.enabled:
+    if runtime_context is None:
         return None
     return runtime_context.config
 
@@ -1153,15 +1164,13 @@ def _resolve_team_mode_human_owner_user_id(
         oversight = team_mode_config.get("oversight") if isinstance(team_mode_config.get("oversight"), dict) else {}
         user_id = str(oversight.get("human_owner_user_id") or "").strip()
         return user_id or None
-    normalized_project_id = str(project_id or "").strip()
-    if not workspace_id or not normalized_project_id:
-        return None
-    runtime_context = TeamModeProjectRuntimeContext(
-        db=db,
+    runtime_context = _team_mode_runtime_context_for_project(
+        db,
         workspace_id=workspace_id,
-        project_id=normalized_project_id,
+        project_id=project_id,
+        require_enabled=True,
     )
-    if not runtime_context.enabled:
+    if runtime_context is None:
         return None
     return runtime_context.human_owner_user_id
 
@@ -1184,15 +1193,13 @@ def _resolve_team_mode_reviewer_user_id(
             project_id=project_id,
             team_mode_config=team_mode_config,
         )
-    normalized_project_id = str(project_id or "").strip()
-    if not workspace_id or not normalized_project_id:
-        return None
-    runtime_context = TeamModeProjectRuntimeContext(
-        db=db,
+    runtime_context = _team_mode_runtime_context_for_project(
+        db,
         workspace_id=workspace_id,
-        project_id=normalized_project_id,
+        project_id=project_id,
+        require_enabled=True,
     )
-    if not runtime_context.enabled:
+    if runtime_context is None:
         return None
     return runtime_context.reviewer_user_id
 
@@ -1206,14 +1213,15 @@ def _resolve_team_agent_assignment_by_role(
 ) -> tuple[str | None, str | None]:
     normalized_project_id = str(project_id or "").strip()
     normalized_role = str(authority_role or "").strip()
-    if not workspace_id or not normalized_project_id or not normalized_role:
+    if not normalized_project_id or not normalized_role:
         return None, None
-    runtime_context = TeamModeProjectRuntimeContext(
-        db=db,
+    runtime_context = _team_mode_runtime_context_for_project(
+        db,
         workspace_id=workspace_id,
         project_id=normalized_project_id,
+        require_enabled=True,
     )
-    if not runtime_context.enabled:
+    if runtime_context is None:
         return None, None
     team_agents = runtime_context.team_agents
     current_load_by_agent_code = runtime_context.active_agent_load_by_code(agents=team_agents)
@@ -1289,12 +1297,13 @@ def _infer_team_mode_request_origin(
     if not workspace_id or not normalized_project_id or not normalized_task_id:
         return None, None
 
-    effective_runtime_context = runtime_context or TeamModeProjectRuntimeContext(
-        db=db,
-        workspace_id=str(workspace_id),
+    effective_runtime_context = runtime_context or _team_mode_runtime_context_for_project(
+        db,
+        workspace_id=workspace_id,
         project_id=normalized_project_id,
+        require_enabled=True,
     )
-    if not effective_runtime_context.enabled:
+    if effective_runtime_context is None:
         return None, None
     workflow_role = effective_runtime_context.derive_workflow_role(
         task_like={
@@ -1391,7 +1400,7 @@ def _fallback_task_instruction(*, title: str, description: str | None) -> str | 
     return normalized_title or None
 
 
-def _with_legacy_schedule_overrides(
+def _apply_schedule_overrides(
     *,
     instruction: str | None,
     execution_triggers: list[dict],
@@ -1402,13 +1411,11 @@ def _with_legacy_schedule_overrides(
     recurring_rule: str | object = _UNSET,
     schedule_run_on_statuses: list[str] | object = _UNSET,
 ) -> tuple[str | None, list[dict]]:
-    effective_instruction = _normalize_instruction(instruction)
-    effective_triggers = normalize_execution_triggers(execution_triggers)
-    _current_schedule_idx, current_schedule_trigger = first_enabled_schedule_trigger(effective_triggers)
-    current_legacy = derive_legacy_schedule_fields(
-        instruction=effective_instruction,
-        execution_triggers=effective_triggers,
+    effective_instruction, effective_triggers, current_schedule_fields = resolve_instruction_and_schedule_fields(
+        instruction=_normalize_instruction(instruction),
+        execution_triggers=execution_triggers,
     )
+    _current_schedule_idx, current_schedule_trigger = first_enabled_schedule_trigger(effective_triggers)
 
     has_legacy_override = any(
         value is not _UNSET
@@ -1424,7 +1431,7 @@ def _with_legacy_schedule_overrides(
     if not has_legacy_override:
         return effective_instruction, effective_triggers
 
-    effective_task_type_raw = task_type if task_type is not _UNSET else current_legacy.get("task_type")
+    effective_task_type_raw = task_type if task_type is not _UNSET else current_schedule_fields.get("task_type")
     effective_task_type = str(effective_task_type_raw or "manual").strip().lower()
     explicit_schedule_override_present = any(
         value is not _UNSET
@@ -1444,22 +1451,22 @@ def _with_legacy_schedule_overrides(
     legacy_instruction = (
         scheduled_instruction
         if scheduled_instruction is not _UNSET
-        else current_legacy.get("scheduled_instruction")
+        else current_schedule_fields.get("scheduled_instruction")
     )
     legacy_scheduled_at = (
         scheduled_at_utc
         if scheduled_at_utc is not _UNSET
-        else current_legacy.get("scheduled_at_utc")
+        else current_schedule_fields.get("scheduled_at_utc")
     )
     legacy_timezone = (
         schedule_timezone
         if schedule_timezone is not _UNSET
-        else current_legacy.get("schedule_timezone")
+        else current_schedule_fields.get("schedule_timezone")
     )
     legacy_recurring_rule = (
         recurring_rule
         if recurring_rule is not _UNSET
-        else current_legacy.get("recurring_rule")
+        else current_schedule_fields.get("recurring_rule")
     )
     legacy_run_on_statuses = (
         schedule_run_on_statuses
@@ -1564,11 +1571,13 @@ def _validate_dependency_status_contract(
     normalized_project_id = str(project_id or "").strip()
     if not workspace_id or not normalized_project_id:
         return
-    runtime_context = TeamModeProjectRuntimeContext(
-        db=db,
-        workspace_id=str(workspace_id),
+    runtime_context = _team_mode_runtime_context_for_project(
+        db,
+        workspace_id=workspace_id,
         project_id=normalized_project_id,
     )
+    if runtime_context is None:
+        return
     normalized_task_id = str(task_id or "").strip()
     relationships = normalize_task_relationships(task_relationships)
     for relationship in relationships:
@@ -1613,11 +1622,13 @@ def _team_mode_task_dependency_ready(
     state: dict[str, object],
     runtime_context: TeamModeProjectRuntimeContext | None = None,
 ) -> tuple[bool, str | None]:
-    effective_runtime_context = runtime_context or TeamModeProjectRuntimeContext(
-        db=db,
-        workspace_id=str(workspace_id),
-        project_id=str(project_id),
+    effective_runtime_context = runtime_context or _team_mode_runtime_context_for_project(
+        db,
+        workspace_id=workspace_id,
+        project_id=project_id,
     )
+    if effective_runtime_context is None:
+        return True, None
     task_relationships = normalize_task_relationships(state.get("task_relationships"))
     if not task_relationships:
         return True, None
@@ -1726,19 +1737,12 @@ def _persist_task_aggregate(
 
 
 def _task_view_from_aggregate(*, task_id: str, aggregate: TaskAggregate, created_by: str) -> dict:
-    instruction = _normalize_instruction(getattr(aggregate, "instruction", None) or getattr(aggregate, "scheduled_instruction", None))
-    execution_triggers = normalize_execution_triggers(getattr(aggregate, "execution_triggers", []) or [])
-    if not execution_triggers:
-        legacy_trigger = build_legacy_schedule_trigger(
-            scheduled_at_utc=getattr(aggregate, "scheduled_at_utc", None),
-            schedule_timezone=getattr(aggregate, "schedule_timezone", None),
-            recurring_rule=getattr(aggregate, "recurring_rule", None),
-        )
-        if legacy_trigger is not None:
-            execution_triggers = [legacy_trigger]
-    legacy_schedule = derive_legacy_schedule_fields(
-        instruction=instruction,
-        execution_triggers=execution_triggers,
+    instruction, execution_triggers, legacy_schedule = resolve_instruction_and_schedule_fields(
+        instruction=_normalize_instruction(getattr(aggregate, "instruction", None) or getattr(aggregate, "scheduled_instruction", None)),
+        execution_triggers=getattr(aggregate, "execution_triggers", []) or [],
+        scheduled_at_utc=getattr(aggregate, "scheduled_at_utc", None),
+        schedule_timezone=getattr(aggregate, "schedule_timezone", None),
+        recurring_rule=getattr(aggregate, "recurring_rule", None),
     )
     return {
         "id": task_id,
@@ -1917,7 +1921,7 @@ class CreateTaskHandler:
                 title=title,
                 description=self.payload.description,
             )
-        normalized_instruction, normalized_triggers = _with_legacy_schedule_overrides(
+        normalized_instruction, normalized_triggers = _apply_schedule_overrides(
             instruction=requested_instruction,
             execution_triggers=normalized_requested_triggers,
             task_type=legacy_task_type,
@@ -1938,7 +1942,7 @@ class CreateTaskHandler:
             task_id=tid,
             task_relationships=self.payload.task_relationships,
         )
-        legacy_schedule = derive_legacy_schedule_fields(
+        _resolved_instruction, _resolved_triggers, legacy_schedule = resolve_instruction_and_schedule_fields(
             instruction=normalized_instruction,
             execution_triggers=normalized_triggers,
         )
@@ -2140,14 +2144,15 @@ class PatchTaskHandler:
                 for trigger in current_execution_triggers
                 if str(trigger.get("kind") or "") != TRIGGER_KIND_SCHEDULE
             ]
-        if not current_execution_triggers and str(current_task_type).strip().lower() != "manual":
-            legacy_trigger = build_legacy_schedule_trigger(
+        if str(current_task_type).strip().lower() != "manual":
+            _instruction, resolved_triggers, _legacy_schedule = resolve_instruction_and_schedule_fields(
+                instruction=current_instruction,
+                execution_triggers=current_execution_triggers,
                 scheduled_at_utc=current_scheduled_at_utc,
                 schedule_timezone=current_schedule_timezone,
                 recurring_rule=current_recurring_rule,
             )
-            if legacy_trigger is not None:
-                current_execution_triggers = [legacy_trigger]
+            current_execution_triggers = resolved_triggers
         current_specification_id = (
             (current_state.get("specification_id") if current_state else None)
             or (current_row.specification_id if current_row is not None else None)
@@ -2293,7 +2298,7 @@ class PatchTaskHandler:
             event_payload["delivery_mode"] = normalize_delivery_mode(current_state.get("delivery_mode"))
         else:
             event_payload["delivery_mode"] = DELIVERY_MODE_DEPLOYABLE_SLICE
-        normalized_instruction, normalized_triggers = _with_legacy_schedule_overrides(
+        normalized_instruction, normalized_triggers = _apply_schedule_overrides(
             instruction=requested_instruction,
             execution_triggers=requested_triggers,
             task_type=event_payload.get("task_type", _UNSET),
@@ -2307,7 +2312,7 @@ class PatchTaskHandler:
             execution_triggers=normalized_triggers,
             source_task_id=self.task_id,
         )
-        legacy_schedule = derive_legacy_schedule_fields(
+        _resolved_instruction, _resolved_triggers, legacy_schedule = resolve_instruction_and_schedule_fields(
             instruction=normalized_instruction,
             execution_triggers=normalized_triggers,
         )
@@ -2342,14 +2347,10 @@ class PatchTaskHandler:
 
         requested_status = str(event_payload.get("status") or "").strip()
         effective_project_id = str(event_payload.get("project_id") or project_id or "").strip() or None
-        runtime_context = (
-            TeamModeProjectRuntimeContext(
-                db=self.ctx.db,
-                workspace_id=workspace_id,
-                project_id=str(effective_project_id),
-            )
-            if effective_project_id
-            else None
+        runtime_context = _team_mode_runtime_context_for_project(
+            self.ctx.db,
+            workspace_id=workspace_id,
+            project_id=effective_project_id,
         )
         team_mode_config = runtime_context.config if runtime_context is not None and runtime_context.enabled else None
         status_semantics = runtime_context.status_semantics if runtime_context is not None and runtime_context.enabled else dict(REQUIRED_SEMANTIC_STATUSES)
@@ -2521,12 +2522,13 @@ class ReviewTaskHandler:
         normalized_project_id = str(project_id or "").strip()
         if not normalized_project_id:
             raise HTTPException(status_code=409, detail="Review actions require a project task.")
-        runtime_context = TeamModeProjectRuntimeContext(
-            db=self.ctx.db,
+        runtime_context = _team_mode_runtime_context_for_project(
+            self.ctx.db,
             workspace_id=workspace_id,
             project_id=normalized_project_id,
+            require_enabled=True,
         )
-        if not runtime_context.enabled:
+        if runtime_context is None:
             raise HTTPException(status_code=409, detail="Review actions require Team Mode to be enabled.")
         team_mode_config = runtime_context.config
         status_semantics = runtime_context.status_semantics
@@ -3033,14 +3035,10 @@ class RequestAutomationRunHandler:
                 "skipped": True,
                 "reason": "Task automation is already in progress with the same instruction.",
             }
-        runtime_context = (
-            TeamModeProjectRuntimeContext(
-                db=self.ctx.db,
-                workspace_id=str(workspace_id),
-                project_id=str(project_id),
-            )
-            if project_id
-            else None
+        runtime_context = _team_mode_runtime_context_for_project(
+            self.ctx.db,
+            workspace_id=workspace_id,
+            project_id=project_id,
         )
         requested_source = str(self.source or "").strip().lower()
         requested_source_task_id = str(self.source_task_id or "").strip() or None

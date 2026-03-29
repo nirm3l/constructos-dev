@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from plugins.team_mode.runtime_context import TeamModeProjectRuntimeContext
 from shared.core import (
     AggregateEventRepository,
     DEFAULT_STATUSES,
@@ -146,15 +147,12 @@ def _canonicalize_project_status(value: str | None) -> str:
 
 
 def _is_team_mode_enabled_for_project(db: Session, *, workspace_id: str, project_id: str) -> bool:
-    row = db.execute(
-        select(ProjectPluginConfig.enabled).where(
-            ProjectPluginConfig.workspace_id == str(workspace_id),
-            ProjectPluginConfig.project_id == str(project_id),
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).scalar_one_or_none()
-    return bool(row)
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=str(workspace_id),
+        project_id=str(project_id),
+    )
+    return bool(runtime_context.enabled)
 
 
 def _require_team_mode_project_statuses(statuses: list[str]) -> None:

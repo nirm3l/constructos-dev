@@ -75,7 +75,11 @@ def test_list_available_agent_models_combines_providers(monkeypatch):
 
     monkeypatch.setattr(model_registry, "list_available_codex_models", lambda force_refresh=False: (["gpt-5"], "gpt-5"))
     monkeypatch.setattr(model_registry, "list_available_claude_models", lambda: (["sonnet"], "sonnet"))
-    monkeypatch.setattr(model_registry, "list_available_opencode_models", lambda: (["opencode/gpt-5-nano"], "opencode/gpt-5-nano"))
+    monkeypatch.setattr(
+        model_registry,
+        "list_available_opencode_models",
+        lambda force_refresh=False: (["opencode/gpt-5-nano"], "opencode/gpt-5-nano"),
+    )
 
     models, default_model = model_registry.list_available_agent_models(force_refresh=True)
 
@@ -101,11 +105,38 @@ def test_list_available_opencode_models_uses_env_fallback(monkeypatch):
     monkeypatch.setattr(model_registry, "_read_model_list_from_opencode", lambda: (_ for _ in ()).throw(FileNotFoundError()))
     monkeypatch.setenv("AGENT_OPENCODE_AVAILABLE_MODELS", "opencode/gpt-5-nano,openai/gpt-5-mini,opencode/mimo-v2-pro-free")
     monkeypatch.setattr(model_registry, "agent_default_model_for_provider", lambda provider: "opencode/gpt-5-nano")
+    monkeypatch.setattr(model_registry, "_CACHE_OPENCODE_MODELS", [])
+    monkeypatch.setattr(model_registry, "_CACHE_OPENCODE_DEFAULT_MODEL", "")
+    monkeypatch.setattr(model_registry, "_CACHE_OPENCODE_EXPIRES_AT", 0.0)
 
     models, default_model = model_registry.list_available_opencode_models()
 
     assert models == ["opencode/gpt-5-nano", "opencode/mimo-v2-pro-free"]
     assert default_model == "opencode/gpt-5-nano"
+
+
+def test_list_available_opencode_models_uses_cache(monkeypatch):
+    from features.agents import model_registry
+
+    calls = {"count": 0}
+
+    def fake_discover() -> tuple[list[str], str]:
+        calls["count"] += 1
+        return ["opencode/gpt-5-nano"], "opencode/gpt-5-nano"
+
+    monkeypatch.setattr(model_registry, "_discover_opencode_models_uncached", fake_discover)
+    monkeypatch.setattr(model_registry, "_CACHE_OPENCODE_MODELS", [])
+    monkeypatch.setattr(model_registry, "_CACHE_OPENCODE_DEFAULT_MODEL", "")
+    monkeypatch.setattr(model_registry, "_CACHE_OPENCODE_EXPIRES_AT", 0.0)
+
+    first_models, first_default = model_registry.list_available_opencode_models()
+    second_models, second_default = model_registry.list_available_opencode_models()
+
+    assert first_models == ["opencode/gpt-5-nano"]
+    assert second_models == ["opencode/gpt-5-nano"]
+    assert first_default == "opencode/gpt-5-nano"
+    assert second_default == "opencode/gpt-5-nano"
+    assert calls["count"] == 1
 
 
 def test_append_agent_chat_models_deduplicates_case_insensitively():

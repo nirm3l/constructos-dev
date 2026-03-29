@@ -38,20 +38,24 @@ export function useRealtimeEffects(c: any) {
   } = c
   const chatLiveResumeAbortRef = React.useRef<AbortController | null>(null)
   const shouldStickChatToBottomRef = React.useRef(true)
+  const lastRealtimeRefreshAtRef = React.useRef(0)
   const isChatNearBottom = React.useCallback((el: HTMLDivElement) => {
     const distanceToBottom = el.scrollHeight - el.clientHeight - el.scrollTop
     return distanceToBottom <= CHAT_NEAR_BOTTOM_THRESHOLD_PX
   }, [])
 
   const scheduleRealtimeRefresh = React.useCallback(() => {
+    const now = Date.now()
+    // Prevent high-frequency event bursts from causing near-continuous refetch loops.
+    if (now - lastRealtimeRefreshAtRef.current < 1200) return
     if (realtimeRefreshTimerRef.current !== null) {
       window.clearTimeout(realtimeRefreshTimerRef.current)
     }
     realtimeRefreshTimerRef.current = window.setTimeout(() => {
+      lastRealtimeRefreshAtRef.current = Date.now()
       qc.invalidateQueries({ queryKey: ['tasks'] })
       qc.invalidateQueries({ queryKey: ['project-tags'] })
       qc.invalidateQueries({ queryKey: ['board'] })
-      qc.invalidateQueries({ queryKey: ['bootstrap'] })
       if (selectedProjectId) {
         qc.invalidateQueries({ queryKey: ['project-graph-overview', userId, selectedProjectId] })
         qc.invalidateQueries({ queryKey: ['project-graph-context-pack', userId, selectedProjectId] })
@@ -416,10 +420,8 @@ export function useRealtimeEffects(c: any) {
           }
           return [incoming, ...base]
         })
-        scheduleRealtimeRefresh()
       } catch {
         qc.invalidateQueries({ queryKey: ['notifications', userId] })
-        scheduleRealtimeRefresh()
       }
     }
 
@@ -434,7 +436,20 @@ export function useRealtimeEffects(c: any) {
         setCodexChatLastTaskEventAt(payload.created_at ? Date.parse(payload.created_at) : Date.now())
       }
       const action = String(payload.action || '').trim()
+      const actionLower = action.toLowerCase()
       const projectId = String(payload.project_id || '').trim()
+      const isProjectLifecycleEvent =
+        actionLower.startsWith('project')
+        || actionLower.includes('project_created')
+        || actionLower.includes('project_updated')
+        || actionLower.includes('project_deleted')
+      if (isProjectLifecycleEvent) {
+        qc.invalidateQueries({ queryKey: ['bootstrap', userId] })
+      }
+      if (projectId && selectedProjectId && projectId !== selectedProjectId) {
+        if (isProjectLifecycleEvent) return
+        return
+      }
       if (
         action === PROJECT_EMBEDDING_INDEX_UPDATED &&
         tab === 'projects' &&

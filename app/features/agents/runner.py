@@ -87,7 +87,8 @@ from shared.typed_notifications import append_notification_created_event
 from shared.project_repository import (
     branch_is_merged_to_main,
     find_project_compose_manifest,
-    resolve_project_repository_host_path,
+    resolve_existing_project_repository_path,
+    resolve_path_for_host_docker,
     resolve_project_repository_path,
     resolve_task_branch_name,
     resolve_task_worktree_path,
@@ -204,6 +205,10 @@ _DEPLOY_EVIDENCE_PREFIXES = (
     "deploy:docker-compose:",
     "health:",
     "runtime-root:",
+)
+_DEPLOY_TRANSIENT_PREP_PREFIXES = (
+    "probe:",
+    "prereq:runner_deploy_required_stack",
 )
 _PATCH_MARKER_LINES = {
     "*** Begin Patch",
@@ -570,8 +575,27 @@ def _effective_runtime_deploy_target_for_task(
     return stack, host, port, health_path, runtime_required
 
 
-def _project_has_compose_manifest(*, project_name: str | None, project_id: str | None) -> bool:
-    manifest = find_project_compose_manifest(project_name=project_name, project_id=project_id)
+def _project_external_refs(*, db, project_id: str | None) -> object:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return None
+    project_row = db.get(Project, normalized_project_id)
+    if project_row is None:
+        return None
+    return getattr(project_row, "external_refs", None)
+
+
+def _project_has_compose_manifest(
+    *,
+    db,
+    project_name: str | None,
+    project_id: str | None,
+) -> bool:
+    manifest = find_project_compose_manifest(
+        project_name=project_name,
+        project_id=project_id,
+        project_external_refs=_project_external_refs(db=db, project_id=project_id),
+    )
     return manifest is not None
 
 
@@ -3095,11 +3119,15 @@ def _append_lead_deploy_external_refs(
             url = str(item.get("url") or "").strip()
             if not url:
                 continue
-            if url.casefold().startswith(_DEPLOY_EVIDENCE_PREFIXES):
+            normalized_url = url.casefold()
+            if normalized_url.startswith(_DEPLOY_EVIDENCE_PREFIXES):
                 # Keep only the latest deploy evidence markers to avoid stale/noisy refs.
                 continue
+            if normalized_url.startswith(_DEPLOY_TRANSIENT_PREP_PREFIXES):
+                # Remove transient pre-deploy observations once actual deploy evidence is recorded.
+                continue
             title = str(item.get("title") or "").strip()
-            key = (url.casefold(), title.casefold())
+            key = (normalized_url, title.casefold())
             if key in seen:
                 continue
             seen.add(key)
@@ -3157,11 +3185,20 @@ def _derive_runtime_deploy_markers(
     *,
     project_name: str | None,
     project_id: str | None,
+    project_external_refs: object = None,
 ) -> tuple[str | None, str | None]:
-    repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
+    repo_root = resolve_existing_project_repository_path(
+        project_name=project_name,
+        project_id=project_id,
+        project_external_refs=project_external_refs,
+    )
     if not repo_root.exists():
         return None, None
-    manifest = find_project_compose_manifest(project_name=project_name, project_id=project_id)
+    manifest = find_project_compose_manifest(
+        project_name=project_name,
+        project_id=project_id,
+        project_external_refs=project_external_refs,
+    )
     compose_marker = None
     if manifest is not None:
         try:
@@ -3416,8 +3453,13 @@ def _synthesize_runtime_deploy_assets(
     project_id: str | None,
     port: int,
     health_path: str,
+    project_external_refs: object = None,
 ) -> dict[str, object]:
-    repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
+    repo_root = resolve_existing_project_repository_path(
+        project_name=project_name,
+        project_id=project_id,
+        project_external_refs=project_external_refs,
+    )
     if not repo_root.exists() or not repo_root.is_dir():
         return {"ok": False, "error": f"repository root is missing: {repo_root}"}
     dockerfile = repo_root / "Dockerfile"
@@ -3425,9 +3467,17 @@ def _synthesize_runtime_deploy_assets(
     pyproject = repo_root / "pyproject.toml"
     requirements = repo_root / "requirements.txt"
     index_html = repo_root / "index.html"
-    manifest_path = find_project_compose_manifest(project_name=project_name, project_id=project_id)
+    manifest_path = find_project_compose_manifest(
+        project_name=project_name,
+        project_id=project_id,
+        project_external_refs=project_external_refs,
+    )
     if manifest_path is not None:
-        runtime_type = _derive_runtime_deploy_markers(project_name=project_name, project_id=project_id)[0]
+        runtime_type = _derive_runtime_deploy_markers(
+            project_name=project_name,
+            project_id=project_id,
+            project_external_refs=project_external_refs,
+        )[0]
         return {
             "ok": True,
             "manifest_path": str(manifest_path),
@@ -6312,6 +6362,10 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                 manifest_path = find_project_compose_manifest(
                     project_name=project_name,
                     project_id=str(project_id or "").strip() or None,
+                    project_external_refs=_project_external_refs(
+                        db=db,
+                        project_id=str(project_id or "").strip() or None,
+                    ),
                 )
                 if runtime_required:
                     synthesis = _synthesize_runtime_deploy_assets(
@@ -6319,6 +6373,10 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                         project_id=str(project_id or "").strip() or None,
                         port=int(port),
                         health_path=health_path,
+                        project_external_refs=_project_external_refs(
+                            db=db,
+                            project_id=str(project_id or "").strip() or None,
+                        ),
                     )
                     if not bool(synthesis.get("ok")):
                         raise RuntimeError(
@@ -6350,14 +6408,8 @@ def _record_automation_success(run: QueuedAutomationRun, *, outcome: AutomationO
                     )
                     state["last_deploy_execution"] = deploy_snapshot
                 if runtime_required and manifest_path is not None:
-                    repo_root = resolve_project_repository_path(
-                        project_name=str(project_name or "").strip() or None,
-                        project_id=str(project_id or "").strip() or None,
-                    )
-                    repo_root_host = resolve_project_repository_host_path(
-                        project_name=str(project_name or "").strip() or None,
-                        project_id=str(project_id or "").strip() or None,
-                    )
+                    repo_root = Path(manifest_path).resolve(strict=False).parent
+                    repo_root_host = resolve_path_for_host_docker(path=repo_root)
                     translated_manifest_path = _translate_compose_manifest_for_host_runtime(
                         manifest_path=Path(manifest_path),
                         repo_root_host=repo_root_host,

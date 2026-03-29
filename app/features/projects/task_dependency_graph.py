@@ -14,10 +14,10 @@ from features.tasks.domain import (
     EVENT_AUTOMATION_REQUESTED,
     EVENT_COMMENT_ADDED,
 )
+from plugins.team_mode.runtime_context import TeamModeProjectRuntimeContext
 from plugins.team_mode.semantics import semantic_status_key
-from plugins.team_mode.task_roles import derive_task_role, normalize_team_agents
-from shared.eventing_rebuild import load_events_after, rebuild_state
-from shared.models import ChatMessage, ChatSession, Project, ProjectMember, ProjectPluginConfig, Task
+from shared.eventing_rebuild import load_events_after
+from shared.models import ChatMessage, ChatSession, Project, Task
 from shared.task_automation import TRIGGER_KIND_STATUS_CHANGE, normalize_execution_triggers
 from shared.task_relationships import normalize_task_relationships
 
@@ -362,25 +362,11 @@ def get_project_task_dependency_graph(
             "edges": [],
         }
 
-    member_role_by_user_id = {
-        str(user_id): str(role or "").strip()
-        for user_id, role in db.execute(
-            select(ProjectMember.user_id, ProjectMember.role).where(
-                ProjectMember.project_id == project_id,
-                ProjectMember.workspace_id == project.workspace_id,
-            )
-        ).all()
-    }
-    team_mode_agents = _load_team_mode_agents(
+    runtime_context = TeamModeProjectRuntimeContext(
         db=db,
         workspace_id=str(project.workspace_id or ""),
         project_id=project_id,
     )
-    agent_role_by_code = {
-        str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-        for agent in team_mode_agents
-        if str(agent.get("id") or "").strip()
-    }
 
     task_ids = [str(task.id or "").strip() for task in task_rows if str(task.id or "").strip()]
     task_id_set = set(task_ids)
@@ -391,18 +377,21 @@ def get_project_task_dependency_graph(
         task_id = str(task.id or "").strip()
         if not task_id:
             continue
-        state, _version = rebuild_state(db, "Task", task_id)
+        entry = runtime_context.task_entry(task_id)
+        state = dict(entry.state) if entry is not None else runtime_context.task_state(task_id)
         states_by_task_id[task_id] = state
-        role = derive_task_role(
-            task_like={
-                "id": task_id,
-                "assignee_id": str(state.get("assignee_id") or task.assignee_id or "").strip(),
-                "assigned_agent_code": str(state.get("assigned_agent_code") or task.assigned_agent_code or "").strip(),
-                "labels": state.get("labels", task.labels),
-                "status": str(state.get("status") or task.status or "").strip(),
-            },
-            member_role_by_user_id=member_role_by_user_id,
-            agent_role_by_code=agent_role_by_code,
+        role = (
+            str(entry.workflow_role or "").strip()
+            if entry is not None
+            else runtime_context.derive_workflow_role(
+                task_like={
+                    "id": task_id,
+                    "assignee_id": str(state.get("assignee_id") or task.assignee_id or "").strip(),
+                    "assigned_agent_code": str(state.get("assigned_agent_code") or task.assigned_agent_code or "").strip(),
+                    "labels": state.get("labels", task.labels),
+                    "status": str(state.get("status") or task.status or "").strip(),
+                }
+            )
         )
         last_activity_at = _max_iso_timestamp(
             [
@@ -1046,29 +1035,6 @@ def _merge_runtime_event(*, edge: dict[str, Any], payload: dict[str, Any]) -> No
     )
     events.sort(key=lambda item: str((item or {}).get("at") or ""), reverse=True)
     edge["runtime_events"] = events
-
-
-def _load_team_mode_agents(*, db: Session, workspace_id: str, project_id: str) -> list[dict[str, Any]]:
-    row = db.execute(
-        select(ProjectPluginConfig.config_json).where(
-            ProjectPluginConfig.workspace_id == workspace_id,
-            ProjectPluginConfig.project_id == project_id,
-            ProjectPluginConfig.plugin_key == "team_mode",
-            ProjectPluginConfig.enabled == True,  # noqa: E712
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).first()
-    if row is None:
-        return []
-    try:
-        parsed = json.loads(str(row[0] or "").strip() or "{}")
-    except Exception:
-        parsed = {}
-    if not isinstance(parsed, dict):
-        return []
-    return normalize_team_agents(parsed.get("team"))
-
-
 def _normalize_string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []

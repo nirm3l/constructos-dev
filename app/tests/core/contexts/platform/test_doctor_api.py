@@ -112,3 +112,33 @@ def test_workspace_doctor_seed_and_run_accept_long_command_id(tmp_path: Path):
         )
     assert command_rows
     assert all(len(str(row.command_id or "")) <= 64 for row in command_rows)
+
+
+def test_project_checks_verify_exposes_team_mode_runtime_focus_summary(tmp_path: Path):
+    client = build_client(tmp_path)
+    bootstrap = client.get('/api/bootstrap').json()
+    workspace_id = bootstrap['workspaces'][0]['id']
+
+    seeded = client.post(f'/api/workspaces/{workspace_id}/doctor/seed')
+    assert seeded.status_code == 200
+    seeded_payload = seeded.json()
+    project_id = seeded_payload['project']['id']
+
+    checks = client.get(f'/api/projects/{project_id}/checks/verify')
+    assert checks.status_code == 200
+    payload = checks.json()
+
+    runtime = payload.get('team_mode_runtime') or {}
+    summary = runtime.get('summary') or {}
+    focus = summary.get('focus') or {}
+
+    assert isinstance(focus.get('now_task_ids'), list)
+    assert isinstance(focus.get('next_task_ids'), list)
+    assert isinstance(focus.get('blocked_task_ids'), list)
+    assert isinstance(focus.get('now_total'), int)
+    assert isinstance(focus.get('next_total'), int)
+    assert isinstance(focus.get('blocked_total'), int)
+
+    assert focus['now_total'] >= len(focus['now_task_ids'])
+    assert focus['next_total'] >= len(focus['next_task_ids'])
+    assert focus['blocked_total'] >= len(focus['blocked_task_ids'])

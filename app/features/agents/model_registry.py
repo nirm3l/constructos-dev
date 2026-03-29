@@ -17,6 +17,9 @@ _CACHE_LOCK = threading.Lock()
 _CACHE_EXPIRES_AT = 0.0
 _CACHE_CODEX_MODELS: list[str] = []
 _CACHE_CODEX_DEFAULT_MODEL = ""
+_CACHE_OPENCODE_EXPIRES_AT = 0.0
+_CACHE_OPENCODE_MODELS: list[str] = []
+_CACHE_OPENCODE_DEFAULT_MODEL = ""
 
 
 def _load_positive_float_env(name: str, default: float) -> float:
@@ -46,6 +49,7 @@ def _load_positive_int_env(name: str, default: int) -> int:
 
 
 _CACHE_TTL_SECONDS = _load_positive_float_env("AGENT_CODEX_MODELS_CACHE_TTL_SECONDS", 300.0)
+_OPENCODE_CACHE_TTL_SECONDS = _load_positive_float_env("AGENT_OPENCODE_MODELS_CACHE_TTL_SECONDS", 300.0)
 _MODEL_LIST_TIMEOUT_SECONDS = _load_positive_float_env("AGENT_CODEX_MODEL_LIST_TIMEOUT_SECONDS", 2.0)
 _MODEL_LIST_LIMIT = _load_positive_int_env("AGENT_CODEX_MODEL_LIST_LIMIT", 200)
 _DEFAULT_CLAUDE_MODELS = ("sonnet", "opus")
@@ -343,7 +347,7 @@ def _load_opencode_models_from_env() -> tuple[list[str], str]:
     return out, default_model
 
 
-def list_available_opencode_models() -> tuple[list[str], str]:
+def _discover_opencode_models_uncached() -> tuple[list[str], str]:
     try:
         models = _read_model_list_from_opencode()
     except FileNotFoundError:
@@ -362,6 +366,21 @@ def list_available_opencode_models() -> tuple[list[str], str]:
     if default_model and default_model.lower() not in {item.lower() for item in out}:
         out.insert(0, default_model)
     return out, default_model
+
+
+def list_available_opencode_models(*, force_refresh: bool = False) -> tuple[list[str], str]:
+    global _CACHE_OPENCODE_EXPIRES_AT, _CACHE_OPENCODE_MODELS, _CACHE_OPENCODE_DEFAULT_MODEL
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        if not force_refresh and now < _CACHE_OPENCODE_EXPIRES_AT:
+            return copy.deepcopy(_CACHE_OPENCODE_MODELS), _CACHE_OPENCODE_DEFAULT_MODEL
+
+    models, default_model = _discover_opencode_models_uncached()
+    with _CACHE_LOCK:
+        _CACHE_OPENCODE_MODELS = copy.deepcopy(models)
+        _CACHE_OPENCODE_DEFAULT_MODEL = str(default_model or "").strip()
+        _CACHE_OPENCODE_EXPIRES_AT = time.monotonic() + _OPENCODE_CACHE_TTL_SECONDS
+        return copy.deepcopy(_CACHE_OPENCODE_MODELS), _CACHE_OPENCODE_DEFAULT_MODEL
 
 
 def list_available_agent_models(*, force_refresh: bool = False) -> tuple[list[str], str]:
@@ -384,7 +403,7 @@ def list_available_agent_models(*, force_refresh: bool = False) -> tuple[list[st
     claude_models, claude_default = list_available_claude_models()
     for model in claude_models:
         _append("claude", model)
-    opencode_models, opencode_default = list_available_opencode_models()
+    opencode_models, opencode_default = list_available_opencode_models(force_refresh=force_refresh)
     for model in opencode_models:
         _append("opencode", model)
 

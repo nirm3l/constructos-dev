@@ -56,7 +56,6 @@ def derive_task_role(
     task_like: dict[str, Any],
     member_role_by_user_id: dict[str, str] | None = None,
     agent_role_by_code: dict[str, str] | None = None,
-    allow_status_fallback: bool = False,
 ) -> str:
     assigned_agent_code = str(task_like.get("assigned_agent_code") or "").strip()
     if assigned_agent_code and isinstance(agent_role_by_code, dict):
@@ -197,7 +196,6 @@ def build_active_agent_load_by_code(
             task_like=task_like,
             member_role_by_user_id=member_role_by_user_id,
             agent_role_by_code=agent_role_by_code,
-            allow_status_fallback=False,
         )
         selected_agent = pick_agent_for_role(
             agents=agents,
@@ -230,7 +228,6 @@ def pick_agent_for_task(
         task_like=task_like,
         member_role_by_user_id=member_role_by_user_id,
         agent_role_by_code=agent_role_by_code,
-        allow_status_fallback=False,
     )
     if not role:
         return None

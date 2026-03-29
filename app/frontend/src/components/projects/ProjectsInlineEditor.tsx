@@ -903,6 +903,10 @@ export function ProjectsInlineEditor({
     const raw = projectChecksSnapshot?.team_mode_runtime
     if (!raw || typeof raw !== 'object') return null
     const summaryRaw = raw.summary && typeof raw.summary === 'object' ? raw.summary : {}
+    const focusRaw =
+      summaryRaw && typeof (summaryRaw as Record<string, unknown>).focus === 'object'
+        ? ((summaryRaw as Record<string, unknown>).focus as Record<string, unknown>)
+        : {}
     const dispatchRaw = raw.dispatch && typeof raw.dispatch === 'object' ? raw.dispatch : {}
     const kickoffRaw = raw.kickoff && typeof raw.kickoff === 'object' ? raw.kickoff : {}
     const tasksRaw = Array.isArray(raw.tasks) ? raw.tasks : []
@@ -959,6 +963,20 @@ export function ProjectsInlineEditor({
         missing_instruction_total: Number(summaryRaw.missing_instruction_total || 0),
         active_agents_total: Number(summaryRaw.active_agents_total || 0),
         idle_agents_total: Number(summaryRaw.idle_agents_total || 0),
+        focus: {
+          now_task_ids: Array.isArray(focusRaw.now_task_ids)
+            ? focusRaw.now_task_ids.map((item) => String(item || '').trim()).filter(Boolean)
+            : [],
+          next_task_ids: Array.isArray(focusRaw.next_task_ids)
+            ? focusRaw.next_task_ids.map((item) => String(item || '').trim()).filter(Boolean)
+            : [],
+          blocked_task_ids: Array.isArray(focusRaw.blocked_task_ids)
+            ? focusRaw.blocked_task_ids.map((item) => String(item || '').trim()).filter(Boolean)
+            : [],
+          now_total: Number(focusRaw.now_total || 0),
+          next_total: Number(focusRaw.next_total || 0),
+          blocked_total: Number(focusRaw.blocked_total || 0),
+        },
       },
       dispatch: {
         mode: String(dispatchRaw.mode || '').trim() || 'idle',
@@ -971,6 +989,50 @@ export function ProjectsInlineEditor({
       },
     }
   }, [projectChecksSnapshot?.team_mode_runtime])
+  const teamModeRuntimeView = React.useMemo(() => {
+    if (!teamModeRuntimeSnapshot?.active) return null
+    const workflowTasks = teamModeRuntimeSnapshot.tasks.filter(
+      (task) => task.role === 'Developer' || task.role === 'Lead' || task.role === 'QA'
+    )
+    const workflowTaskById = new Map(workflowTasks.map((task) => [task.id, task] as const))
+    const focus = teamModeRuntimeSnapshot.summary.focus
+    const focusedNowTasks = (focus?.now_task_ids || [])
+      .map((taskId) => workflowTaskById.get(taskId))
+      .filter((task): task is NonNullable<typeof task> => Boolean(task))
+    const focusedNextTasks = (focus?.next_task_ids || [])
+      .map((taskId) => workflowTaskById.get(taskId))
+      .filter((task): task is NonNullable<typeof task> => Boolean(task))
+    const focusedBlockedTasks = (focus?.blocked_task_ids || [])
+      .map((taskId) => workflowTaskById.get(taskId))
+      .filter((task): task is NonNullable<typeof task> => Boolean(task))
+    const nowTasks =
+      focusedNowTasks.length > 0
+        ? focusedNowTasks
+        : workflowTasks.filter(
+            (task) => task.runtime_state === 'active' || task.automation_state === 'queued' || task.automation_state === 'running'
+          )
+    const nextTasks =
+      focusedNextTasks.length > 0
+        ? focusedNextTasks
+        : workflowTasks.filter(
+            (task) =>
+              task.runtime_state === 'runnable' ||
+              task.selected_for_dispatch ||
+              task.selected_for_kickoff
+          )
+    const blockedTasks =
+      focusedBlockedTasks.length > 0
+        ? focusedBlockedTasks
+        : workflowTasks.filter(
+            (task) => task.runtime_state === 'blocked' || Boolean(task.blocker_reason)
+          )
+    return {
+      workflowTasks,
+      nowTasks,
+      nextTasks,
+      blockedTasks,
+    }
+  }, [teamModeRuntimeSnapshot])
   const deliveryKickoffRequired = Boolean(projectChecksSnapshot?.delivery?.kickoff_required)
   const deliveryKickoffHint = String(projectChecksSnapshot?.delivery?.kickoff_hint || '').trim()
   const deliveryRuntimeDeployHealth = React.useMemo(() => {
@@ -2975,7 +3037,7 @@ export function ProjectsInlineEditor({
                     )}
                   </div>
                 ) : null}
-                {teamModeRuntimeSnapshot?.active ? (
+                {teamModeRuntimeSnapshot?.active && teamModeRuntimeView ? (
                   <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
                     <div style={{ fontWeight: 600, marginBottom: 6 }}>Team Mode Runtime</div>
                     <div className="row wrap" style={{ gap: 6 }}>
@@ -3001,23 +3063,34 @@ export function ProjectsInlineEditor({
                         </span>
                       ))}
                     </div>
-                    {teamModeRuntimeSnapshot.tasks.length > 0 ? (
+                    <div className="row wrap" style={{ marginTop: 8, gap: 6 }}>
+                      <span className="badge status-done">Now: {teamModeRuntimeView.nowTasks.length}</span>
+                      <span className="badge">Next: {teamModeRuntimeView.nextTasks.length}</span>
+                      <span className={`badge ${teamModeRuntimeView.blockedTasks.length > 0 ? 'status-blocked' : ''}`}>
+                        Blocked: {teamModeRuntimeView.blockedTasks.length}
+                      </span>
+                    </div>
+                    {teamModeRuntimeView.workflowTasks.length > 0 ? (
                       <div className="gates-check-list" style={{ marginTop: 8 }}>
-                        {teamModeRuntimeSnapshot.tasks
-                          .filter((task) => task.role === 'Developer' || task.role === 'Lead' || task.role === 'QA')
-                          .slice(0, 10)
+                        {[
+                          ...teamModeRuntimeView.blockedTasks.slice(0, 4).map((task) => ({ task, kind: 'blocked' as const })),
+                          ...teamModeRuntimeView.nextTasks.slice(0, 4).map((task) => ({ task, kind: 'next' as const })),
+                        ]
                           .map((task) => (
-                            <div key={`tm-runtime-task-checks-${task.id}`} className="gates-check-row">
+                            <div key={`tm-runtime-task-checks-${task.task.id}-${task.kind}`} className="gates-check-row">
                               <div className="gates-check-copy">
-                                <a href={`?tab=tasks&project=${selectedProject.id}&task=${task.id}`}>{task.title}</a>
+                                <a href={`?tab=tasks&project=${selectedProject.id}&task=${task.task.id}`}>{task.task.title}</a>
                                 <span className="meta">
-                                  role={task.role || 'n/a'}; runtime={task.runtime_state}; automation={task.automation_state}; status={task.status || 'Unknown'}
-                                  {task.assigned_agent_code ? <>; slot={task.assigned_agent_code}</> : null}
-                                  {task.selected_for_dispatch ? <>; next dispatch</> : null}
-                                  {task.selected_for_kickoff ? <>; kickoff target</> : null}
-                                  {task.blocker_reason ? <>; reason={task.blocker_reason}</> : null}
+                                  role={task.task.role || 'n/a'}; runtime={task.task.runtime_state}; automation={task.task.automation_state}; status={task.task.status || 'Unknown'}
+                                  {task.task.assigned_agent_code ? <>; slot={task.task.assigned_agent_code}</> : null}
+                                  {task.task.selected_for_dispatch ? <>; next dispatch</> : null}
+                                  {task.task.selected_for_kickoff ? <>; kickoff target</> : null}
+                                  {task.task.blocker_reason ? <>; reason={task.task.blocker_reason}</> : null}
                                 </span>
                               </div>
+                              <span className={`badge ${task.kind === 'blocked' ? 'status-blocked' : 'status-done'}`}>
+                                {task.kind === 'blocked' ? 'Blocked' : 'Next'}
+                              </span>
                             </div>
                           ))}
                       </div>
@@ -3201,7 +3274,7 @@ export function ProjectsInlineEditor({
               </div>
               {teamModeRuntimeSnapshot?.active ? (
                 <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
-                  <div style={{ fontWeight: 600, marginBottom: 6 }}>Task-First Runtime Snapshot</div>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>Task-First Runtime Snapshot (Now / Next / Blocked)</div>
                   <div className="row wrap" style={{ gap: 6 }}>
                     <span className="badge">Parallel limit: {teamModeRuntimeSnapshot.parallel_limit}</span>
                     <span className="badge">Active tasks: {teamModeRuntimeSnapshot.summary.active_tasks_total}</span>
@@ -3209,6 +3282,15 @@ export function ProjectsInlineEditor({
                     <span className="badge">Dispatch queue: {teamModeRuntimeSnapshot.dispatch.queue_task_ids.length}</span>
                     <span className="badge">Kickoff targets: {teamModeRuntimeSnapshot.kickoff.kickoff_task_ids.length}</span>
                   </div>
+                  {teamModeRuntimeView ? (
+                    <div className="row wrap" style={{ marginTop: 8, gap: 6 }}>
+                      <span className="badge status-done">Now: {teamModeRuntimeView.nowTasks.length}</span>
+                      <span className="badge">Next: {teamModeRuntimeView.nextTasks.length}</span>
+                      <span className={`badge ${teamModeRuntimeView.blockedTasks.length > 0 ? 'status-blocked' : ''}`}>
+                        Blocked: {teamModeRuntimeView.blockedTasks.length}
+                      </span>
+                    </div>
+                  ) : null}
                   {teamModeRuntimeSnapshot.dispatch.blocked_reasons.length > 0 ? (
                     <div className="meta" style={{ marginTop: 8 }}>
                       Dispatch blockers: {teamModeRuntimeSnapshot.dispatch.blocked_reasons.join(' | ')}
@@ -3220,9 +3302,8 @@ export function ProjectsInlineEditor({
                     </div>
                   ) : null}
                   <div className="gates-check-list" style={{ marginTop: 8 }}>
-                    {teamModeRuntimeSnapshot.tasks
-                      .filter((task) => task.role === 'Developer' || task.role === 'Lead' || task.role === 'QA')
-                      .slice(0, 12)
+                    {(teamModeRuntimeView?.blockedTasks || [])
+                      .slice(0, 6)
                       .map((task) => (
                         <div key={`tm-runtime-task-team-mode-${task.id}`} className="gates-check-row">
                           <div className="gates-check-copy">
@@ -3235,10 +3316,33 @@ export function ProjectsInlineEditor({
                               {task.blocker_reason ? <> | Reason: {task.blocker_reason}</> : null}
                             </span>
                           </div>
-                          {task.selected_for_dispatch ? <span className="badge status-done">Next dispatch</span> : null}
+                          <span className="badge status-blocked">Blocked</span>
+                        </div>
+                      ))}
+                    {(teamModeRuntimeView?.nextTasks || [])
+                      .slice(0, 6)
+                      .map((task) => (
+                        <div key={`tm-runtime-task-team-mode-next-${task.id}`} className="gates-check-row">
+                          <div className="gates-check-copy">
+                            <a className="status-chip" href={`?tab=tasks&project=${selectedProject.id}&task=${task.id}`}>
+                              {task.title}
+                            </a>
+                            <span className="meta">
+                              Role: <code>{task.role || 'n/a'}</code> | Runtime: <code>{task.runtime_state}</code> | Automation: <code>{task.automation_state}</code>
+                              {task.assigned_agent_code ? <> | Slot: <code>{task.assigned_agent_code}</code></> : null}
+                              {task.selected_for_dispatch ? <> | queued for dispatch</> : null}
+                              {task.selected_for_kickoff ? <> | kickoff target</> : null}
+                            </span>
+                          </div>
+                          <span className="badge status-done">Next</span>
                         </div>
                       ))}
                   </div>
+                  {(teamModeRuntimeView?.blockedTasks.length || 0) + (teamModeRuntimeView?.nextTasks.length || 0) === 0 ? (
+                    <div className="meta" style={{ marginTop: 8 }}>
+                      No blocked or next-dispatch tasks at the moment.
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
               <div className="meta" style={{ marginTop: 6 }}>{deliveryKickoffSummaryLine}</div>

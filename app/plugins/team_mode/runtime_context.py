@@ -290,7 +290,6 @@ class TeamModeProjectRuntimeContext:
                 task_like=source_task_like,
                 member_role_by_user_id=self.member_role_by_user_id,
                 agent_role_by_code=self.agent_role_by_code,
-                allow_status_fallback=False,
             )
             or ""
         ).strip()

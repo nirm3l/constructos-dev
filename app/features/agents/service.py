@@ -111,7 +111,8 @@ from plugins.team_mode.gates import (
     TEAM_MODE_CORE_CHECK_IDS,
     TEAM_MODE_CORE_CHECK_SET,
 )
-from plugins.team_mode.task_roles import TEAM_MODE_ROLES, derive_task_role, normalize_team_agents
+from plugins.team_mode.runtime_context import TeamModeProjectRuntimeContext
+from plugins.team_mode.task_roles import TEAM_MODE_ROLES
 from plugins.team_mode.semantics import (
     DEFAULT_ASSIGNMENT_POLICY,
     REQUIRED_SEMANTIC_STATUSES,
@@ -335,6 +336,27 @@ def _default_plugin_config(plugin_key: str) -> dict[str, Any]:
     if normalized == "docker_compose":
         return _docker_compose_default_config()
     return {}
+
+
+def _team_mode_runtime_context_for_project(
+    db,
+    *,
+    workspace_id: str | None,
+    project_id: str | None,
+    require_enabled: bool = False,
+) -> TeamModeProjectRuntimeContext | None:
+    normalized_workspace_id = str(workspace_id or "").strip()
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_workspace_id or not normalized_project_id:
+        return None
+    runtime_context = TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=normalized_workspace_id,
+        project_id=normalized_project_id,
+    )
+    if require_enabled and not runtime_context.enabled:
+        return None
+    return runtime_context
 
 
 def _validate_team_mode_config(config: dict[str, Any]) -> tuple[list[dict[str, str]], list[str]]:
@@ -561,18 +583,15 @@ def _effective_completed_status_for_project(db, *, workspace_id: str, project_id
 
 
 def _effective_team_mode_status_semantics_for_project(db, *, workspace_id: str, project_id: str) -> dict[str, str]:
-    row = db.execute(
-        select(ProjectPluginConfig).where(
-            ProjectPluginConfig.workspace_id == str(workspace_id),
-            ProjectPluginConfig.project_id == str(project_id),
-            ProjectPluginConfig.plugin_key == _TEAM_MODE_PLUGIN_KEY,
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).scalar_one_or_none()
-    if row is None:
+    runtime_context = _team_mode_runtime_context_for_project(
+        db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        require_enabled=True,
+    )
+    if runtime_context is None:
         return dict(REQUIRED_SEMANTIC_STATUSES)
-    config = _safe_json_loads_object(str(getattr(row, "config_json", "") or "").strip())
-    semantics = normalize_status_semantics(config.get("status_semantics"))
+    semantics = runtime_context.status_semantics
     effective = dict(REQUIRED_SEMANTIC_STATUSES)
     for key, default_status in REQUIRED_SEMANTIC_STATUSES.items():
         value = str(semantics.get(key) or "").strip()
@@ -584,41 +603,15 @@ def _effective_team_mode_status_semantics_for_project(db, *, workspace_id: str, 
 
 
 def _team_mode_review_required_for_project(db, *, workspace_id: str, project_id: str) -> bool:
-    row = db.execute(
-        select(ProjectPluginConfig).where(
-            ProjectPluginConfig.workspace_id == str(workspace_id),
-            ProjectPluginConfig.project_id == str(project_id),
-            ProjectPluginConfig.plugin_key == _TEAM_MODE_PLUGIN_KEY,
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).scalar_one_or_none()
-    if row is None or not bool(getattr(row, "enabled", False)):
+    runtime_context = _team_mode_runtime_context_for_project(
+        db,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        require_enabled=True,
+    )
+    if runtime_context is None:
         return False
-    config = _safe_json_loads_object(str(getattr(row, "config_json", "") or "").strip())
-    review_policy = normalize_review_policy(config.get("review_policy"))
-    return bool(review_policy.get("require_code_review"))
-
-
-def _team_mode_agent_role_by_code_for_project(db, *, workspace_id: str, project_id: str) -> dict[str, str]:
-    row = db.execute(
-        select(ProjectPluginConfig).where(
-            ProjectPluginConfig.workspace_id == str(workspace_id),
-            ProjectPluginConfig.project_id == str(project_id),
-            ProjectPluginConfig.plugin_key == _TEAM_MODE_PLUGIN_KEY,
-            ProjectPluginConfig.is_deleted == False,  # noqa: E712
-        )
-    ).scalar_one_or_none()
-    if row is None or not bool(getattr(row, "enabled", False)):
-        return {}
-    config = _safe_json_loads_object(str(getattr(row, "config_json", "") or "").strip())
-    agents = normalize_team_agents(config.get("team"))
-    role_by_code: dict[str, str] = {}
-    for agent in agents:
-        agent_id = str(agent.get("id") or "").strip()
-        authority_role = str(agent.get("authority_role") or "").strip()
-        if agent_id and authority_role:
-            role_by_code[agent_id] = authority_role
-    return role_by_code
+    return runtime_context.review_required
 
 
 def _priority_rank(value: Any) -> int:
@@ -1149,95 +1142,26 @@ class AgentTaskService:
         task_labels: object | None = None,
         task_status: str | None = None,
     ) -> str:
-        normalized_workspace_id = str(workspace_id or "").strip()
-        normalized_project_id = str(project_id or "").strip()
         normalized_assignee_id = str(assignee_id or "").strip()
         normalized_assigned_agent_code = str(assigned_agent_code or "").strip().lower()
-        if not normalized_workspace_id or not normalized_project_id:
+        runtime_context = _team_mode_runtime_context_for_project(
+            db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+        )
+        if runtime_context is None:
             return ""
-
-        agent_role_by_code: dict[str, str] = {}
-        if normalized_assigned_agent_code:
-            plugin_row = db.execute(
-                select(ProjectPluginConfig.config_json).where(
-                    ProjectPluginConfig.workspace_id == normalized_workspace_id,
-                    ProjectPluginConfig.project_id == normalized_project_id,
-                    ProjectPluginConfig.plugin_key == "team_mode",
-                    ProjectPluginConfig.is_deleted == False,  # noqa: E712
-                )
-            ).scalar_one_or_none()
-            plugin_config: dict[str, Any] = {}
-            if isinstance(plugin_row, str) and plugin_row.strip():
-                try:
-                    parsed = json.loads(plugin_row)
-                except Exception:
-                    parsed = {}
-                if isinstance(parsed, dict):
-                    plugin_config = parsed
-            elif isinstance(plugin_row, dict):
-                plugin_config = dict(plugin_row)
-            agent_role_by_code = {
-                str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-                for agent in normalize_team_agents(plugin_config.get("team"))
-                if str(agent.get("id") or "").strip()
-            }
-
-        member_role_by_user_id: dict[str, str] = {}
-        if normalized_assignee_id:
-            member_role = db.execute(
-                select(ProjectMember.role).where(
-                    ProjectMember.workspace_id == normalized_workspace_id,
-                    ProjectMember.project_id == normalized_project_id,
-                    ProjectMember.user_id == normalized_assignee_id,
-                )
-            ).scalar_one_or_none()
-            if str(member_role or "").strip():
-                member_role_by_user_id[normalized_assignee_id] = str(member_role or "").strip()
-
         return str(
-            derive_task_role(
+            runtime_context.derive_workflow_role(
                 task_like={
                     "assignee_id": normalized_assignee_id,
                     "assigned_agent_code": normalized_assigned_agent_code,
                     "labels": task_labels,
                     "status": str(task_status or "").strip(),
-                },
-                member_role_by_user_id=member_role_by_user_id,
-                agent_role_by_code=agent_role_by_code,
-                allow_status_fallback=False,
+                }
             )
             or ""
         ).strip()
-
-    @staticmethod
-    def _load_team_mode_agent_role_by_code(*, db, workspace_id: str, project_id: str | None) -> dict[str, str]:
-        normalized_workspace_id = str(workspace_id or "").strip()
-        normalized_project_id = str(project_id or "").strip()
-        if not normalized_workspace_id or not normalized_project_id:
-            return {}
-        plugin_row = db.execute(
-            select(ProjectPluginConfig.config_json).where(
-                ProjectPluginConfig.workspace_id == normalized_workspace_id,
-                ProjectPluginConfig.project_id == normalized_project_id,
-                ProjectPluginConfig.plugin_key == "team_mode",
-                ProjectPluginConfig.is_deleted == False,  # noqa: E712
-            )
-        ).scalar_one_or_none()
-        plugin_config: dict[str, Any] = {}
-        if isinstance(plugin_row, str) and plugin_row.strip():
-            try:
-                parsed = json.loads(plugin_row)
-            except Exception:
-                parsed = {}
-            if isinstance(parsed, dict):
-                plugin_config = parsed
-        elif isinstance(plugin_row, dict):
-            plugin_config = dict(plugin_row)
-        return {
-            str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-            for agent in normalize_team_agents(plugin_config.get("team"))
-            if str(agent.get("id") or "").strip()
-        }
 
     @staticmethod
     def _parse_json_string(value: str, *, field_name: str) -> Any:
@@ -3729,15 +3653,6 @@ class AgentTaskService:
         return result_map
 
     @staticmethod
-    def _project_has_team_mode_enabled(*, db, workspace_id: str, project_id: str) -> bool:
-        return plugin_service_policy.project_has_plugin_enabled(
-            plugin_key=_TEAM_MODE_PLUGIN_KEY,
-            db=db,
-            workspace_id=workspace_id,
-            project_id=project_id,
-        )
-
-    @staticmethod
     def _open_developer_tasks(*, db, project_id: str) -> list[dict[str, str]]:
         return plugin_service_policy.open_plugin_developer_tasks(
             plugin_key=_TEAM_MODE_PLUGIN_KEY,
@@ -3870,6 +3785,11 @@ class AgentTaskService:
             ).scalars().all()
             tasks = list(tasks_payload.get("items") or [])
             self._enrich_tasks_with_automation_state(db=db, tasks=tasks)
+            runtime_context = _team_mode_runtime_context_for_project(
+                db,
+                workspace_id=str(project.workspace_id),
+                project_id=project_id,
+            )
         notes_by_task: dict[str, list[Note]] = {}
         for note in notes:
             task_id = str(note.task_id or "").strip()
@@ -3888,7 +3808,11 @@ class AgentTaskService:
         team_mode_row = plugin_by_key.get("team_mode")
         git_delivery_row = plugin_by_key.get("git_delivery")
         docker_compose_row = plugin_by_key.get("docker_compose")
-        team_mode_enabled = bool(getattr(team_mode_row, "enabled", False))
+        team_mode_enabled = bool(
+            runtime_context.enabled
+            if runtime_context is not None
+            else getattr(team_mode_row, "enabled", False)
+        )
         git_delivery_enabled = bool(getattr(git_delivery_row, "enabled", False))
         delivery_active = bool(git_delivery_enabled or team_mode_enabled)
         source_ids = [
@@ -3950,27 +3874,20 @@ class AgentTaskService:
         verification["active"] = delivery_active
         verification["checks"] = dict(verification.get("checks") or {})
         verification["checks"]["git_delivery_enabled"] = bool(git_delivery_enabled)
-        team_agents = normalize_team_agents(
-            (plugin_policy.get("team") if isinstance(plugin_policy.get("team"), dict) else {})
-        )
-        agent_role_by_code = {
-            str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-            for agent in team_agents
-            if str(agent.get("id") or "").strip()
-        }
         role_scoped_tasks = [
             task
             for task in tasks
-            if derive_task_role(
-                task_like={
-                    "assignee_id": str(task.get("assignee_id") or "").strip(),
-                    "assigned_agent_code": str(task.get("assigned_agent_code") or "").strip(),
-                    "labels": task.get("labels"),
-                    "status": str(task.get("status") or "").strip(),
-                },
-                member_role_by_user_id=member_role_by_user_id,
-                agent_role_by_code=agent_role_by_code,
-            )
+            if str(
+                (runtime_context.derive_workflow_role(
+                    task_like={
+                        "assignee_id": str(task.get("assignee_id") or "").strip(),
+                        "assigned_agent_code": str(task.get("assigned_agent_code") or "").strip(),
+                        "labels": task.get("labels"),
+                        "status": str(task.get("status") or "").strip(),
+                    }
+                ) if runtime_context is not None else "")
+                or ""
+            ).strip()
             in {"Developer", "Lead", "QA"}
         ]
         has_kickoff_signal = any(
@@ -4313,11 +4230,13 @@ class AgentTaskService:
         explicit_developer_routed_count = 0
         role_by_code: dict[str, str] = {}
         with SessionLocal() as db:
-            role_by_code = _team_mode_agent_role_by_code_for_project(
+            runtime_context = _team_mode_runtime_context_for_project(
                 db,
                 workspace_id=workspace_id,
                 project_id=project_id,
             )
+            if runtime_context is not None and runtime_context.enabled:
+                role_by_code = runtime_context.agent_role_by_code
         for item in active_tasks:
             labels = self._normalize_string_list_input(item.get("labels"), field_name="labels")
             if not labels:
@@ -4371,25 +4290,17 @@ class AgentTaskService:
         if not specification_id:
             return
         with SessionLocal() as db:
-            if not self._project_has_team_mode_enabled(
+            runtime_context = _team_mode_runtime_context_for_project(
                 db=db,
                 workspace_id=workspace_id,
                 project_id=project_id,
-            ):
-                return
-            docker_compose_enabled = bool(
-                db.execute(
-                    select(ProjectPluginConfig.id).where(
-                        ProjectPluginConfig.workspace_id == str(workspace_id),
-                        ProjectPluginConfig.project_id == str(project_id),
-                        ProjectPluginConfig.plugin_key == "docker_compose",
-                        ProjectPluginConfig.enabled == True,  # noqa: E712
-                        ProjectPluginConfig.is_deleted == False,  # noqa: E712
-                    )
-                ).scalar_one_or_none()
+                require_enabled=True,
             )
-            agent_role_by_code = _team_mode_agent_role_by_code_for_project(
-                db,
+            if runtime_context is None:
+                return
+            docker_compose_enabled = plugin_service_policy.project_has_plugin_enabled(
+                plugin_key="docker_compose",
+                db=db,
                 workspace_id=workspace_id,
                 project_id=project_id,
             )
@@ -4417,11 +4328,7 @@ class AgentTaskService:
                     "task_relationships": normalize_task_relationships(getattr(row, "task_relationships", None)),
                     "delivery_mode": normalize_delivery_mode(getattr(row, "delivery_mode", None)),
                 }
-                if derive_task_role(
-                    task_like=task_like,
-                    agent_role_by_code=agent_role_by_code,
-                    allow_status_fallback=False,
-                ) != "Developer":
+                if runtime_context.derive_workflow_role(task_like=task_like) != "Developer":
                     continue
                 developer_tasks.append(task_like)
         if len(developer_tasks) < 2:
@@ -5870,40 +5777,32 @@ class AgentTaskService:
         port: int | None = None
         health_path = "/health"
 
-        with SessionLocal() as _db:
-            docker_row = _db.execute(
-                select(ProjectPluginConfig.config_json).where(
-                    ProjectPluginConfig.workspace_id == workspace_id,
-                    ProjectPluginConfig.project_id == project_id,
-                    ProjectPluginConfig.plugin_key == "docker_compose",
-                    ProjectPluginConfig.enabled == True,  # noqa: E712
-                    ProjectPluginConfig.is_deleted == False,  # noqa: E712
-                )
-            ).first()
-            if docker_row is not None:
-                try:
-                    docker_cfg = json.loads(str(docker_row[0] or "").strip() or "{}")
-                except Exception:
-                    docker_cfg = {}
-                runtime_cfg = docker_cfg.get("runtime_deploy_health") if isinstance(docker_cfg, dict) else {}
-                if not isinstance(runtime_cfg, dict):
-                    runtime_cfg = {}
-                stack_candidate = str(runtime_cfg.get("stack") or "").strip()
-                if stack_candidate:
-                    stack = stack_candidate
-                host_candidate = str(runtime_cfg.get("host") or "").strip()
-                if host_candidate:
-                    host = host_candidate
-                health_candidate = str(runtime_cfg.get("health_path") or "").strip()
-                if health_candidate:
-                    health_path = health_candidate if health_candidate.startswith("/") else f"/{health_candidate}"
-                raw_port = runtime_cfg.get("port")
-                try:
-                    candidate = int(raw_port) if raw_port is not None else None
-                except Exception:
-                    candidate = None
-                if candidate is not None and 1 <= candidate <= 65535:
-                    port = candidate
+        docker_payload = self.get_project_plugin_config(
+            project_id=project_id,
+            plugin_key="docker_compose",
+            workspace_id=workspace_id,
+            auth_token=auth_token,
+        )
+        docker_cfg = docker_payload.get("config") if isinstance(docker_payload, dict) else {}
+        runtime_cfg = docker_cfg.get("runtime_deploy_health") if isinstance(docker_cfg, dict) else {}
+        if not isinstance(runtime_cfg, dict):
+            runtime_cfg = {}
+        stack_candidate = str(runtime_cfg.get("stack") or "").strip()
+        if stack_candidate:
+            stack = stack_candidate
+        host_candidate = str(runtime_cfg.get("host") or "").strip()
+        if host_candidate:
+            host = host_candidate
+        health_candidate = str(runtime_cfg.get("health_path") or "").strip()
+        if health_candidate:
+            health_path = health_candidate if health_candidate.startswith("/") else f"/{health_candidate}"
+        raw_port = runtime_cfg.get("port")
+        try:
+            candidate = int(raw_port) if raw_port is not None else None
+        except Exception:
+            candidate = None
+        if candidate is not None and 1 <= candidate <= 65535:
+            port = candidate
 
         endpoint = (
             f"http://{host}:{port}{health_path}"
@@ -7632,45 +7531,20 @@ class AgentTaskService:
             team_mode_role: str | None = None
             normalized_project_id = str(state.project_id or "").strip()
             if normalized_project_id:
-                plugin_row = db.execute(
-                    select(ProjectPluginConfig.config_json).where(
-                        ProjectPluginConfig.workspace_id == str(state.workspace_id),
-                        ProjectPluginConfig.project_id == normalized_project_id,
-                        ProjectPluginConfig.plugin_key == "team_mode",
-                        ProjectPluginConfig.enabled == True,  # noqa: E712
-                        ProjectPluginConfig.is_deleted == False,  # noqa: E712
-                    )
-                ).first()
-                if plugin_row is not None:
-                    config_obj: dict[str, object] = {}
-                    try:
-                        parsed_cfg = json.loads(str(plugin_row[0] or "").strip() or "{}")
-                        if isinstance(parsed_cfg, dict):
-                            config_obj = parsed_cfg
-                    except Exception:
-                        config_obj = {}
-                    member_role_by_user_id = {
-                        str(user_id): str(role or "").strip()
-                        for user_id, role in db.execute(
-                            select(ProjectMember.user_id, ProjectMember.role).where(
-                                ProjectMember.project_id == normalized_project_id,
-                            )
-                        ).all()
-                    }
-                    agent_role_by_code = {
-                        str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-                        for agent in normalize_team_agents(config_obj.get("team"))
-                        if str(agent.get("id") or "").strip()
-                    }
-                    team_mode_role = derive_task_role(
+                runtime_context = _team_mode_runtime_context_for_project(
+                    db,
+                    workspace_id=state.workspace_id,
+                    project_id=normalized_project_id,
+                    require_enabled=True,
+                )
+                if runtime_context is not None:
+                    team_mode_role = runtime_context.derive_workflow_role(
                         task_like={
                             "assignee_id": str((task_view or {}).get("assignee_id") or "").strip(),
                             "assigned_agent_code": str((task_view or {}).get("assigned_agent_code") or "").strip(),
                             "labels": (task_view or {}).get("labels"),
                             "status": str((task_view or {}).get("status") or state.status or "").strip(),
-                        },
-                        member_role_by_user_id=member_role_by_user_id,
-                        agent_role_by_code=agent_role_by_code,
+                        }
                     ) or None
             classification = resolve_instruction_intent(
                 instruction=instruction,

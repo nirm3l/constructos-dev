@@ -6,6 +6,7 @@ import re
 import subprocess
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse, unquote
 
 from shared.settings import AGENT_WORKDIR
 
@@ -20,6 +21,113 @@ _COMPOSE_MANIFEST_CANDIDATES = (
     "compose.yml",
     "compose.yaml",
 )
+
+
+def _parse_external_refs(raw: object) -> list[dict[str, str]]:
+    if isinstance(raw, str):
+        text = str(raw or "").strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return []
+        raw = parsed
+    if not isinstance(raw, list):
+        return []
+    refs: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        title = str(item.get("title") or "").strip()
+        if not url:
+            continue
+        refs.append({"url": url, "title": title})
+    return refs
+
+
+def _path_from_file_ref(value: str) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    lowered = raw.casefold()
+    if lowered.startswith("file://"):
+        parsed = urlparse(raw)
+        candidate = unquote(str(parsed.path or "").strip())
+        if not candidate:
+            return None
+        return Path(candidate).expanduser()
+    if lowered.startswith("file:"):
+        candidate = unquote(raw[len("file:") :].strip())
+        if not candidate:
+            return None
+        return Path(candidate).expanduser()
+    if raw.startswith("/"):
+        return Path(raw).expanduser()
+    return None
+
+
+def resolve_project_repository_candidates(
+    *,
+    project_name: str | None,
+    project_id: str | None = None,
+    project_external_refs: object = None,
+) -> list[Path]:
+    default_repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
+    candidates: list[Path] = [default_repo_root]
+    seen: set[str] = {str(default_repo_root)}
+
+    for item in _parse_external_refs(project_external_refs):
+        candidate_path = _path_from_file_ref(str(item.get("url") or ""))
+        if candidate_path is None:
+            continue
+        normalized = candidate_path.resolve(strict=False)
+        repo_root = normalized if normalized.is_dir() else normalized.parent
+        key = str(repo_root)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        candidates.append(repo_root)
+
+    repos_root = resolve_workspace_root() / PROJECT_REPOSITORIES_DIR
+    project_slug = slugify_project_name(
+        str(project_name or "").strip(),
+        fallback=str(project_id or "").strip()[:8] or "project",
+    )
+    if repos_root.exists() and repos_root.is_dir():
+        similar: list[Path] = []
+        for child in repos_root.iterdir():
+            if not child.is_dir():
+                continue
+            name = str(child.name or "").strip().lower()
+            if not name:
+                continue
+            if name == project_slug or name.startswith(f"{project_slug}-") or name.endswith(f"-{project_slug}"):
+                similar.append(child.resolve(strict=False))
+        if len(similar) == 1:
+            candidate = similar[0]
+            key = str(candidate)
+            if key and key not in seen:
+                seen.add(key)
+                candidates.append(candidate)
+    return candidates
+
+
+def resolve_existing_project_repository_path(
+    *,
+    project_name: str | None,
+    project_id: str | None = None,
+    project_external_refs: object = None,
+) -> Path:
+    for candidate in resolve_project_repository_candidates(
+        project_name=project_name,
+        project_id=project_id,
+        project_external_refs=project_external_refs,
+    ):
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+    return resolve_project_repository_path(project_name=project_name, project_id=project_id)
 
 
 def slugify_project_name(value: str, *, fallback: str) -> str:
@@ -141,14 +249,20 @@ def find_project_compose_manifest(
     *,
     project_name: str | None,
     project_id: str | None = None,
+    project_external_refs: object = None,
 ) -> Path | None:
-    repo_root = resolve_project_repository_path(project_name=project_name, project_id=project_id)
-    if not repo_root.exists():
-        return None
-    for name in _COMPOSE_MANIFEST_CANDIDATES:
-        candidate = repo_root / name
-        if candidate.exists() and candidate.is_file():
-            return candidate
+    repo_candidates = resolve_project_repository_candidates(
+        project_name=project_name,
+        project_id=project_id,
+        project_external_refs=project_external_refs,
+    )
+    for repo_root in repo_candidates:
+        if not repo_root.exists() or not repo_root.is_dir():
+            continue
+        for name in _COMPOSE_MANIFEST_CANDIDATES:
+            candidate = repo_root / name
+            if candidate.exists() and candidate.is_file():
+                return candidate
     return None
 
 

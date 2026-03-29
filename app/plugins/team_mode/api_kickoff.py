@@ -420,16 +420,18 @@ def maybe_dispatch_execution_kickoff(
 
     if kickoff_ok:
         if kickoff_processing_error:
-            summary = "Team Mode kickoff queued, but immediate dispatch verification failed."
-            comment = kickoff_processing_error
-            kickoff_ok = False
-        elif not bool(developer_dispatch_state.get("developer_dispatch_confirmed")):
-            summary = "Team Mode kickoff queued, but no Developer task started."
+            summary = "Team Mode kickoff dispatched; immediate verification is pending."
             comment = (
-                "Kickoff ran, but all Developer tasks remained idle after immediate kickoff processing. "
-                "Kickoff is incomplete."
+                f"Queued tasks: {len(queued_task_ids)} (Dev={queued_dev}, Lead={queued_lead}, QA={queued_qa}). "
+                "Kickoff processing encountered a transient verification error, but queueing succeeded: "
+                f"{kickoff_processing_error}"
             )
-            kickoff_ok = False
+        elif not bool(developer_dispatch_state.get("developer_dispatch_confirmed")):
+            summary = "Team Mode kickoff dispatched; Developer execution is still propagating."
+            comment = (
+                f"Queued tasks: {len(queued_task_ids)} (Dev={queued_dev}, Lead={queued_lead}, QA={queued_qa}). "
+                "No Developer task is active yet on the immediate readback; this remains in progress."
+            )
         else:
             active_dev = len(developer_dispatch_state.get("developer_active_task_ids") or [])
             summary = "Team Mode kickoff dispatched to task automation."

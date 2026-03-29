@@ -647,6 +647,7 @@ def evaluate_delivery_gates(
         manifest = find_project_compose_manifest(
             project_name=project_name,
             project_id=str(project_id or "").strip(),
+            project_external_refs=project_external_refs,
         )
         if manifest is None:
             return None

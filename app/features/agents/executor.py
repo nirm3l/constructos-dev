@@ -14,8 +14,9 @@ from dataclasses import dataclass
 from sqlalchemy import select
 
 from plugins import executor_policy as plugin_executor_policy
+from plugins.team_mode.runtime_context import TeamModeProjectRuntimeContext
 from plugins.team_mode.semantics import semantic_status_key
-from plugins.team_mode.task_roles import canonicalize_role, derive_task_role, normalize_team_agents
+from plugins.team_mode.task_roles import canonicalize_role
 from shared.context_frames import build_project_context_frame
 from shared.models import Project, ProjectMember, ProjectPluginConfig, ProjectRule, ProjectSkill, SessionLocal, Task
 from shared.project_repository import (
@@ -246,6 +247,30 @@ def _deep_merge_dicts(base: dict[str, object], override: dict[str, object]) -> d
     return merged
 
 
+def _team_mode_runtime_context_for_project(*, db, project_id: str | None, workspace_id: str | None = None) -> TeamModeProjectRuntimeContext | None:
+    normalized_project_id = str(project_id or "").strip()
+    normalized_workspace_id = str(workspace_id or "").strip()
+    if not normalized_project_id:
+        return None
+    if not normalized_workspace_id:
+        normalized_workspace_id = str(
+            db.execute(
+                select(Project.workspace_id).where(
+                    Project.id == normalized_project_id,
+                    Project.is_deleted == False,  # noqa: E712
+                )
+            ).scalar_one_or_none()
+            or ""
+        ).strip()
+    if not normalized_workspace_id:
+        return None
+    return TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=normalized_workspace_id,
+        project_id=normalized_project_id,
+    )
+
+
 def _load_project_plugin_runtime(
     project_id: str | None,
 ) -> tuple[bool, bool, str, str]:
@@ -253,6 +278,7 @@ def _load_project_plugin_runtime(
     if not normalized_project_id:
         return False, False, "_(Plugin Policy unavailable)_", "_(none)_"
     with SessionLocal() as db:
+        runtime_context = _team_mode_runtime_context_for_project(db=db, project_id=normalized_project_id)
         rows = db.execute(
             select(
                 ProjectPluginConfig.plugin_key,
@@ -266,14 +292,12 @@ def _load_project_plugin_runtime(
         ).all()
 
     policy: dict[str, object] = {}
-    team_mode_enabled = False
+    team_mode_enabled = bool(runtime_context.enabled) if runtime_context is not None else False
     git_delivery_enabled = False
     for plugin_key_raw, enabled_raw, compiled_policy_raw in rows:
         plugin_key = str(plugin_key_raw or "").strip().lower()
         enabled = bool(enabled_raw)
-        if plugin_key == "team_mode":
-            team_mode_enabled = enabled
-        elif plugin_key == "git_delivery":
+        if plugin_key == "git_delivery":
             git_delivery_enabled = enabled
         compiled_text = str(compiled_policy_raw or "").strip()
         if not compiled_text:
@@ -328,7 +352,7 @@ def _resolve_task_assignee_project_role(*, task_id: str | None, project_id: str 
         return None
     with SessionLocal() as db:
         task_row = db.execute(
-            select(Task.assignee_id, Task.assigned_agent_code, Task.status, Task.labels).where(
+            select(Task.workspace_id, Task.assignee_id, Task.assigned_agent_code, Task.status, Task.labels).where(
                 Task.id == normalized_task_id,
                 Task.project_id == normalized_project_id,
                 Task.is_deleted == False,  # noqa: E712
@@ -336,42 +360,27 @@ def _resolve_task_assignee_project_role(*, task_id: str | None, project_id: str 
         ).first()
         if task_row is None:
             return None
-        assignee_id, assigned_agent_code, status, labels = task_row
+        workspace_id, assignee_id, assigned_agent_code, status, labels = task_row
+        normalized_workspace_id = str(workspace_id or "").strip()
         normalized_assignee_id = str(assignee_id or "").strip()
         normalized_assigned_agent_code = str(assigned_agent_code or "").strip()
-        team_mode_cfg_row = db.execute(
-            select(ProjectPluginConfig.config_json).where(
-                ProjectPluginConfig.project_id == normalized_project_id,
-                ProjectPluginConfig.plugin_key == "team_mode",
-                ProjectPluginConfig.enabled == True,  # noqa: E712
-                ProjectPluginConfig.is_deleted == False,  # noqa: E712
+        if normalized_workspace_id:
+            runtime_context = _team_mode_runtime_context_for_project(
+                db=db,
+                workspace_id=normalized_workspace_id,
+                project_id=normalized_project_id,
             )
-        ).scalar_one_or_none()
-        agent_role_by_code: dict[str, str] = {}
-        if team_mode_cfg_row is not None:
-            try:
-                parsed_cfg = json.loads(str(team_mode_cfg_row or "").strip() or "{}")
-            except Exception:
-                parsed_cfg = {}
-            if isinstance(parsed_cfg, dict):
-                for agent in normalize_team_agents(parsed_cfg.get("team")):
-                    code = str(agent.get("id") or "").strip()
-                    role = str(agent.get("authority_role") or "").strip()
-                    if code and role:
-                        agent_role_by_code[code] = role
-        declared_role = derive_task_role(
-            task_like={
-                "assignee_id": normalized_assignee_id,
-                "assigned_agent_code": normalized_assigned_agent_code,
-                "labels": labels,
-                "status": str(status or "").strip(),
-            },
-            member_role_by_user_id={},
-            agent_role_by_code=agent_role_by_code,
-            allow_status_fallback=False,
-        )
-        if declared_role:
-            return declared_role
+            if runtime_context.enabled:
+                workflow_role = runtime_context.derive_workflow_role(
+                    task_like={
+                        "assignee_id": normalized_assignee_id,
+                        "assigned_agent_code": normalized_assigned_agent_code,
+                        "labels": labels,
+                        "status": str(status or "").strip(),
+                    }
+                )
+                if workflow_role:
+                    return workflow_role
         if not normalized_assignee_id:
             return None
         membership = db.execute(

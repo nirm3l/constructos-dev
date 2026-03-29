@@ -142,14 +142,19 @@ def plan_kickoff_targets(tasks: list[dict[str, Any]], *, max_parallel_dispatch: 
             role_runnable_totals["QA"] += 1
             kickoff_targets_by_role["QA"].append(task_id)
 
-    for task_id in list(kickoff_targets_by_role["Developer"]):
-        if len(kickoff_targets) >= parallel_limit:
-            break
-        kickoff_targets.append(task_id)
-    for task_id in list(kickoff_targets_by_role["Lead"]):
-        if len(kickoff_targets) >= parallel_limit:
-            break
-        kickoff_targets.append(task_id)
+    # Kickoff must prioritize implementation momentum:
+    # dispatch Developer tasks first and only fall back to Lead kickoff
+    # when there are no runnable Developer tasks.
+    if kickoff_targets_by_role["Developer"]:
+        for task_id in list(kickoff_targets_by_role["Developer"]):
+            if len(kickoff_targets) >= parallel_limit:
+                break
+            kickoff_targets.append(task_id)
+    else:
+        for task_id in list(kickoff_targets_by_role["Lead"]):
+            if len(kickoff_targets) >= parallel_limit:
+                break
+            kickoff_targets.append(task_id)
 
     if kickoff_targets:
         return {

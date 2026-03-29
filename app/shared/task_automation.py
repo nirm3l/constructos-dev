@@ -331,6 +331,33 @@ def derive_legacy_schedule_fields(*, instruction: str | None, execution_triggers
     }
 
 
+def resolve_instruction_and_schedule_fields(
+    *,
+    instruction: str | None,
+    execution_triggers: Any,
+    scheduled_at_utc: str | None = None,
+    schedule_timezone: str | None = None,
+    recurring_rule: str | None = None,
+    run_on_statuses: Any = None,
+) -> tuple[str | None, list[dict[str, Any]], dict[str, Any]]:
+    normalized_instruction = _normalize_string(instruction)
+    normalized_triggers = normalize_execution_triggers(execution_triggers)
+    if not normalized_triggers:
+        legacy_trigger = build_legacy_schedule_trigger(
+            scheduled_at_utc=scheduled_at_utc,
+            schedule_timezone=schedule_timezone,
+            recurring_rule=recurring_rule,
+            run_on_statuses=run_on_statuses,
+        )
+        if legacy_trigger is not None:
+            normalized_triggers = [legacy_trigger]
+    legacy_schedule = derive_legacy_schedule_fields(
+        instruction=normalized_instruction,
+        execution_triggers=normalized_triggers,
+    )
+    return normalized_instruction, normalized_triggers, legacy_schedule
+
+
 def rearm_first_schedule_trigger(
     *,
     execution_triggers: Any,

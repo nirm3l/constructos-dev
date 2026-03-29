@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+
 
 def test_opencode_registry_path_skips_codex_cli_discovery(monkeypatch):
     from features.agents import mcp_registry
@@ -23,3 +26,54 @@ def test_opencode_registry_path_skips_codex_cli_discovery(monkeypatch):
     assert payload["mcp"]["constructos-tools"]["type"] == "remote"
     assert payload["mcp"]["constructos-tools"]["url"] == "http://core-mcp.local"
 
+
+def test_list_available_mcp_servers_returns_stale_cache_while_refreshing(monkeypatch):
+    from features.agents import mcp_registry
+
+    stale_rows = [
+        {
+            "name": "constructos-tools",
+            "display_name": "Constructos Tools",
+            "enabled": True,
+            "disabled_reason": None,
+            "auth_status": None,
+            "config": {"url": "http://stale"},
+        }
+    ]
+    refreshed_rows = [
+        {
+            "name": "constructos-tools",
+            "display_name": "Constructos Tools",
+            "enabled": True,
+            "disabled_reason": None,
+            "auth_status": "ok",
+            "config": {"url": "http://fresh"},
+        }
+    ]
+
+    refresh_called = threading.Event()
+
+    def _slow_discover(*, include_codex_cli: bool = True):
+        assert include_codex_cli is True
+        refresh_called.set()
+        time.sleep(0.3)
+        return refreshed_rows
+
+    now = time.monotonic()
+    monkeypatch.setattr(mcp_registry, "_CACHE_ROWS", stale_rows.copy())
+    monkeypatch.setattr(mcp_registry, "_CACHE_EXPIRES_AT", now - 1.0)
+    monkeypatch.setattr(mcp_registry, "_CACHE_REFRESH_IN_PROGRESS", False)
+    monkeypatch.setattr(mcp_registry, "_discover_rows_uncached", _slow_discover)
+
+    start = time.monotonic()
+    payload = mcp_registry.list_available_mcp_servers()
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.2
+    assert payload and payload[0]["auth_status"] is None
+    assert refresh_called.wait(timeout=1.0) is True
+
+    # Give the background refresh a moment to commit cache.
+    time.sleep(0.35)
+    refreshed_payload = mcp_registry.list_available_mcp_servers()
+    assert refreshed_payload and refreshed_payload[0]["auth_status"] == "ok"

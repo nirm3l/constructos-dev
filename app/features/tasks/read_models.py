@@ -10,8 +10,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from features.agents.gates import run_runtime_deploy_health_check
+from plugins.team_mode.runtime_context import TeamModeProjectRuntimeContext
 from plugins.team_mode.semantics import semantic_status_key
-from plugins.team_mode.task_roles import derive_task_role, normalize_team_agents
 from plugins.context_policy import classify_project_delivery_context
 from shared.delivery_evidence import (
     derive_deploy_execution_snapshot,
@@ -31,11 +31,9 @@ from shared.core import (
 )
 from shared.serializers import load_created_by_map
 from shared.project_repository import find_project_compose_manifest
-from shared.models import Project, ProjectMember, ProjectPluginConfig, ProjectRule
+from shared.models import Project, ProjectPluginConfig, ProjectRule
 from shared.task_automation import (
-    build_legacy_schedule_trigger,
-    derive_legacy_schedule_fields,
-    normalize_execution_triggers,
+    resolve_instruction_and_schedule_fields,
 )
 from shared.task_delivery import normalize_delivery_mode
 from shared.task_relationships import normalize_task_relationships
@@ -143,6 +141,23 @@ def _task_has_http_artifact(*, refs: object, notes: list[Note]) -> bool:
     return False
 
 
+def _team_mode_runtime_context_for_project(
+    *,
+    db: Session,
+    workspace_id: str | None,
+    project_id: str | None,
+) -> TeamModeProjectRuntimeContext | None:
+    normalized_workspace_id = str(workspace_id or "").strip()
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_workspace_id or not normalized_project_id:
+        return None
+    return TeamModeProjectRuntimeContext(
+        db=db,
+        workspace_id=normalized_workspace_id,
+        project_id=normalized_project_id,
+    )
+
+
 def _resolve_task_role(
     *,
     db: Session,
@@ -152,37 +167,22 @@ def _resolve_task_role(
     assigned_agent_code: str,
     labels: object,
     status: str,
+    runtime_context: TeamModeProjectRuntimeContext | None = None,
 ) -> str:
-    member_role_by_user_id = {
-        str(user_id): str(role or "").strip()
-        for user_id, role in db.execute(
-            select(ProjectMember.user_id, ProjectMember.role).where(
-                ProjectMember.workspace_id == workspace_id,
-                ProjectMember.project_id == project_id,
-            )
-        ).all()
-    }
-    _enabled, team_config, _team_compiled = _read_plugin_payload(
+    effective_runtime_context = runtime_context or _team_mode_runtime_context_for_project(
         db=db,
         workspace_id=workspace_id,
         project_id=project_id,
-        plugin_key="team_mode",
     )
-    team_agents = normalize_team_agents(team_config.get("team"))
-    agent_role_by_code = {
-        str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-        for agent in team_agents
-        if str(agent.get("id") or "").strip()
-    }
-    role = derive_task_role(
+    if effective_runtime_context is None:
+        return ""
+    role = effective_runtime_context.derive_workflow_role(
         task_like={
             "assignee_id": assignee_id,
             "assigned_agent_code": assigned_agent_code,
             "labels": labels,
             "status": status,
-        },
-        member_role_by_user_id=member_role_by_user_id,
-        agent_role_by_code=agent_role_by_code,
+        }
     )
     return str(role or "").strip()
 
@@ -204,6 +204,11 @@ def _build_execution_gates(
     project = db.get(Project, normalized_project_id)
     if project is None:
         return []
+    runtime_context = _team_mode_runtime_context_for_project(
+        db=db,
+        workspace_id=workspace_id,
+        project_id=normalized_project_id,
+    )
     status = str(state.get("status") or task_row.status or "").strip()
     assignee_id = str(state.get("assignee_id") or task_row.assignee_id or "").strip()
     assigned_agent_code = str(state.get("assigned_agent_code") or task_row.assigned_agent_code or "").strip()
@@ -215,6 +220,7 @@ def _build_execution_gates(
         assigned_agent_code=assigned_agent_code,
         labels=state.get("labels", task_row.labels),
         status=status,
+        runtime_context=runtime_context,
     )
     task_notes = db.execute(
         select(Note).where(
@@ -361,6 +367,7 @@ def _build_execution_gates(
         manifest = find_project_compose_manifest(
             project_name=str(getattr(project, "name", "") or ""),
             project_id=normalized_project_id,
+            project_external_refs=getattr(project, "external_refs", None),
         )
         has_manifest = manifest is not None
         gates.append(
@@ -463,6 +470,7 @@ def _build_execution_gates(
                 assigned_agent_code=str(lead_state.get("assigned_agent_code") or ""),
                 labels=lead_state.get("labels"),
                 status=str(lead_status or ""),
+                runtime_context=runtime_context,
             )
             if lead_role == "Lead" and semantic_status_key(status=lead_status) in {"todo", "active", "blocked", "awaiting_decision"}:
                 lead_in_progress = True
@@ -638,7 +646,14 @@ def list_tasks_read_model(db: Session, user, query: TaskListQuery) -> dict:
                 pass
         task.task_relationships = json.dumps(normalize_task_relationships(state.get("task_relationships")))
         task.external_refs = json.dumps(state.get("external_refs") or [])
-        task.execution_triggers = json.dumps(normalize_execution_triggers(state.get("execution_triggers")))
+        _instruction, execution_triggers, _legacy_schedule = resolve_instruction_and_schedule_fields(
+            instruction=str(state.get("instruction") or state.get("scheduled_instruction") or "").strip() or None,
+            execution_triggers=state.get("execution_triggers"),
+            scheduled_at_utc=state.get("scheduled_at_utc"),
+            schedule_timezone=state.get("schedule_timezone"),
+            recurring_rule=state.get("recurring_rule"),
+        )
+        task.execution_triggers = json.dumps(execution_triggers)
         task.delivery_mode = normalize_delivery_mode(state.get("delivery_mode"))
     linked_note_count_by_task_id: dict[str, int] = {}
     if task_ids:
@@ -700,19 +715,12 @@ def get_task_automation_status_read_model(db: Session, user, task_id: str) -> di
         workspace_id=str(command_state.workspace_id or ""),
         project_id=str(command_state.project_id or "") or None,
     )
-    instruction = str(state.get("instruction") or state.get("scheduled_instruction") or "").strip() or None
-    execution_triggers = normalize_execution_triggers(state.get("execution_triggers"))
-    if not execution_triggers:
-        legacy_trigger = build_legacy_schedule_trigger(
-            scheduled_at_utc=state.get("scheduled_at_utc"),
-            schedule_timezone=state.get("schedule_timezone"),
-            recurring_rule=state.get("recurring_rule"),
-        )
-        if legacy_trigger is not None:
-            execution_triggers = [legacy_trigger]
-    legacy_schedule = derive_legacy_schedule_fields(
-        instruction=instruction,
-        execution_triggers=execution_triggers,
+    instruction, execution_triggers, legacy_schedule = resolve_instruction_and_schedule_fields(
+        instruction=str(state.get("instruction") or state.get("scheduled_instruction") or "").strip() or None,
+        execution_triggers=state.get("execution_triggers"),
+        scheduled_at_utc=state.get("scheduled_at_utc"),
+        schedule_timezone=state.get("schedule_timezone"),
+        recurring_rule=state.get("recurring_rule"),
     )
     derived_deploy_execution = derive_deploy_execution_snapshot(
         refs=state.get("external_refs"),

@@ -32,7 +32,8 @@ from .settings import (
     logger,
 )
 from .task_relationships import normalize_task_relationships
-from plugins.team_mode.task_roles import derive_task_role, normalize_team_agents
+from plugins.team_mode.runtime_context import TeamModeProjectRuntimeContext
+from plugins.team_mode.task_roles import derive_task_role
 from .vector_store import resolve_project_embedding_runtime, search_project_chunks
 
 try:  # pragma: no cover - exercised in integration only
@@ -566,7 +567,7 @@ def graph_get_project_subgraph(
     task_ids = [str(node.get("entity_id") or "") for node in nodes if str(node.get("entity_type") or "").lower() == "task"]
     remaining_node_slots = max(0, safe_nodes - len(nodes))
     if task_ids:
-        from .models import ProjectMember, ProjectPluginConfig, SessionLocal, Task, TaskComment
+        from .models import SessionLocal, Task, TaskComment
         from .eventing import rebuild_state
 
         if remaining_node_slots:
@@ -640,36 +641,25 @@ def graph_get_project_subgraph(
         task_id_set = {tid for tid in task_ids if tid}
         task_dependency_keys: set[tuple[str, str, str]] = set()
         with SessionLocal() as db:
-            member_role_by_user_id = {
-                str(user_id or "").strip(): str(role or "").strip()
-                for user_id, role in (
-                    db.query(ProjectMember.user_id, ProjectMember.role)
-                    .filter(ProjectMember.project_id == project_id)
-                    .all()
-                )
-                if str(user_id or "").strip()
-            }
-            team_mode_config_row = (
-                db.query(ProjectPluginConfig.config_json)
-                .filter(ProjectPluginConfig.project_id == project_id)
-                .filter(ProjectPluginConfig.plugin_key == "team_mode")
-                .filter(ProjectPluginConfig.enabled.is_(True))
-                .filter(ProjectPluginConfig.is_deleted.is_(False))
-                .first()
+            project_workspace_id = (
+                db.query(Task.workspace_id)
+                .filter(Task.project_id == project_id)
+                .filter(Task.is_deleted.is_(False))
+                .order_by(Task.created_at.asc(), Task.id.asc())
+                .limit(1)
+                .scalar()
             )
-            team_mode_agents: list[dict[str, str]] = []
-            if team_mode_config_row is not None:
-                try:
-                    parsed_team_mode = json.loads(str(team_mode_config_row[0] or "").strip() or "{}")
-                except Exception:
-                    parsed_team_mode = {}
-                if isinstance(parsed_team_mode, dict):
-                    team_mode_agents = normalize_team_agents(parsed_team_mode.get("team"))
-            agent_role_by_code = {
-                str(agent.get("id") or "").strip(): str(agent.get("authority_role") or "").strip()
-                for agent in team_mode_agents
-                if str(agent.get("id") or "").strip()
-            }
+            member_role_by_user_id: dict[str, str] = {}
+            agent_role_by_code: dict[str, str] = {}
+            if str(project_workspace_id or "").strip():
+                runtime_context = TeamModeProjectRuntimeContext(
+                    db=db,
+                    workspace_id=str(project_workspace_id),
+                    project_id=project_id,
+                )
+                member_role_by_user_id = runtime_context.member_role_by_user_id
+                if runtime_context.enabled:
+                    agent_role_by_code = runtime_context.agent_role_by_code
             task_role_rows_sql = (
                 db.query(Task.id, Task.assignee_id, Task.assigned_agent_code, Task.labels, Task.status)
                 .filter(Task.id.in_(task_ids))
@@ -685,7 +675,7 @@ def graph_get_project_subgraph(
                 .all()
             )
 
-        if team_mode_agents:
+        if agent_role_by_code:
             task_role_by_id: dict[str, str] = {}
             for task_id_raw, assignee_id_raw, assigned_agent_code_raw, labels_raw, status_raw in task_role_rows_sql:
                 task_id = str(task_id_raw or "").strip()

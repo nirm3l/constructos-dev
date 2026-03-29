@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 _CACHE_LOCK = threading.Lock()
 _CACHE_EXPIRES_AT = 0.0
 _CACHE_ROWS: list[dict[str, Any]] = []
+_CACHE_REFRESH_IN_PROGRESS = False
 _FALLBACK_SERVER_NAME = "constructos-tools"
 _LEGACY_CORE_SERVER_NAME = "constructos_tools"
 _PLUGIN_SERVER_ALIASES_BY_KEY: dict[str, set[str]] = {
@@ -284,15 +285,43 @@ def _discover_rows_uncached(*, include_codex_cli: bool = True) -> list[dict[str,
     return rows
 
 
+def _refresh_rows_worker() -> None:
+    global _CACHE_ROWS, _CACHE_EXPIRES_AT, _CACHE_REFRESH_IN_PROGRESS
+    try:
+        discovered = _discover_rows_uncached(include_codex_cli=True)
+        with _CACHE_LOCK:
+            _CACHE_ROWS = copy.deepcopy(discovered)
+            _CACHE_EXPIRES_AT = time.monotonic() + _CACHE_TTL_SECONDS
+            _CACHE_REFRESH_IN_PROGRESS = False
+    except Exception:
+        with _CACHE_LOCK:
+            _CACHE_REFRESH_IN_PROGRESS = False
+
+
+def _schedule_rows_refresh_if_needed() -> None:
+    global _CACHE_REFRESH_IN_PROGRESS
+    with _CACHE_LOCK:
+        if _CACHE_REFRESH_IN_PROGRESS:
+            return
+        _CACHE_REFRESH_IN_PROGRESS = True
+    threading.Thread(target=_refresh_rows_worker, daemon=True).start()
+
+
 def _get_rows(*, force_refresh: bool = False, include_codex_cli: bool = True) -> list[dict[str, Any]]:
     global _CACHE_ROWS, _CACHE_EXPIRES_AT
     if not include_codex_cli:
         # OpenCode discovery should not depend on Codex CLI availability.
         return _discover_rows_uncached(include_codex_cli=False)
     now = time.monotonic()
+    stale_rows: list[dict[str, Any]] | None = None
     with _CACHE_LOCK:
         if not force_refresh and _CACHE_ROWS and now < _CACHE_EXPIRES_AT:
             return copy.deepcopy(_CACHE_ROWS)
+        if not force_refresh and _CACHE_ROWS and now >= _CACHE_EXPIRES_AT:
+            stale_rows = copy.deepcopy(_CACHE_ROWS)
+    if stale_rows is not None:
+        _schedule_rows_refresh_if_needed()
+        return stale_rows
 
     discovered = _discover_rows_uncached(include_codex_cli=True)
     with _CACHE_LOCK:
