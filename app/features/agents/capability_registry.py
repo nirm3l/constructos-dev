@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from plugins.registry import list_workflow_plugins
+from plugins.descriptors import list_plugin_descriptors
 from shared.settings import (
     AGENT_DEFAULT_EXECUTION_PROVIDER,
     agent_default_model_for_provider,
@@ -373,18 +374,21 @@ def build_bootstrap_phase_capabilities() -> dict[str, Any]:
 
 def build_capability_registry() -> dict[str, Any]:
     workflow_plugins = list_workflow_plugin_capabilities()
+    plugin_descriptors = list_plugin_descriptors()
     execution_providers = list_execution_provider_capabilities()
     mcp_tools = list_constructos_mcp_tool_capabilities()
     prompt_templates = list_prompt_template_capabilities()
     bootstrap = build_bootstrap_phase_capabilities()
     return {
         "workflow_plugins": workflow_plugins,
+        "plugin_descriptors": plugin_descriptors,
         "execution_providers": execution_providers,
         "constructos_mcp_tools": mcp_tools,
         "prompt_templates": prompt_templates,
         "bootstrap": bootstrap,
         "counts": {
             "workflow_plugins": len(workflow_plugins),
+            "plugin_descriptors": len(plugin_descriptors),
             "execution_providers": len(execution_providers),
             "constructos_mcp_tools": len(mcp_tools),
             "prompt_templates": len(prompt_templates),
@@ -392,4 +396,3 @@ def build_capability_registry() -> dict[str, Any]:
             "bootstrap_shutdown_phases": int(bootstrap.get("shutdown_phase_count") or 0),
         },
     }
-

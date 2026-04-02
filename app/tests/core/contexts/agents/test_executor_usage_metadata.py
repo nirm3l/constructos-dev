@@ -13,6 +13,7 @@ def test_build_automation_usage_metadata_includes_provider_model_and_skill_trace
             "output_tokens": 30,
             "execution_provider": "codex",
             "execution_model": "gpt-5",
+            "reasoning_effort": "high",
             "cost_usd": 0.0123,
             "project_skill_trace": [
                 {
@@ -35,6 +36,7 @@ def test_build_automation_usage_metadata_includes_provider_model_and_skill_trace
     assert isinstance(usage, dict)
     assert usage.get("execution_provider") == "codex"
     assert usage.get("execution_model") == "gpt-5"
+    assert usage.get("reasoning_effort") == "high"
     assert float(usage.get("cost_usd") or 0.0) == 0.0123
     assert usage.get("project_skill_trace_count") == 1
     skill_trace = usage.get("project_skill_trace")

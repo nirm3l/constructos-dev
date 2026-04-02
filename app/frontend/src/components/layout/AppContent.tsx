@@ -127,6 +127,8 @@ export function AppContent({ state }: { state: any }) {
           state.setSelectedProjectId(projectId)
           state.setTab('projects')
         }}
+        doctorRuntimeStatus={state.workspaceDoctorQuery?.data?.runtime_health?.overall_status ?? null}
+        onOpenDoctorIncident={state.openWorkspaceDoctorIncident}
         onStartQuickTour={() => tourControlsRef.current?.startQuick()}
         onStartAdvancedTour={() => tourControlsRef.current?.startAdvanced()}
       />

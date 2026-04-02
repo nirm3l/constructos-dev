@@ -11,6 +11,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from features.agents.mcp_registry import list_available_mcp_servers, mcp_registry_cache_status
+from features.bootstrap.plan import build_bootstrap_plan_read_model
 from features.bootstrap.cache import bootstrap_cache_status, clear_bootstrap_cache, get_or_compute_bootstrap_cache
 from shared.models import (
     Notification,
@@ -55,6 +56,7 @@ _BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_TTL_SECONDS = _load_positive_float_env(
     "BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_TTL_SECONDS", 60.0
 )
 _BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_KEY = "bootstrap_architecture_inventory_summary"
+_BOOTSTRAP_ARCHITECTURE_EXPORT_CACHE_KEY = "bootstrap_architecture_export_summary"
 
 
 def _clear_bootstrap_discovery_cache_for_tests() -> None:
@@ -63,6 +65,10 @@ def _clear_bootstrap_discovery_cache_for_tests() -> None:
 
 def _clear_bootstrap_architecture_inventory_cache_for_tests() -> None:
     clear_bootstrap_cache(key=_BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_KEY)
+
+
+def _clear_bootstrap_architecture_export_cache_for_tests() -> None:
+    clear_bootstrap_cache(key=_BOOTSTRAP_ARCHITECTURE_EXPORT_CACHE_KEY)
 
 
 def _build_architecture_inventory_for_bootstrap() -> dict[str, Any]:
@@ -75,6 +81,12 @@ def _audit_architecture_inventory_for_bootstrap(inventory: dict[str, Any]):
     from features.architecture_inventory import audit_architecture_inventory
 
     return audit_architecture_inventory(inventory)
+
+
+def _build_architecture_export_for_bootstrap():
+    from features.architecture_inventory import build_architecture_export
+
+    return build_architecture_export()
 
 
 def _bootstrap_discovery_snapshot(*, force_refresh: bool = False) -> dict[str, Any]:
@@ -140,6 +152,55 @@ def _bootstrap_architecture_inventory_summary_snapshot(*, force_refresh: bool = 
     )
     snapshot["cache_hit"] = bool(cache_hit)
     snapshot["cache_status"] = bootstrap_cache_status(key=_BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_KEY)
+    return snapshot
+
+
+def _bootstrap_architecture_export_summary_snapshot(*, force_refresh: bool = False) -> dict[str, Any]:
+    def _compute() -> dict[str, Any]:
+        export_payload = _build_architecture_export_for_bootstrap()
+        counts = dict(export_payload.get("counts") or {})
+        audit = dict(export_payload.get("audit") or {})
+        descriptor_keys = {
+            str((item or {}).get("key") or "").strip().lower()
+            for item in (export_payload.get("plugin_descriptors") or [])
+            if isinstance(item, dict) and str((item or {}).get("key") or "").strip()
+        }
+        return {
+            "generated_at": str(export_payload.get("generated_at") or ""),
+            "inventory_generated_at": str(export_payload.get("inventory_generated_at") or ""),
+            "counts": {
+                key: int(counts.get(key) or 0)
+                for key in (
+                    "execution_providers",
+                    "workflow_plugins",
+                    "plugin_descriptors",
+                    "constructos_mcp_tools",
+                    "prompt_templates",
+                    "bootstrap_startup_phases",
+                    "bootstrap_shutdown_phases",
+                    "internal_docs",
+                    "internal_docs_reading_order",
+                )
+            },
+            "plugin_descriptor_keys": sorted(descriptor_keys),
+            "audit": {
+                "ok": bool(audit.get("ok", False)),
+                "error_count": len(audit.get("errors") or []),
+                "warning_count": len(audit.get("warnings") or []),
+                "errors": list(audit.get("errors") or []),
+                "warnings": list(audit.get("warnings") or []),
+            },
+            "cache_ttl_seconds": float(_BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_TTL_SECONDS),
+        }
+
+    snapshot, cache_hit = get_or_compute_bootstrap_cache(
+        key=_BOOTSTRAP_ARCHITECTURE_EXPORT_CACHE_KEY,
+        ttl_seconds=_BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_TTL_SECONDS,
+        force_refresh=force_refresh,
+        compute=_compute,
+    )
+    snapshot["cache_hit"] = bool(cache_hit)
+    snapshot["cache_status"] = bootstrap_cache_status(key=_BOOTSTRAP_ARCHITECTURE_EXPORT_CACHE_KEY)
     return snapshot
 
 
@@ -304,6 +365,8 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
     vector_enabled = bool(vector_store_enabled())
     discovery_snapshot = _bootstrap_discovery_snapshot()
     architecture_inventory_summary = _bootstrap_architecture_inventory_summary_snapshot()
+    architecture_export_summary = _bootstrap_architecture_export_summary_snapshot()
+    bootstrap_plan = build_bootstrap_plan_read_model()
     discovered_agent_chat_models = list(discovery_snapshot.get("discovered_agent_chat_models") or [])
     discovered_default_agent_chat_model = str(discovery_snapshot.get("discovered_default_agent_chat_model") or "").strip()
     preferred_default_provider = _resolve_available_default_provider()
@@ -388,6 +451,8 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
         "agent_chat_available_mcp_servers": agent_chat_available_mcp_servers,
         "agent_chat_registry_debug": agent_chat_registry_debug,
         "architecture_inventory_summary": architecture_inventory_summary,
+        "architecture_export_summary": architecture_export_summary,
+        "bootstrap_plan": bootstrap_plan,
         # Backward-compatible mirror for older UI bundles reading bootstrap.config.*
         "config": {
             "embedding_allowed_models": embedding_models,
@@ -401,6 +466,8 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             "agent_chat_available_mcp_servers": agent_chat_available_mcp_servers,
             "agent_chat_registry_debug": agent_chat_registry_debug,
             "architecture_inventory_summary": architecture_inventory_summary,
+            "architecture_export_summary": architecture_export_summary,
+            "bootstrap_plan": bootstrap_plan,
         },
         "users": [{"id": u.id, "username": u.username, "full_name": u.full_name, "user_type": u.user_type} for u in users],
         "project_members": [

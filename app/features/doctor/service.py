@@ -15,6 +15,10 @@ from sqlalchemy.orm import Session
 
 from features.attachments.api import AttachmentDeletePayload, delete_attachment, download_attachment, upload_attachment
 from features.agents.gateway import build_ui_gateway
+from features.agents.model_registry import model_registry_cache_status
+from features.agents.mcp_registry import mcp_registry_cache_status
+from features.agents.provider_auth import resolve_provider_effective_auth_source
+from features.bootstrap.cache import bootstrap_cache_status
 from features.tasks.command_handlers import CommandContext as TaskCommandContext, RequestAutomationRunInternalHandler
 from features.tasks.api import list_comments as list_task_comments
 from features.tasks.application import TaskApplicationService
@@ -36,6 +40,7 @@ DOCTOR_SPEC_NOTE_TITLE = "Doctor specification note"
 DOCTOR_TASK_NOTE_TITLE = "Doctor task note"
 DOCTOR_TASK_COMMENT_BODY = "Doctor fixture task comment validates task comment persistence."
 DOCTOR_TEAM_TASK_CODES = ("dev-a", "dev-b", "qa-a", "lead-a")
+DOCTOR_RUNTIME_CONTRACT_AUDIT_STALE_HOURS = 24.0
 DOCTOR_TASK_BLUEPRINTS = (
     {
         "code": "dev-a",
@@ -1114,15 +1119,7 @@ def _task_rows(db: Session, *, workspace_id: str, project_id: str) -> list[Task]
 
 
 def _serialize_run(row: DoctorRun) -> dict[str, Any]:
-    summary: dict[str, Any] = {}
-    raw_summary = str(getattr(row, "summary_json", "") or "").strip()
-    if raw_summary:
-        try:
-            parsed = json.loads(raw_summary)
-            if isinstance(parsed, dict):
-                summary = parsed
-        except Exception:
-            summary = {}
+    summary = _doctor_run_summary_payload(row)
     return {
         "id": str(row.id),
         "workspace_id": str(row.workspace_id),
@@ -1136,6 +1133,74 @@ def _serialize_run(row: DoctorRun) -> dict[str, Any]:
         "created_at": getattr(row, "created_at", None).isoformat() if getattr(row, "created_at", None) else None,
         "updated_at": getattr(row, "updated_at", None).isoformat() if getattr(row, "updated_at", None) else None,
     }
+
+
+def _doctor_run_summary_payload(row: DoctorRun) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    raw_summary = str(getattr(row, "summary_json", "") or "").strip()
+    if raw_summary:
+        try:
+            parsed = json.loads(raw_summary)
+            if isinstance(parsed, dict):
+                summary = parsed
+        except Exception:
+            summary = {}
+    return summary
+
+
+def _is_quick_action_summary(summary: dict[str, Any] | None) -> bool:
+    payload = dict(summary or {})
+    return str(payload.get("event_kind") or "").strip().lower() == "quick_action"
+
+
+def _serialize_last_action(*, row: DoctorRun, summary: dict[str, Any]) -> dict[str, Any]:
+    at_value = (
+        getattr(row, "finished_at", None)
+        or getattr(row, "started_at", None)
+        or getattr(row, "created_at", None)
+    )
+    result_payload = summary.get("result")
+    if not isinstance(result_payload, dict):
+        result_payload = {}
+    return {
+        "id": str(summary.get("action_id") or "").strip(),
+        "status": str(getattr(row, "status", "") or "").strip() or "unknown",
+        "message": str(summary.get("message") or "").strip(),
+        "at": at_value.isoformat() if at_value else None,
+        "result": result_payload,
+    }
+
+
+def _record_doctor_quick_action_event(
+    db: Session,
+    *,
+    workspace_id: str,
+    project_id: str | None,
+    user_id: str,
+    action_id: str,
+    status: str,
+    message: str,
+    result: dict[str, Any] | None = None,
+) -> None:
+    now = _now_utc()
+    payload = {
+        "event_kind": "quick_action",
+        "action_id": str(action_id or "").strip(),
+        "message": str(message or "").strip(),
+        "result": dict(result or {}),
+    }
+    row = DoctorRun(
+        workspace_id=workspace_id,
+        project_id=project_id,
+        fixture_version=DOCTOR_FIXTURE_VERSION,
+        status=str(status or "warning").strip() or "warning",
+        summary_json=json.dumps(payload, ensure_ascii=False),
+        started_at=now,
+        finished_at=now,
+        triggered_by=str(user_id),
+    )
+    db.add(row)
+    db.commit()
 
 
 def _ensure_doctor_team_tasks(*, gateway: Any, workspace_id: str, project_id: str, command_id: str | None = None) -> dict[str, Any]:
@@ -1185,12 +1250,342 @@ def _ensure_doctor_team_tasks(*, gateway: Any, workspace_id: str, project_id: st
     }
 
 
+def _domain_status_from_counts(*, errors: int, warnings: int) -> str:
+    if int(errors) > 0:
+        return "failing"
+    if int(warnings) > 0:
+        return "warning"
+    return "healthy"
+
+
+def _compute_descriptor_drift_diagnostics(*, inventory_counts: dict[str, Any]) -> dict[str, Any]:
+    from features.architecture_inventory import build_architecture_export
+    from plugins.descriptors import list_plugin_descriptors
+
+    export_payload = build_architecture_export()
+    export_counts = dict(export_payload.get("counts") or {})
+    debug_descriptors = list_plugin_descriptors()
+
+    debug_keys = {
+        str((item or {}).get("key") or "").strip().lower()
+        for item in debug_descriptors
+        if isinstance(item, dict) and str((item or {}).get("key") or "").strip()
+    }
+    export_keys = {
+        str((item or {}).get("key") or "").strip().lower()
+        for item in (export_payload.get("plugin_descriptors") or [])
+        if isinstance(item, dict) and str((item or {}).get("key") or "").strip()
+    }
+    missing_in_export = sorted(debug_keys - export_keys)
+    missing_in_debug = sorted(export_keys - debug_keys)
+    debug_descriptor_count = len(debug_keys)
+    export_descriptor_count = len(export_keys)
+    bootstrap_descriptor_count = int(inventory_counts.get("plugin_descriptors") or 0)
+    export_audit = dict(export_payload.get("audit") or {})
+    export_audit_ok = bool(export_audit.get("ok", True))
+    detected = bool(
+        missing_in_export
+        or missing_in_debug
+        or (bootstrap_descriptor_count != export_descriptor_count)
+        or (export_descriptor_count != debug_descriptor_count)
+        or not export_audit_ok
+    )
+    issue_codes: list[str] = []
+    if missing_in_export:
+        issue_codes.append("plugin_descriptors_missing_in_export")
+    if missing_in_debug:
+        issue_codes.append("plugin_descriptors_missing_in_debug_surface")
+    if bootstrap_descriptor_count != export_descriptor_count:
+        issue_codes.append("bootstrap_vs_export_descriptor_count_mismatch")
+    if export_descriptor_count != debug_descriptor_count:
+        issue_codes.append("export_vs_debug_descriptor_count_mismatch")
+    if not export_audit_ok:
+        issue_codes.append("architecture_export_audit_not_ok")
+
+    return {
+        "detected": detected,
+        "issue_codes": issue_codes,
+        "missing_in_export": missing_in_export,
+        "missing_in_debug": missing_in_debug,
+        "bootstrap_descriptor_count": bootstrap_descriptor_count,
+        "export_descriptor_count": export_descriptor_count,
+        "debug_descriptor_count": debug_descriptor_count,
+        "export_generated_at": str(export_payload.get("generated_at") or "").strip() or None,
+        "export_inventory_generated_at": str(export_payload.get("inventory_generated_at") or "").strip() or None,
+        "export_audit_ok": export_audit_ok,
+        "export_audit_errors": [
+            str(item).strip()
+            for item in (export_audit.get("errors") or [])
+            if str(item).strip()
+        ],
+        "export_audit_warnings": [
+            str(item).strip()
+            for item in (export_audit.get("warnings") or [])
+            if str(item).strip()
+        ],
+    }
+
+
+def _build_doctor_runtime_health_snapshot(
+    *,
+    supported: bool,
+    enabled: bool,
+    seeded: bool,
+    team_mode_enabled: bool,
+    git_delivery_enabled: bool,
+    runner_enabled: bool,
+    last_run_status: str | None,
+    runtime_contract_audit_last_at: str | None = None,
+    runtime_contract_audit_age_hours: float | None = None,
+) -> dict[str, Any]:
+    from features.architecture_inventory import audit_architecture_inventory, build_architecture_inventory
+
+    inventory = build_architecture_inventory()
+    audit = audit_architecture_inventory(inventory)
+    inventory_counts = dict(inventory.get("counts") or {})
+    contracts_error_count = len(audit.errors)
+    contracts_warning_count = len(audit.warnings)
+    descriptor_drift = _compute_descriptor_drift_diagnostics(inventory_counts=inventory_counts)
+    runtime_contract_audit_stale = (
+        runtime_contract_audit_age_hours is None
+        or float(runtime_contract_audit_age_hours) > float(DOCTOR_RUNTIME_CONTRACT_AUDIT_STALE_HOURS)
+    )
+    runtime_contract_audit_issue_codes: list[str] = []
+    if runtime_contract_audit_stale:
+        if runtime_contract_audit_last_at:
+            runtime_contract_audit_issue_codes.append("runtime_contract_audit_stale")
+        else:
+            runtime_contract_audit_issue_codes.append("runtime_contract_audit_missing")
+        contracts_warning_count += 1
+    if bool(descriptor_drift.get("detected")):
+        contracts_warning_count += 1
+    contracts_status = _domain_status_from_counts(
+        errors=contracts_error_count,
+        warnings=contracts_warning_count,
+    )
+
+    startup_phase_count = int(inventory_counts.get("bootstrap_startup_phases") or 0)
+    shutdown_phase_count = int(inventory_counts.get("bootstrap_shutdown_phases") or 0)
+    bootstrap_issues: list[str] = []
+    if startup_phase_count <= 0:
+        bootstrap_issues.append("bootstrap_startup_phases_missing")
+    if shutdown_phase_count <= 0:
+        bootstrap_issues.append("bootstrap_shutdown_phases_missing")
+    discovery_cache = bootstrap_cache_status(key="bootstrap_discovery_registry")
+    inventory_cache = bootstrap_cache_status(key="bootstrap_architecture_inventory_summary")
+    if not bool(discovery_cache.get("has_payload")):
+        bootstrap_issues.append("bootstrap_discovery_cache_cold")
+    if not bool(inventory_cache.get("has_payload")):
+        bootstrap_issues.append("bootstrap_inventory_cache_cold")
+    bootstrap_status = "failing" if startup_phase_count <= 0 or shutdown_phase_count <= 0 else ("warning" if bootstrap_issues else "healthy")
+
+    plugin_issues: list[str] = []
+    if not supported:
+        plugin_issues.append("doctor_plugin_not_supported")
+    if supported and not enabled:
+        plugin_issues.append("doctor_plugin_disabled")
+    if not seeded:
+        plugin_issues.append("doctor_fixture_not_seeded")
+    if seeded and not team_mode_enabled:
+        plugin_issues.append("team_mode_not_enabled")
+    if seeded and not git_delivery_enabled:
+        plugin_issues.append("git_delivery_not_enabled")
+    if seeded and str(last_run_status or "").strip().lower() in {"failed", "warning"}:
+        plugin_issues.append("last_doctor_run_unhealthy")
+    plugin_status = "failing" if any(
+        issue in plugin_issues
+        for issue in {
+            "doctor_plugin_not_supported",
+            "doctor_plugin_disabled",
+            "team_mode_not_enabled",
+            "git_delivery_not_enabled",
+        }
+    ) else ("warning" if plugin_issues else "healthy")
+
+    provider_sources = {
+        provider: resolve_provider_effective_auth_source(provider)
+        for provider in ("codex", "claude", "opencode")
+    }
+    configured_provider_count = sum(1 for source in provider_sources.values() if str(source or "").strip().lower() != "none")
+    model_registry_status = model_registry_cache_status()
+    mcp_status = mcp_registry_cache_status()
+    agent_runtime_issues: list[str] = []
+    if not runner_enabled:
+        agent_runtime_issues.append("agent_runner_disabled")
+    if configured_provider_count <= 0:
+        agent_runtime_issues.append("no_agent_provider_auth")
+    if not bool(model_registry_status.get("has_payload")):
+        agent_runtime_issues.append("model_registry_cache_cold")
+    if not bool(mcp_status.get("has_payload")):
+        agent_runtime_issues.append("mcp_registry_cache_cold")
+    agent_runtime_status = "warning" if agent_runtime_issues else "healthy"
+
+    domains = {
+        "contracts": {
+            "status": contracts_status,
+            "summary": f"{contracts_error_count} errors, {contracts_warning_count} warnings",
+            "metrics": {
+                "errors": contracts_error_count,
+                "warnings": contracts_warning_count,
+                "execution_providers": int(inventory_counts.get("execution_providers") or 0),
+                "workflow_plugins": int(inventory_counts.get("workflow_plugins") or 0),
+                "constructos_mcp_tools": int(inventory_counts.get("constructos_mcp_tools") or 0),
+                "prompt_templates": int(inventory_counts.get("prompt_templates") or 0),
+                "descriptor_drift_detected": bool(descriptor_drift.get("detected")),
+                "bootstrap_descriptor_count": int(descriptor_drift.get("bootstrap_descriptor_count") or 0),
+                "export_descriptor_count": int(descriptor_drift.get("export_descriptor_count") or 0),
+                "debug_descriptor_count": int(descriptor_drift.get("debug_descriptor_count") or 0),
+                "missing_descriptor_count_in_export": len(descriptor_drift.get("missing_in_export") or []),
+                "missing_descriptor_count_in_debug_surface": len(descriptor_drift.get("missing_in_debug") or []),
+                "descriptor_export_generated_at": descriptor_drift.get("export_generated_at"),
+                "descriptor_export_inventory_generated_at": descriptor_drift.get("export_inventory_generated_at"),
+                "runtime_contract_audit_last_at": runtime_contract_audit_last_at,
+                "runtime_contract_audit_age_hours": (
+                    round(float(runtime_contract_audit_age_hours), 2)
+                    if runtime_contract_audit_age_hours is not None
+                    else None
+                ),
+                "runtime_contract_audit_stale_threshold_hours": float(DOCTOR_RUNTIME_CONTRACT_AUDIT_STALE_HOURS),
+                "runtime_contract_audit_stale": bool(runtime_contract_audit_stale),
+            },
+            "issues": (
+                list(audit.errors)
+                + list(audit.warnings)
+                + runtime_contract_audit_issue_codes
+                + (list(descriptor_drift.get("issue_codes") or []) if bool(descriptor_drift.get("detected")) else [])
+            ),
+        },
+        "bootstrap": {
+            "status": bootstrap_status,
+            "summary": f"startup={startup_phase_count}, shutdown={shutdown_phase_count}",
+            "metrics": {
+                "startup_phases": startup_phase_count,
+                "shutdown_phases": shutdown_phase_count,
+                "discovery_cache_has_payload": bool(discovery_cache.get("has_payload")),
+                "inventory_cache_has_payload": bool(inventory_cache.get("has_payload")),
+            },
+            "issues": bootstrap_issues,
+        },
+        "plugins": {
+            "status": plugin_status,
+            "summary": f"supported={supported}, enabled={enabled}, seeded={seeded}",
+            "metrics": {
+                "supported": bool(supported),
+                "enabled": bool(enabled),
+                "seeded": bool(seeded),
+                "team_mode_enabled": bool(team_mode_enabled),
+                "git_delivery_enabled": bool(git_delivery_enabled),
+            },
+            "issues": plugin_issues,
+        },
+        "agent_runtime": {
+            "status": agent_runtime_status,
+            "summary": f"configured_providers={configured_provider_count}",
+            "metrics": {
+                "runner_enabled": bool(runner_enabled),
+                "configured_provider_count": int(configured_provider_count),
+                "provider_sources": provider_sources,
+                "model_registry": model_registry_status,
+                "mcp_registry": mcp_status,
+            },
+            "issues": agent_runtime_issues,
+        },
+    }
+
+    domain_statuses = [str((item or {}).get("status") or "warning") for item in domains.values()]
+    if "failing" in domain_statuses:
+        overall_status = "failing"
+    elif "warning" in domain_statuses:
+        overall_status = "warning"
+    else:
+        overall_status = "healthy"
+
+    recommended_actions: list[dict[str, str]] = []
+    if overall_status in {"failing", "warning"}:
+        recommended_actions.append(
+            {
+                "id": "recovery-sequence",
+                "priority": "high" if overall_status == "failing" else "medium",
+                "title": "Run recovery sequence",
+                "description": "Execute Doctor plugin wiring refresh, bootstrap cache warmup, and runtime contract audit in one operation.",
+            }
+        )
+    if contracts_status in {"failing", "warning"}:
+        recommended_actions.append(
+            {
+                "id": "runtime-contract-audit",
+                "priority": (
+                    "high"
+                    if contracts_status == "failing" or runtime_contract_audit_stale
+                    else "medium"
+                ),
+                "title": "Run runtime contract audit",
+                "description": "Run scripts/check_runtime_contracts.py and resolve reported contract errors or warnings.",
+            }
+        )
+    if bool(descriptor_drift.get("detected")):
+        recommended_actions.append(
+            {
+                "id": "descriptor-export-drift-check",
+                "priority": "high",
+                "title": "Inspect descriptor/export drift",
+                "description": "Recompute architecture export and plugin descriptor surfaces, then reconcile missing keys and count mismatches.",
+            }
+        )
+    if plugin_status in {"failing", "warning"}:
+        recommended_actions.append(
+            {
+                "id": "doctor-plugin-wiring",
+                "priority": "high" if plugin_status == "failing" else "medium",
+                "title": "Repair Doctor plugin wiring",
+                "description": "Seed the Doctor workspace and ensure Team Mode and Git Delivery are enabled for the fixture project.",
+            }
+        )
+    if agent_runtime_status == "warning":
+        recommended_actions.append(
+            {
+                "id": "agent-runtime-configuration",
+                "priority": "medium",
+                "title": "Review agent runtime configuration",
+                "description": "Enable AGENT_RUNNER and configure at least one provider auth source for predictable automation runs.",
+            }
+        )
+    if bootstrap_status == "warning":
+        recommended_actions.append(
+            {
+                "id": "warm-bootstrap-caches",
+                "priority": "low",
+                "title": "Warm bootstrap caches",
+                "description": "Open /api/bootstrap once and verify bootstrap discovery and inventory cache payloads are populated.",
+            }
+        )
+
+    domain_penalties = {
+        "healthy": 0,
+        "warning": 15,
+        "failing": 35,
+    }
+    score = 100
+    for status in domain_statuses:
+        score -= int(domain_penalties.get(str(status).strip().lower(), 15))
+    score = max(0, min(100, score))
+
+    return {
+        "generated_at": _now_utc().isoformat(),
+        "overall_status": overall_status,
+        "health_score": score,
+        "domains": domains,
+        "recommended_actions": recommended_actions,
+    }
+
+
 def get_doctor_status(db: Session, *, workspace_id: str, user: User) -> dict[str, Any]:
     ensure_role(db, workspace_id, user.id, {"Owner", "Admin", "Member", "Guest"})
     supported = doctor_supported()
     config = _load_doctor_config(db, workspace_id=workspace_id)
     project = _load_project(db, project_id=getattr(config, "doctor_project_id", None) if config is not None else None)
     seeded = project is not None
+    enabled = bool(getattr(config, "enabled", True)) if config is not None else False
     team_mode_enabled = _plugin_enabled(db, workspace_id=workspace_id, project_id=project.id, plugin_key="team_mode") if project else False
     git_delivery_enabled = _plugin_enabled(db, workspace_id=workspace_id, project_id=project.id, plugin_key="git_delivery") if project else False
     tasks = _task_rows(db, workspace_id=workspace_id, project_id=project.id) if project else []
@@ -1198,18 +1593,114 @@ def get_doctor_status(db: Session, *, workspace_id: str, user: User) -> dict[str
         task for task in tasks
         if str(getattr(task, "assigned_agent_code", "") or "").strip().lower() in DOCTOR_TEAM_TASK_CODES
     ]
-    latest_runs = db.execute(
+    latest_runs_all = db.execute(
         select(DoctorRun).where(
             DoctorRun.workspace_id == workspace_id,
             DoctorRun.is_deleted == False,  # noqa: E712
-        ).order_by(DoctorRun.started_at.desc().nullslast(), DoctorRun.created_at.desc()).limit(10)
+        ).order_by(DoctorRun.started_at.desc().nullslast(), DoctorRun.created_at.desc()).limit(40)
     ).scalars().all()
+    latest_runs: list[DoctorRun] = []
+    last_action_payload: dict[str, Any] | None = None
+    recent_actions_payload: list[dict[str, Any]] = []
+    now_utc = _now_utc()
+    now_utc_naive = now_utc.astimezone(timezone.utc).replace(tzinfo=None)
+    action_stats = {
+        "window_hours": 24,
+        "total": 0,
+        "passed": 0,
+        "warning": 0,
+        "failed": 0,
+        "previous_total": 0,
+        "previous_passed": 0,
+        "previous_warning": 0,
+        "previous_failed": 0,
+        "delta_total": 0,
+        "delta_passed": 0,
+        "delta_warning": 0,
+        "delta_failed": 0,
+    }
+    latest_runtime_contract_audit_at: datetime | None = None
+    for row in latest_runs_all:
+        summary = _doctor_run_summary_payload(row)
+        if _is_quick_action_summary(summary):
+            action_payload = _serialize_last_action(row=row, summary=summary)
+            if last_action_payload is None:
+                last_action_payload = action_payload
+            if len(recent_actions_payload) < 5:
+                recent_actions_payload.append(action_payload)
+            action_at = (
+                getattr(row, "finished_at", None)
+                or getattr(row, "started_at", None)
+                or getattr(row, "created_at", None)
+            )
+            action_id = str(summary.get("action_id") or "").strip().lower()
+            if action_at is not None and action_id in {"runtime-contract-audit", "recovery-sequence"}:
+                normalized_action_at = (
+                    action_at.astimezone(timezone.utc).replace(tzinfo=None)
+                    if getattr(action_at, "tzinfo", None) is not None
+                    else action_at
+                )
+                if latest_runtime_contract_audit_at is None or normalized_action_at > latest_runtime_contract_audit_at:
+                    latest_runtime_contract_audit_at = normalized_action_at
+            if action_at is not None:
+                action_at_naive = (
+                    action_at.astimezone(timezone.utc).replace(tzinfo=None)
+                    if getattr(action_at, "tzinfo", None) is not None
+                    else action_at
+                )
+                age_hours = (now_utc_naive - action_at_naive).total_seconds() / 3600.0
+                if age_hours <= 24:
+                    action_stats["total"] = int(action_stats["total"]) + 1
+                    normalized_status = str(getattr(row, "status", "") or "").strip().lower()
+                    if normalized_status == "passed":
+                        action_stats["passed"] = int(action_stats["passed"]) + 1
+                    elif normalized_status in {"failed", "failing"}:
+                        action_stats["failed"] = int(action_stats["failed"]) + 1
+                    else:
+                        action_stats["warning"] = int(action_stats["warning"]) + 1
+                elif age_hours <= 48:
+                    action_stats["previous_total"] = int(action_stats["previous_total"]) + 1
+                    normalized_status = str(getattr(row, "status", "") or "").strip().lower()
+                    if normalized_status == "passed":
+                        action_stats["previous_passed"] = int(action_stats["previous_passed"]) + 1
+                    elif normalized_status in {"failed", "failing"}:
+                        action_stats["previous_failed"] = int(action_stats["previous_failed"]) + 1
+                    else:
+                        action_stats["previous_warning"] = int(action_stats["previous_warning"]) + 1
+            continue
+        latest_runs.append(row)
+    action_stats["delta_total"] = int(action_stats["total"]) - int(action_stats["previous_total"])
+    action_stats["delta_passed"] = int(action_stats["passed"]) - int(action_stats["previous_passed"])
+    action_stats["delta_warning"] = int(action_stats["warning"]) - int(action_stats["previous_warning"])
+    action_stats["delta_failed"] = int(action_stats["failed"]) - int(action_stats["previous_failed"])
+    runtime_contract_audit_last_at = (
+        latest_runtime_contract_audit_at.replace(tzinfo=timezone.utc).isoformat()
+        if latest_runtime_contract_audit_at is not None
+        else None
+    )
+    runtime_contract_audit_age_hours = (
+        (now_utc_naive - latest_runtime_contract_audit_at).total_seconds() / 3600.0
+        if latest_runtime_contract_audit_at is not None
+        else None
+    )
     latest_run = latest_runs[0] if latest_runs else None
+    last_run_status = str(getattr(config, "last_run_status", "") or "").strip() or None
+    runtime_health = _build_doctor_runtime_health_snapshot(
+        supported=supported,
+        enabled=enabled,
+        seeded=seeded,
+        team_mode_enabled=team_mode_enabled,
+        git_delivery_enabled=git_delivery_enabled,
+        runner_enabled=bool(AGENT_RUNNER_ENABLED),
+        last_run_status=last_run_status,
+        runtime_contract_audit_last_at=runtime_contract_audit_last_at,
+        runtime_contract_audit_age_hours=runtime_contract_audit_age_hours,
+    )
     return {
         "workspace_id": workspace_id,
         "plugin_key": DOCTOR_PLUGIN_KEY,
         "supported": supported,
-        "enabled": bool(getattr(config, "enabled", True)) if config is not None else False,
+        "enabled": enabled,
         "fixture_version": str(getattr(config, "fixture_version", "") or "").strip() or DOCTOR_FIXTURE_VERSION,
         "project": (
             {
@@ -1231,9 +1722,19 @@ def get_doctor_status(db: Session, *, workspace_id: str, user: User) -> dict[str
         },
         "last_seeded_at": getattr(config, "last_seeded_at", None).isoformat() if getattr(config, "last_seeded_at", None) else None,
         "last_run_at": getattr(config, "last_run_at", None).isoformat() if getattr(config, "last_run_at", None) else None,
-        "last_run_status": str(getattr(config, "last_run_status", "") or "").strip() or None,
+        "last_run_status": last_run_status,
         "last_run": _serialize_run(latest_run) if latest_run is not None else None,
-        "recent_runs": [_serialize_run(item) for item in latest_runs],
+        "recent_runs": [_serialize_run(item) for item in latest_runs[:10]],
+        "last_action": last_action_payload,
+        "last_action_at": str((last_action_payload or {}).get("at") or "").strip() or None,
+        "last_action_result": (
+            dict((last_action_payload or {}).get("result") or {})
+            if isinstance((last_action_payload or {}).get("result"), dict)
+            else {}
+        ),
+        "recent_actions": recent_actions_payload,
+        "quick_action_stats": action_stats,
+        "runtime_health": runtime_health,
     }
 
 
@@ -1485,6 +1986,16 @@ def run_doctor_workspace(db: Session, *, workspace_id: str, user: User, command_
         checks.extend(surface_fixture.get("product_checks") or [])
         failed = [item for item in checks if item.get("status") == "failed"]
         warning = [item for item in checks if item.get("status") == "warning"]
+        run_status = "failed" if failed else ("warning" if warning else "passed")
+        runtime_health_snapshot = _build_doctor_runtime_health_snapshot(
+            supported=doctor_supported(),
+            enabled=bool(getattr(config, "enabled", True)),
+            seeded=True,
+            team_mode_enabled=bool((capability_map or {}).get("team_mode")),
+            git_delivery_enabled=bool((capability_map or {}).get("git_delivery")),
+            runner_enabled=bool(AGENT_RUNNER_ENABLED),
+            last_run_status=run_status,
+        )
         summary = {
             "project_id": project.id,
             "project_link": f"?tab=projects&project={project.id}",
@@ -1499,6 +2010,7 @@ def run_doctor_workspace(db: Session, *, workspace_id: str, user: User, command_
             "capabilities": capabilities,
             "verification": team_verify,
             "delivery_verification": delivery_verify,
+            "runtime_health_snapshot": runtime_health_snapshot,
             "checks": checks,
             "counts": {
                 "passed": sum(1 for item in checks if item.get("status") == "passed"),
@@ -1507,7 +2019,7 @@ def run_doctor_workspace(db: Session, *, workspace_id: str, user: User, command_
             },
         }
         run.summary_json = json.dumps(summary, ensure_ascii=False)
-        run.status = "failed" if failed else ("warning" if warning else "passed")
+        run.status = run_status
     except Exception as exc:
         run.summary_json = json.dumps({"checks": checks, "error": str(exc)}, ensure_ascii=False)
         run.status = "failed"
@@ -1527,6 +2039,216 @@ def run_doctor_workspace(db: Session, *, workspace_id: str, user: User, command_
         "run": _serialize_run(run),
         "status": get_doctor_status(db, workspace_id=workspace_id, user=user),
     }
+
+
+def run_doctor_runtime_contract_audit(db: Session, *, workspace_id: str, user: User) -> dict[str, Any]:
+    _require_workspace_admin(db, workspace_id=workspace_id, user_id=user.id)
+    started = time.perf_counter()
+    from features.architecture_inventory import audit_architecture_inventory, build_architecture_inventory
+
+    inventory = build_architecture_inventory()
+    audit = audit_architecture_inventory(inventory)
+    elapsed_ms = int(round((time.perf_counter() - started) * 1000.0))
+    status = get_doctor_status(db, workspace_id=workspace_id, user=user)
+    return {
+        "workspace_id": workspace_id,
+        "audit": {
+            "ok": bool(audit.ok),
+            "error_count": len(audit.errors),
+            "warning_count": len(audit.warnings),
+            "errors": list(audit.errors),
+            "warnings": list(audit.warnings),
+            "generated_at": str(inventory.get("generated_at") or ""),
+            "elapsed_ms": elapsed_ms,
+            "counts": dict(inventory.get("counts") or {}),
+        },
+        "status": status,
+    }
+
+
+def execute_doctor_quick_action(
+    db: Session,
+    *,
+    workspace_id: str,
+    user: User,
+    action_id: str,
+    command_id: str | None = None,
+) -> dict[str, Any]:
+    _require_workspace_admin(db, workspace_id=workspace_id, user_id=user.id)
+    normalized_action = str(action_id or "").strip()
+    if not normalized_action:
+        raise HTTPException(status_code=400, detail="Quick action id is required")
+
+    def _finalize(*, ok: bool, message: str, result: dict[str, Any], status_payload: dict[str, Any]) -> dict[str, Any]:
+        project_payload = status_payload.get("project") if isinstance(status_payload.get("project"), dict) else {}
+        project_id = str((project_payload or {}).get("id") or "").strip() or None
+        _record_doctor_quick_action_event(
+            db,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            user_id=str(user.id),
+            action_id=normalized_action,
+            status="passed" if ok else "warning",
+            message=message,
+            result=result,
+        )
+        refreshed_status = get_doctor_status(db, workspace_id=workspace_id, user=user)
+        return {
+            "workspace_id": workspace_id,
+            "action_id": normalized_action,
+            "ok": bool(ok),
+            "message": message,
+            "result": result,
+            "status": refreshed_status,
+        }
+
+    if normalized_action == "doctor-plugin-wiring":
+        seeded = seed_doctor_workspace(
+            db,
+            workspace_id=workspace_id,
+            user=user,
+            command_id=command_id or _doctor_command_id("seed", workspace_id),
+        )
+        seeded_status = get_doctor_status(db, workspace_id=workspace_id, user=user)
+        return _finalize(
+            ok=True,
+            message="Doctor fixture was seeded and wiring was refreshed.",
+            result={
+                "seeded": bool(seeded.get("seeded")),
+                "project_id": ((seeded.get("project") or {}).get("id") if isinstance(seeded.get("project"), dict) else None),
+            },
+            status_payload=seeded_status,
+        )
+
+    if normalized_action == "warm-bootstrap-caches":
+        from features.bootstrap.read_models import bootstrap_payload_read_model
+
+        _ = bootstrap_payload_read_model(db, user)
+        status_payload = get_doctor_status(db, workspace_id=workspace_id, user=user)
+        return _finalize(
+            ok=True,
+            message="Bootstrap discovery and inventory caches were warmed.",
+            result={},
+            status_payload=status_payload,
+        )
+
+    if normalized_action == "runtime-contract-audit":
+        audit_payload = run_doctor_runtime_contract_audit(db, workspace_id=workspace_id, user=user)
+        audit_result = dict(audit_payload.get("audit") or {})
+        status_payload = dict(audit_payload.get("status") or {})
+        return _finalize(
+            ok=bool(audit_result.get("ok")),
+            message="Runtime contract audit completed.",
+            result=audit_result,
+            status_payload=status_payload,
+        )
+
+    if normalized_action == "descriptor-export-drift-check":
+        status_payload = get_doctor_status(db, workspace_id=workspace_id, user=user)
+        runtime_health = dict((status_payload.get("runtime_health") or {}))
+        contracts_domain = dict((runtime_health.get("domains") or {}).get("contracts") or {})
+        metrics = dict((contracts_domain.get("metrics") or {}))
+        issues = [
+            str(item).strip()
+            for item in (contracts_domain.get("issues") or [])
+            if str(item).strip().startswith("plugin_descriptors_")
+            or str(item).strip().startswith("bootstrap_vs_export_descriptor_count_mismatch")
+            or str(item).strip().startswith("export_vs_debug_descriptor_count_mismatch")
+            or str(item).strip().startswith("architecture_export_audit_not_ok")
+        ]
+        return _finalize(
+            ok=not bool(metrics.get("descriptor_drift_detected")),
+            message="Descriptor/export drift diagnostics collected.",
+            result={
+                "descriptor_drift_detected": bool(metrics.get("descriptor_drift_detected")),
+                "bootstrap_descriptor_count": int(metrics.get("bootstrap_descriptor_count") or 0),
+                "export_descriptor_count": int(metrics.get("export_descriptor_count") or 0),
+                "debug_descriptor_count": int(metrics.get("debug_descriptor_count") or 0),
+                "missing_descriptor_count_in_export": int(metrics.get("missing_descriptor_count_in_export") or 0),
+                "missing_descriptor_count_in_debug_surface": int(metrics.get("missing_descriptor_count_in_debug_surface") or 0),
+                "issues": issues,
+            },
+            status_payload=status_payload,
+        )
+
+    if normalized_action == "recovery-sequence":
+        seeded = seed_doctor_workspace(
+            db,
+            workspace_id=workspace_id,
+            user=user,
+            command_id=command_id or _doctor_command_id("seed", workspace_id),
+        )
+        from features.bootstrap.read_models import bootstrap_payload_read_model
+
+        _ = bootstrap_payload_read_model(db, user)
+        audit_payload = run_doctor_runtime_contract_audit(db, workspace_id=workspace_id, user=user)
+        audit_result = dict(audit_payload.get("audit") or {})
+        status_payload = dict(audit_payload.get("status") or {})
+        return _finalize(
+            ok=bool(audit_result.get("ok")),
+            message="Recovery sequence completed.",
+            result={
+                "steps": [
+                    {
+                        "id": "doctor-plugin-wiring",
+                        "ok": bool(seeded.get("seeded")),
+                    },
+                    {
+                        "id": "warm-bootstrap-caches",
+                        "ok": True,
+                    },
+                    {
+                        "id": "runtime-contract-audit",
+                        "ok": bool(audit_result.get("ok")),
+                        "error_count": int(audit_result.get("error_count") or 0),
+                        "warning_count": int(audit_result.get("warning_count") or 0),
+                    },
+                    {
+                        "id": "descriptor-export-drift-check",
+                        "ok": not bool(
+                            ((status_payload.get("runtime_health") or {}).get("domains") or {})
+                            .get("contracts", {})
+                            .get("metrics", {})
+                            .get("descriptor_drift_detected")
+                        ),
+                    },
+                ],
+                "audit": audit_result,
+            },
+            status_payload=status_payload,
+        )
+
+    if normalized_action == "agent-runtime-configuration":
+        status = get_doctor_status(db, workspace_id=workspace_id, user=user)
+        runtime_health = dict((status.get("runtime_health") or {}))
+        domains = dict((runtime_health.get("domains") or {}))
+        agent_runtime = dict((domains.get("agent_runtime") or {}))
+        metrics = dict((agent_runtime.get("metrics") or {}))
+        provider_sources = dict((metrics.get("provider_sources") or {}))
+        issues = [str(item).strip() for item in (agent_runtime.get("issues") or []) if str(item).strip()]
+        guidance: list[str] = []
+        if "agent_runner_disabled" in issues:
+            guidance.append("Set AGENT_RUNNER_ENABLED=true in runtime configuration.")
+        if "no_agent_provider_auth" in issues:
+            guidance.append("Configure at least one provider auth source (Codex, Claude, or OpenCode).")
+        if "model_registry_cache_cold" in issues:
+            guidance.append("Open bootstrap once to warm the model registry cache.")
+        if "mcp_registry_cache_cold" in issues:
+            guidance.append("Open bootstrap once to warm the MCP registry cache.")
+        if not guidance:
+            guidance.append("Agent runtime configuration is healthy.")
+        return _finalize(
+            ok=not bool(issues),
+            message="Collected agent runtime configuration diagnostics.",
+            result={
+                "issues": issues,
+                "guidance": guidance,
+                "provider_sources": provider_sources,
+            },
+            status_payload=status,
+        )
+
+    raise HTTPException(status_code=400, detail=f"Unsupported Doctor quick action: {normalized_action}")
 
 
 def reset_doctor_workspace(db: Session, *, workspace_id: str, user: User, command_id: str | None = None) -> dict[str, Any]:

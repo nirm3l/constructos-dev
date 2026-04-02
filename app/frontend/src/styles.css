@@ -420,6 +420,7 @@ a:focus-visible {
 }
 
 .top-profile-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -515,6 +516,23 @@ a:focus-visible {
   width: 16px;
   height: 16px;
   flex-shrink: 0;
+}
+
+.top-profile-health-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--surface), #ffffff 40%);
+  background: #f59e0b;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #f59e0b, transparent 65%);
+}
+
+.top-profile-health-dot.is-failing {
+  background: #ef4444;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #ef4444, transparent 60%);
 }
 
 .header-lower {
@@ -683,6 +701,10 @@ a:focus-visible {
 }
 
 .header-settings-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   border-radius: 8px;
   padding: 8px 10px;
   font-size: 13px;
@@ -690,6 +712,25 @@ a:focus-visible {
   line-height: 1.2;
   cursor: pointer;
   outline: none;
+}
+
+.header-settings-health-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.16);
+  color: #7c2d12;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.header-settings-health-chip.is-failing {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.14);
+  color: #7f1d1d;
 }
 
 .header-settings-menu-item[data-highlighted] {

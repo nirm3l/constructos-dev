@@ -19,6 +19,8 @@ import {
   getProjectMembers,
   getProjectPolicyChecksVerification,
   getProjectPluginConfig,
+  getProjectTeamModeAutomationSessionLogs,
+  getProjectTeamModeExecutionSessions,
   patchProjectRule,
   setProjectPluginEnabled,
   validateProjectPluginConfig,
@@ -34,6 +36,8 @@ import type {
   ProjectDockerComposeRuntimeSnapshot,
   ProjectGitRepositorySummary,
   ProjectPolicyChecksVerifyResponse,
+  ProjectTeamModeAutomationSessionLogsPage,
+  ProjectTeamModeExecutionSessionsPage,
   ProjectCapabilities,
   ProjectPluginConfig,
   ProjectPluginConfigDiff,
@@ -58,6 +62,7 @@ import {
 import { ProjectContextSnapshotPanel } from './ProjectContextSnapshotPanel'
 import { ProjectDockerComposeRuntimeDialog } from './ProjectDockerComposeRuntimeDialog'
 import { ProjectGitRepositoryDialog } from './ProjectGitRepositoryDialog'
+import { TeamModeAutomationTranscriptList, type TeamModeAutomationTranscriptEventItem } from './TeamModeAutomationTranscriptList'
 import {
   attachmentRefsToText,
   externalRefsToText,
@@ -85,6 +90,20 @@ type CodexResumeStateLike = {
   succeeded?: boolean
   fallbackUsed?: boolean
 } | null
+
+type TeamModeAutomationTranscriptEventView = TeamModeAutomationTranscriptEventItem
+
+type TeamModeAutomationSessionLogView = {
+  id: string
+  status: string
+  trigger: string
+  provider: string | null
+  model: string | null
+  reasoning_effort: string | null
+  started_at: string | null
+  completed_at: string | null
+  transcript: TeamModeAutomationTranscriptEventView[]
+}
 
 type ProjectPluginKey = 'team_mode' | 'git_delivery' | 'docker_compose'
 type TeamModeRole = 'Developer' | 'QA' | 'Lead'
@@ -135,6 +154,106 @@ function prettyCompact(value: unknown): string {
     return raw.length > 160 ? `${raw.slice(0, 157)}...` : raw
   } catch {
     return String(value)
+  }
+}
+
+export function parseTeamModeAutomationSessionLog(raw: unknown): TeamModeAutomationSessionLogView | null {
+  if (!raw || typeof raw !== 'object') return null
+  const row = raw as Record<string, unknown>
+  const id = String(row.id || '').trim()
+  if (!id) return null
+  const providerContext =
+    row.provider_context && typeof row.provider_context === 'object'
+      ? (row.provider_context as Record<string, unknown>)
+      : {}
+  const transcript = Array.isArray(row.transcript)
+    ? row.transcript
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const event = item as Record<string, unknown>
+        const eventType = String(event.event_type || '').trim()
+        if (!eventType) return null
+        const summaryPayload =
+          event.payload && typeof event.payload === 'object'
+            ? (event.payload as Record<string, unknown>)
+            : {}
+        return {
+          event_type: eventType,
+          index: Number(event.index || 0),
+          at: String(event.at || '').trim() || null,
+          phase: String(event.phase || '').trim() || null,
+          reason: String(event.reason || '').trim() || null,
+          queued_task_ids: Array.isArray(event.queued_task_ids)
+            ? event.queued_task_ids.map((value) => String(value || '').trim()).filter(Boolean)
+            : [],
+          blocked_reasons: Array.isArray(event.blocked_reasons)
+            ? event.blocked_reasons.map((value) => String(value || '').trim()).filter(Boolean)
+            : [],
+          verify_fix_attempt_count: Number(event.attempt_count || 0),
+          verify_fix_fix_attempt_count: Number(event.fix_attempt_count || 0),
+          verify_fix_runner_error_count: Number(event.runner_error_count || 0),
+          summary_text: String(summaryPayload.summary || summaryPayload.comment || '').trim() || null,
+        } as TeamModeAutomationTranscriptEventView
+      })
+      .filter((item): item is TeamModeAutomationTranscriptEventView => Boolean(item))
+    : []
+  let provider = String(providerContext.provider || '').trim() || null
+  let model = String(providerContext.model || '').trim() || null
+  let reasoningEffort = String(providerContext.reasoning_effort || '').trim() || null
+  if (!provider || !model || !reasoningEffort) {
+    const summaryEvent = transcript.find((event) => event.event_type === 'summary')
+    const summaryPayload = (
+      summaryEvent && summaryEvent.summary_text
+        ? {}
+        : (
+          Array.isArray(row.transcript)
+            ? (row.transcript.find((item) => {
+              if (!item || typeof item !== 'object') return false
+              const event = item as Record<string, unknown>
+              return String(event.event_type || '').trim() === 'summary'
+            }) as Record<string, unknown> | undefined)
+            : undefined
+        )
+    )
+    const payloadObj = summaryPayload && typeof summaryPayload.payload === 'object'
+      ? (summaryPayload.payload as Record<string, unknown>)
+      : {}
+    if (!provider) provider = String(payloadObj.provider || payloadObj.execution_provider || '').trim() || null
+    if (!model) model = String(payloadObj.model || payloadObj.execution_model || '').trim() || null
+    if (!reasoningEffort) {
+      reasoningEffort = String(payloadObj.reasoning_effort || payloadObj.execution_reasoning_effort || '').trim() || null
+    }
+  }
+  if (!provider || !model || !reasoningEffort) {
+    const verifyFixEvent = Array.isArray(row.transcript)
+      ? row.transcript.find((item) => {
+        if (!item || typeof item !== 'object') return false
+        const event = item as Record<string, unknown>
+        return String(event.event_type || '').trim() === 'verify_fix'
+      })
+      : null
+    const attempts = verifyFixEvent && typeof verifyFixEvent === 'object' && Array.isArray((verifyFixEvent as Record<string, unknown>).attempts)
+      ? ((verifyFixEvent as Record<string, unknown>).attempts as unknown[])
+      : []
+    for (const attemptRaw of attempts) {
+      if (!attemptRaw || typeof attemptRaw !== 'object') continue
+      const attempt = attemptRaw as Record<string, unknown>
+      if (!provider) provider = String(attempt.provider || '').trim() || null
+      if (!model) model = String(attempt.model || '').trim() || null
+      if (!reasoningEffort) reasoningEffort = String(attempt.reasoning_effort || '').trim() || null
+      if (provider && model && reasoningEffort) break
+    }
+  }
+  return {
+    id,
+    status: String(row.status || '').trim() || 'unknown',
+    trigger: String(row.trigger || '').trim() || 'unknown',
+    provider,
+    model,
+    reasoning_effort: reasoningEffort,
+    started_at: String(row.started_at || '').trim() || null,
+    completed_at: String(row.completed_at || '').trim() || null,
+    transcript,
   }
 }
 
@@ -594,6 +713,18 @@ export function ProjectsInlineEditor({
     queryKey: ['project-checks-verify', userId, project.id],
     queryFn: () => getProjectPolicyChecksVerification(userId, project.id),
     enabled: Boolean(userId && project.id && selectedProject?.id === project.id && shouldShowProjectChecks),
+    refetchInterval: 20_000,
+  })
+  const teamModeExecutionSessionsQuery = useQuery<ProjectTeamModeExecutionSessionsPage>({
+    queryKey: ['project-team-mode-execution-sessions', userId, project.id],
+    queryFn: () => getProjectTeamModeExecutionSessions(userId, project.id, { limit: 6, offset: 0 }),
+    enabled: Boolean(userId && project.id && selectedProject?.id === project.id && teamModePluginQuery.data?.enabled),
+    refetchInterval: 20_000,
+  })
+  const teamModeAutomationSessionLogsQuery = useQuery<ProjectTeamModeAutomationSessionLogsPage>({
+    queryKey: ['project-team-mode-automation-session-logs', userId, project.id],
+    queryFn: () => getProjectTeamModeAutomationSessionLogs(userId, project.id, { limit: 8, offset: 0 }),
+    enabled: Boolean(userId && project.id && selectedProject?.id === project.id && teamModePluginQuery.data?.enabled),
     refetchInterval: 20_000,
   })
   const refreshProjectChecks = React.useCallback(() => {
@@ -1056,6 +1187,41 @@ export function ProjectsInlineEditor({
       verify_fix_blocked_reason_code: String(summaryRaw.verify_fix_blocked_reason_code || '').trim() || null,
     }
   }, [projectChecksSnapshot?.team_mode_execution_session])
+  const teamModeAutomationSessionLog = React.useMemo(() => {
+    return parseTeamModeAutomationSessionLog(projectChecksSnapshot?.team_mode_automation_session_log)
+  }, [projectChecksSnapshot?.team_mode_automation_session_log])
+  const recentTeamModeAutomationLogs = React.useMemo(() => {
+    const rows = Array.isArray(teamModeAutomationSessionLogsQuery.data?.items)
+      ? teamModeAutomationSessionLogsQuery.data?.items
+      : []
+    return rows
+      .map((item) => parseTeamModeAutomationSessionLog(item))
+      .filter((item): item is TeamModeAutomationSessionLogView => Boolean(item))
+  }, [teamModeAutomationSessionLogsQuery.data?.items])
+  const effectiveTeamModeAutomationSessionLog = React.useMemo(() => {
+    if (teamModeAutomationSessionLog) return teamModeAutomationSessionLog
+    if (recentTeamModeAutomationLogs.length > 0) return recentTeamModeAutomationLogs[0]
+    return null
+  }, [teamModeAutomationSessionLog, recentTeamModeAutomationLogs])
+  const recentTeamModeSessions = React.useMemo(() => {
+    const rows = Array.isArray(teamModeExecutionSessionsQuery.data?.items) ? teamModeExecutionSessionsQuery.data?.items : []
+    return rows
+      .map((item) => {
+        const execution = item && typeof item === 'object' && item.execution_session && typeof item.execution_session === 'object'
+          ? (item.execution_session as Record<string, unknown>)
+          : {}
+        const sessionId = String(execution.id || '').trim()
+        if (!sessionId) return null
+        return {
+          id: sessionId,
+          status: String(execution.status || '').trim() || 'unknown',
+          phase: String(execution.phase || '').trim() || 'n/a',
+          started_at: String(execution.started_at || '').trim() || null,
+          completed_at: String(execution.completed_at || '').trim() || null,
+        }
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+  }, [teamModeExecutionSessionsQuery.data?.items])
   const teamModeRuntimeView = React.useMemo(() => {
     if (!teamModeRuntimeSnapshot?.active) return null
     const workflowTasks = teamModeRuntimeSnapshot.tasks.filter(
@@ -3176,6 +3342,56 @@ export function ProjectsInlineEditor({
                         {teamModeExecutionSession.verify_fix_fix_attempt_count > 0 ? ` · fixAttempts=${teamModeExecutionSession.verify_fix_fix_attempt_count}` : ''}
                         {teamModeExecutionSession.verify_fix_blocked_reason_code ? ` · verifyCode=${teamModeExecutionSession.verify_fix_blocked_reason_code}` : ''}
                         {teamModeExecutionSession.blocked_reasons.length > 0 ? ` · blocked=${teamModeExecutionSession.blocked_reasons[0]}` : ''}
+                      </div>
+                    ) : null}
+                    {effectiveTeamModeAutomationSessionLog ? (
+                      <div className="notice plugin-config-shell" style={{ marginTop: 8 }}>
+                        <div className="row wrap" style={{ justifyContent: 'space-between', gap: 8 }}>
+                          <div style={{ fontWeight: 600 }}>
+                            Automation Session Log ({effectiveTeamModeAutomationSessionLog.id.slice(0, 8)})
+                          </div>
+                          <div className="row wrap" style={{ gap: 6 }}>
+                            <span className="badge">status={effectiveTeamModeAutomationSessionLog.status}</span>
+                            <span className="badge">trigger={effectiveTeamModeAutomationSessionLog.trigger}</span>
+                            {effectiveTeamModeAutomationSessionLog.provider ? (
+                              <span className="badge">
+                                {effectiveTeamModeAutomationSessionLog.provider}
+                                {effectiveTeamModeAutomationSessionLog.model ? `:${effectiveTeamModeAutomationSessionLog.model}` : ''}
+                                {effectiveTeamModeAutomationSessionLog.reasoning_effort ? ` · ${effectiveTeamModeAutomationSessionLog.reasoning_effort}` : ''}
+                              </span>
+                            ) : null}
+                            {effectiveTeamModeAutomationSessionLog.started_at ? (
+                              <span className="badge">started={new Date(effectiveTeamModeAutomationSessionLog.started_at).toLocaleTimeString()}</span>
+                            ) : null}
+                            {effectiveTeamModeAutomationSessionLog.completed_at ? (
+                              <span className="badge">completed={new Date(effectiveTeamModeAutomationSessionLog.completed_at).toLocaleTimeString()}</span>
+                            ) : null}
+                          </div>
+                        </div>
+                        <div className="meta" style={{ marginTop: 6 }}>
+                          Source: {teamModeAutomationSessionLog ? 'checks snapshot' : 'session-log stream'}
+                          {teamModeAutomationSessionLogsQuery.isFetching ? ' · refreshing logs…' : ''}
+                          {teamModeAutomationSessionLogsQuery.isError ? ' · log stream unavailable' : ''}
+                        </div>
+                        <TeamModeAutomationTranscriptList transcript={effectiveTeamModeAutomationSessionLog.transcript} />
+                      </div>
+                    ) : null}
+                    {recentTeamModeAutomationLogs.length > 0 ? (
+                      <div className="meta" style={{ marginTop: 8 }}>
+                        Recent automation logs:{' '}
+                        {recentTeamModeAutomationLogs
+                          .slice(0, 5)
+                          .map((item) => `${item.id.slice(0, 8)}(${item.status}/${item.trigger})`)
+                          .join(' | ')}
+                      </div>
+                    ) : null}
+                    {recentTeamModeSessions.length > 0 ? (
+                      <div className="meta" style={{ marginTop: 8 }}>
+                        Recent sessions:{' '}
+                        {recentTeamModeSessions
+                          .slice(0, 5)
+                          .map((item) => `${item.id.slice(0, 8)}(${item.status}/${item.phase})`)
+                          .join(' | ')}
                       </div>
                     ) : null}
                     {teamModeRuntimeView.workflowTasks.length > 0 ? (

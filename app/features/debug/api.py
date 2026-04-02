@@ -1,10 +1,12 @@
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
-from features.architecture_inventory import build_architecture_inventory
+from features.architecture_inventory import build_architecture_export, build_architecture_inventory
+from plugins.descriptors import list_plugin_descriptors
 from shared.core import ensure_project_access, ensure_role, get_current_user, get_db, load_events_after, metrics_snapshot
 from shared.models import ChatMessage, ChatSession, StoredEvent
 from shared.settings import (
@@ -22,6 +24,21 @@ router = APIRouter()
 @router.get("/api/debug/architecture-inventory")
 def architecture_inventory(_user=Depends(get_current_user)):
     return build_architecture_inventory()
+
+
+@router.get("/api/debug/architecture-export")
+def architecture_export(_user=Depends(get_current_user)):
+    return build_architecture_export()
+
+
+@router.get("/api/debug/plugin-descriptors")
+def plugin_descriptors(_user=Depends(get_current_user)):
+    items = list_plugin_descriptors()
+    return {
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "count": len(items),
+        "items": items,
+    }
 
 
 @router.get("/api/events/{aggregate_type}/{aggregate_id}")

@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from shared.models import TeamModeExecutionSession
@@ -156,4 +156,52 @@ def get_latest_team_mode_execution_session(
         .where(TeamModeExecutionSession.project_id == normalized_project_id)
         .order_by(TeamModeExecutionSession.started_at.desc())
         .limit(1)
+    ).scalar_one_or_none()
+
+
+def get_team_mode_execution_sessions_page(
+    *,
+    db: Session,
+    project_id: str,
+    limit: int = 20,
+    offset: int = 0,
+) -> tuple[list[TeamModeExecutionSession], int]:
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return [], 0
+    normalized_limit = max(1, min(int(limit or 20), 100))
+    normalized_offset = max(0, int(offset or 0))
+    rows = db.execute(
+        select(TeamModeExecutionSession)
+        .where(TeamModeExecutionSession.project_id == normalized_project_id)
+        .order_by(TeamModeExecutionSession.started_at.desc(), TeamModeExecutionSession.created_at.desc())
+        .offset(normalized_offset)
+        .limit(normalized_limit)
+    ).scalars().all()
+    total = int(
+        db.execute(
+            select(func.count())
+            .select_from(TeamModeExecutionSession)
+            .where(TeamModeExecutionSession.project_id == normalized_project_id)
+        ).scalar_one()
+        or 0
+    )
+    return rows, total
+
+
+def get_team_mode_execution_session(
+    *,
+    db: Session,
+    project_id: str,
+    session_id: str,
+) -> TeamModeExecutionSession | None:
+    normalized_project_id = str(project_id or "").strip()
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_project_id or not normalized_session_id:
+        return None
+    return db.execute(
+        select(TeamModeExecutionSession).where(
+            TeamModeExecutionSession.project_id == normalized_project_id,
+            TeamModeExecutionSession.id == normalized_session_id,
+        )
     ).scalar_one_or_none()

@@ -21,6 +21,8 @@ import type {
   Task,
   WorkspaceDoctorStatus,
   ArchitectureInventorySummary,
+  ArchitectureExportPayload,
+  PluginDescriptorsPayload,
   WorkspaceSkill,
   WorkspaceSkillsPage,
 } from '../types'
@@ -355,9 +357,16 @@ function WorkspaceAuthCard({
   )
 }
 
-function WorkspaceDoctorCard({
+export function WorkspaceDoctorCard({
   doctorStatus,
   architectureInventorySummary,
+  architectureExport,
+  architectureExportLoading,
+  architectureExportError,
+  pluginDescriptorsPayload,
+  pluginDescriptorsLoading,
+  pluginDescriptorsError,
+  forceIncidentModeRequestId,
   doctorLoading,
   doctorError,
   canManage,
@@ -365,11 +374,21 @@ function WorkspaceDoctorCard({
   seedDoctorPending,
   onRunDoctor,
   runDoctorPending,
+  onExecuteDoctorQuickAction,
+  executeDoctorQuickActionPending,
+  executeDoctorQuickActionId,
   onResetDoctor,
   resetDoctorPending,
 }: {
   doctorStatus: WorkspaceDoctorStatus | null
   architectureInventorySummary: ArchitectureInventorySummary | null
+  architectureExport: ArchitectureExportPayload | null
+  architectureExportLoading: boolean
+  architectureExportError: string | null
+  pluginDescriptorsPayload: PluginDescriptorsPayload | null
+  pluginDescriptorsLoading: boolean
+  pluginDescriptorsError: string | null
+  forceIncidentModeRequestId?: number
   doctorLoading: boolean
   doctorError: string | null
   canManage: boolean
@@ -377,6 +396,9 @@ function WorkspaceDoctorCard({
   seedDoctorPending: boolean
   onRunDoctor: () => Promise<unknown>
   runDoctorPending: boolean
+  onExecuteDoctorQuickAction: (actionId: string) => Promise<unknown>
+  executeDoctorQuickActionPending: boolean
+  executeDoctorQuickActionId: string | null
   onResetDoctor: () => Promise<unknown>
   resetDoctorPending: boolean
 }) {
@@ -386,7 +408,35 @@ function WorkspaceDoctorCard({
     if (Number.isNaN(parsed.getTime())) return value
     return parsed.toLocaleString()
   }
+  const normalizeHealthStatus = (value: unknown): 'healthy' | 'warning' | 'failing' => {
+    const normalized = String(value || '').trim().toLowerCase()
+    if (normalized === 'healthy') return 'healthy'
+    if (normalized === 'failing' || normalized === 'failed') return 'failing'
+    return 'warning'
+  }
+  const healthStatusLabel = (value: unknown): string => {
+    const normalized = normalizeHealthStatus(value)
+    if (normalized === 'healthy') return 'Healthy'
+    if (normalized === 'failing') return 'Failing'
+    return 'Warning'
+  }
+  const healthStatusStyle = (value: unknown): React.CSSProperties => {
+    const normalized = normalizeHealthStatus(value)
+    if (normalized === 'healthy') {
+      return { background: 'rgba(16, 185, 129, 0.16)', borderColor: 'rgba(16, 185, 129, 0.35)', color: '#065f46' }
+    }
+    if (normalized === 'failing') {
+      return { background: 'rgba(239, 68, 68, 0.14)', borderColor: 'rgba(239, 68, 68, 0.35)', color: '#7f1d1d' }
+    }
+    return { background: 'rgba(245, 158, 11, 0.16)', borderColor: 'rgba(245, 158, 11, 0.35)', color: '#7c2d12' }
+  }
   const [selectedRunId, setSelectedRunId] = React.useState('')
+  const [quickActionFeedback, setQuickActionFeedback] = React.useState<string | null>(null)
+  const [quickActionBusyId, setQuickActionBusyId] = React.useState<string | null>(null)
+  const [bulkQuickActionsRunning, setBulkQuickActionsRunning] = React.useState(false)
+  const [incidentMode, setIncidentMode] = React.useState(false)
+  const [recentActionStatusFilter, setRecentActionStatusFilter] = React.useState<'all' | 'passed' | 'warning' | 'failed'>('all')
+  const [recentActionSort, setRecentActionSort] = React.useState<'newest' | 'oldest' | 'status'>('newest')
   const recentRuns = Array.isArray(doctorStatus?.recent_runs) ? doctorStatus.recent_runs : []
   const selectedRun = React.useMemo(() => {
     if (!recentRuns.length) return doctorStatus?.last_run ?? null
@@ -407,6 +457,253 @@ function WorkspaceDoctorCard({
   const architectureGeneratedAt = architectureInventorySummary?.generated_at ?? null
   const architectureCacheStatus = architectureInventorySummary?.cache_status ?? null
   const architectureAuditLabel = architectureAudit?.ok ? 'Healthy' : 'Issues detected'
+  const exportCounts = architectureExport?.counts ?? null
+  const exportAudit = architectureExport?.audit ?? null
+  const exportGeneratedAt = architectureExport?.generated_at ?? null
+  const exportInventoryGeneratedAt = architectureExport?.inventory_generated_at ?? null
+  const pluginDescriptorItems = Array.isArray(pluginDescriptorsPayload?.items) ? pluginDescriptorsPayload.items : []
+  const pluginDescriptorKeys = pluginDescriptorItems
+    .map((item) => String(item?.key || '').trim().toLowerCase())
+    .filter(Boolean)
+  const exportDescriptorKeys = Array.isArray(architectureExport?.plugin_descriptors)
+    ? architectureExport.plugin_descriptors
+        .map((item) => String(item?.key || '').trim().toLowerCase())
+        .filter(Boolean)
+    : []
+  const missingDescriptorKeysInExport = pluginDescriptorKeys.filter((key) => !exportDescriptorKeys.includes(key))
+  const missingDescriptorKeysInDebug = exportDescriptorKeys.filter((key) => !pluginDescriptorKeys.includes(key))
+  const descriptorCountMismatch = Number(exportCounts?.plugin_descriptors ?? 0) !== Number(pluginDescriptorsPayload?.count ?? 0)
+  const bootstrapVsExportDescriptorCountMismatch = architectureCounts && exportCounts
+    ? Number(architectureCounts.plugin_descriptors ?? 0) !== Number(exportCounts.plugin_descriptors ?? 0)
+    : false
+  const descriptorDriftDetected = (
+    missingDescriptorKeysInExport.length > 0
+    || missingDescriptorKeysInDebug.length > 0
+    || descriptorCountMismatch
+    || bootstrapVsExportDescriptorCountMismatch
+    || Boolean(exportAudit && exportAudit.ok === false)
+  )
+  const descriptorDriftSummary = descriptorDriftDetected ? 'Drift detected' : 'Aligned'
+  const runtimeHealth = doctorStatus?.runtime_health ?? null
+  const runtimeDomains = runtimeHealth?.domains ?? null
+  const contractsDomain = runtimeDomains?.contracts as Record<string, unknown> | undefined
+  const contractsMetrics = (contractsDomain?.metrics && typeof contractsDomain.metrics === 'object')
+    ? (contractsDomain.metrics as Record<string, unknown>)
+    : {}
+  const runtimeContractAuditStale = Boolean(contractsMetrics.runtime_contract_audit_stale)
+  const runtimeContractAuditLastAt = String(contractsMetrics.runtime_contract_audit_last_at || '').trim() || null
+  const runtimeContractAuditAgeHoursRaw = Number(contractsMetrics.runtime_contract_audit_age_hours)
+  const runtimeContractAuditAgeHours = Number.isFinite(runtimeContractAuditAgeHoursRaw)
+    ? runtimeContractAuditAgeHoursRaw
+    : null
+  const runtimeContractAuditAgeLabel = runtimeContractAuditAgeHours === null
+    ? 'n/a'
+    : `${Math.round(runtimeContractAuditAgeHours * 10) / 10}h`
+  const recommendedActions = Array.isArray(runtimeHealth?.recommended_actions) ? runtimeHealth.recommended_actions : []
+  const runtimeHealthScore = Number(runtimeHealth?.health_score ?? 0)
+  const lastAction = doctorStatus?.last_action ?? null
+  const recentActions = Array.isArray(doctorStatus?.recent_actions) ? doctorStatus.recent_actions : []
+  const quickActionStats = doctorStatus?.quick_action_stats ?? null
+  const requiresManagePermission = (actionId: string): boolean => (
+    actionId === 'recovery-sequence'
+    || actionId === 'doctor-plugin-wiring'
+    || actionId === 'warm-bootstrap-caches'
+    || actionId === 'runtime-contract-audit'
+    || actionId === 'descriptor-export-drift-check'
+  )
+  const visibleRecommendedActions = recommendedActions
+    .filter((action) => !incidentMode || String(action.priority || '').trim().toLowerCase() !== 'low')
+  const highPriorityRecommendedActions = visibleRecommendedActions
+    .filter((action) => String(action.priority || '').trim().toLowerCase() === 'high')
+  React.useEffect(() => {
+    const status = String(runtimeHealth?.overall_status || '').trim().toLowerCase()
+    if (status === 'failing') setIncidentMode(true)
+  }, [runtimeHealth?.overall_status])
+  React.useEffect(() => {
+    if (!forceIncidentModeRequestId) return
+    setIncidentMode(true)
+  }, [forceIncidentModeRequestId])
+  React.useEffect(() => {
+    if (!incidentMode) return
+    setRecentActionStatusFilter('failed')
+    setRecentActionSort('newest')
+  }, [incidentMode])
+  const visibleRecentActions = React.useMemo(() => {
+    const normalizeStatus = (value: unknown): 'passed' | 'warning' | 'failed' => {
+      const normalized = String(value || '').trim().toLowerCase()
+      if (normalized === 'passed') return 'passed'
+      if (normalized === 'failed' || normalized === 'failing') return 'failed'
+      return 'warning'
+    }
+    const filtered = recentActions.filter((item) => {
+      if (recentActionStatusFilter === 'all') return true
+      return normalizeStatus(item?.status) === recentActionStatusFilter
+    })
+    const sorted = [...filtered].sort((a, b) => {
+      const aDate = new Date(String(a?.at || '')).getTime()
+      const bDate = new Date(String(b?.at || '')).getTime()
+      const aSafe = Number.isNaN(aDate) ? 0 : aDate
+      const bSafe = Number.isNaN(bDate) ? 0 : bDate
+      if (recentActionSort === 'oldest') return aSafe - bSafe
+      if (recentActionSort === 'status') {
+        const rank = (value: unknown): number => {
+          const normalized = normalizeStatus(value)
+          if (normalized === 'failed') return 0
+          if (normalized === 'warning') return 1
+          return 2
+        }
+        const statusDelta = rank(a?.status) - rank(b?.status)
+        if (statusDelta !== 0) return statusDelta
+        return bSafe - aSafe
+      }
+      return bSafe - aSafe
+    })
+    return sorted.slice(0, 5)
+  }, [recentActions, recentActionSort, recentActionStatusFilter])
+  const previousRuntimeHealth = React.useMemo(() => {
+    const selectedSummary = selectedRun?.summary as Record<string, unknown> | undefined
+    const selectedSnapshot = selectedSummary?.runtime_health_snapshot
+    if (selectedSnapshot && typeof selectedSnapshot === 'object') return selectedSnapshot as Record<string, unknown>
+    const lastSummary = doctorStatus?.last_run?.summary as Record<string, unknown> | undefined
+    const lastSnapshot = lastSummary?.runtime_health_snapshot
+    if (lastSnapshot && typeof lastSnapshot === 'object') return lastSnapshot as Record<string, unknown>
+    return null
+  }, [doctorStatus?.last_run?.summary, selectedRun?.summary])
+  const statusRank = (value: unknown): number => {
+    const normalized = normalizeHealthStatus(value)
+    if (normalized === 'healthy') return 0
+    if (normalized === 'warning') return 1
+    return 2
+  }
+  const trendLabel = (current: unknown, previous: unknown): string => {
+    const delta = statusRank(current) - statusRank(previous)
+    if (delta < 0) return "Improved"
+    if (delta > 0) return "Regressed"
+    return "Stable"
+  }
+  const domainValue = (source: Record<string, unknown> | null, key: string): Record<string, unknown> | null => {
+    if (!source) return null
+    const domainsRaw = source.domains
+    if (!domainsRaw || typeof domainsRaw !== 'object') return null
+    const item = (domainsRaw as Record<string, unknown>)[key]
+    return item && typeof item === 'object' ? (item as Record<string, unknown>) : null
+  }
+  const metricEntries = (metrics: unknown): Array<{ key: string; value: string }> => {
+    if (!metrics || typeof metrics !== 'object') return []
+    const out: Array<{ key: string; value: string }> = []
+    for (const [key, raw] of Object.entries(metrics as Record<string, unknown>)) {
+      if (raw === null || raw === undefined) continue
+      if (typeof raw === 'object') continue
+      out.push({
+        key,
+        value: typeof raw === 'boolean' ? (raw ? 'yes' : 'no') : String(raw),
+      })
+    }
+    return out.slice(0, 4)
+  }
+  const formatDelta = (value: unknown): string => {
+    const parsed = Number(value || 0)
+    if (parsed > 0) return `+${parsed}`
+    return String(parsed)
+  }
+  const showDomainInIncident = (status: unknown): boolean => {
+    if (!incidentMode) return true
+    return normalizeHealthStatus(status) !== 'healthy'
+  }
+  const executeMappedQuickAction = async (
+    actionId: string,
+    { silent = false }: { silent?: boolean } = {},
+  ): Promise<{ ok: boolean; message: string }> => {
+    try {
+      if (actionId === 'doctor-plugin-wiring') {
+        await onExecuteDoctorQuickAction(actionId)
+        const message = 'Doctor fixture re-seeded.'
+        if (!silent) setQuickActionFeedback(message)
+        return { ok: true, message }
+      }
+      if (actionId === 'recovery-sequence') {
+        await onExecuteDoctorQuickAction(actionId)
+        const message = 'Recovery sequence completed.'
+        if (!silent) setQuickActionFeedback(message)
+        return { ok: true, message }
+      }
+      if (actionId === 'warm-bootstrap-caches') {
+        await onExecuteDoctorQuickAction(actionId)
+        const message = 'Bootstrap caches warmed.'
+        if (!silent) setQuickActionFeedback(message)
+        return { ok: true, message }
+      }
+      if (actionId === 'runtime-contract-audit') {
+        await onExecuteDoctorQuickAction(actionId)
+        const message = 'Runtime contract audit completed server-side.'
+        if (!silent) setQuickActionFeedback(message)
+        return { ok: true, message }
+      }
+      if (actionId === 'descriptor-export-drift-check') {
+        const payload = await onExecuteDoctorQuickAction(actionId) as any
+        const driftDetected = Boolean(payload?.result?.descriptor_drift_detected)
+        const message = driftDetected
+          ? 'Descriptor/export drift is still detected. Run recovery and resolve descriptor mismatch issues.'
+          : 'Descriptor/export surfaces are aligned.'
+        if (!silent) setQuickActionFeedback(message)
+        return { ok: !driftDetected, message }
+      }
+      if (actionId === 'agent-runtime-configuration') {
+        const payload = await onExecuteDoctorQuickAction(actionId) as any
+        const guidance = Array.isArray(payload?.result?.guidance) ? payload.result.guidance : []
+        const message = guidance.length > 0
+          ? `Agent runtime diagnostics: ${guidance.join(' | ')}`
+          : 'Agent runtime diagnostics completed.'
+        if (!silent) setQuickActionFeedback(message)
+        return { ok: true, message }
+      }
+      const message = 'No quick action is mapped for this recommendation yet.'
+      if (!silent) setQuickActionFeedback(message)
+      return { ok: false, message }
+    } catch {
+      const message = 'Quick action failed. Run it manually from the recommendation details.'
+      if (!silent) setQuickActionFeedback(message)
+      return { ok: false, message }
+    }
+  }
+  const handleQuickAction = async (actionId: string) => {
+    setQuickActionFeedback(null)
+    setQuickActionBusyId(actionId)
+    try {
+      await executeMappedQuickAction(actionId)
+    } finally {
+      setQuickActionBusyId(null)
+    }
+  }
+  const handleRunHighPriorityActions = async () => {
+    if (highPriorityRecommendedActions.length <= 0) {
+      setQuickActionFeedback('No high-priority actions are currently recommended.')
+      return
+    }
+    setQuickActionFeedback(null)
+    setBulkQuickActionsRunning(true)
+    let passed = 0
+    let failed = 0
+    let skipped = 0
+    try {
+      for (const action of highPriorityRecommendedActions) {
+        const actionId = String(action.id || '').trim()
+        if (!actionId) continue
+        if (!canManage && requiresManagePermission(actionId)) {
+          skipped += 1
+          continue
+        }
+        setQuickActionBusyId(actionId)
+        const result = await executeMappedQuickAction(actionId, { silent: true })
+        if (result.ok) passed += 1
+        else failed += 1
+      }
+      setQuickActionFeedback(`High-priority run completed: ${passed} passed, ${failed} failed, ${skipped} skipped.`)
+    } finally {
+      setQuickActionBusyId(null)
+      setBulkQuickActionsRunning(false)
+    }
+  }
   return (
     <section className="profile-pane-card" aria-label="ConstructOS Doctor" data-tour-id="workspace-doctor-card">
       <div className="profile-pane-head">
@@ -534,6 +831,381 @@ function WorkspaceDoctorCard({
             </div>
           </dl>
         </>
+      ) : null}
+      {(architectureExport || pluginDescriptorsPayload || architectureExportLoading || pluginDescriptorsLoading || architectureExportError || pluginDescriptorsError) ? (
+        <>
+          <p className="meta" style={{ marginTop: 12 }}>
+            Descriptor/export drift diagnostics from debug architecture surfaces.
+          </p>
+          {architectureExportLoading || pluginDescriptorsLoading ? (
+            <div className="notice" style={{ marginTop: 8 }}>
+              Loading descriptor/export diagnostics...
+            </div>
+          ) : null}
+          {architectureExportError ? (
+            <div className="notice notice-error" style={{ marginTop: 8 }}>
+              {architectureExportError}
+            </div>
+          ) : null}
+          {pluginDescriptorsError ? (
+            <div className="notice notice-error" style={{ marginTop: 8 }}>
+              {pluginDescriptorsError}
+            </div>
+          ) : null}
+          {(architectureExport || pluginDescriptorsPayload) ? (
+            <>
+              <dl className="profile-facts" style={{ marginTop: 8 }}>
+                <div className="profile-fact">
+                  <dt>Descriptor/export drift</dt>
+                  <dd>
+                    <span className="status-chip" style={healthStatusStyle(descriptorDriftDetected ? 'failing' : 'healthy')}>
+                      {descriptorDriftSummary}
+                    </span>
+                  </dd>
+                </div>
+                <div className="profile-fact">
+                  <dt>Descriptor counts (bootstrap / export / debug)</dt>
+                  <dd>
+                    {Number(architectureCounts?.plugin_descriptors ?? 0)} / {Number(exportCounts?.plugin_descriptors ?? 0)} / {Number(pluginDescriptorsPayload?.count ?? 0)}
+                  </dd>
+                </div>
+                <div className="profile-fact">
+                  <dt>Export audit</dt>
+                  <dd>
+                    {exportAudit?.ok ? 'Healthy' : 'Issues detected'} ({Array.isArray(exportAudit?.errors) ? exportAudit.errors.length : 0} errors / {Array.isArray(exportAudit?.warnings) ? exportAudit.warnings.length : 0} warnings)
+                  </dd>
+                </div>
+                <div className="profile-fact">
+                  <dt>Export generated</dt>
+                  <dd>{formatDateTime(exportGeneratedAt || null)}</dd>
+                </div>
+                <div className="profile-fact">
+                  <dt>Inventory generated in export</dt>
+                  <dd>{formatDateTime(exportInventoryGeneratedAt || null)}</dd>
+                </div>
+              </dl>
+              {(missingDescriptorKeysInExport.length > 0 || missingDescriptorKeysInDebug.length > 0) ? (
+                <div className="notice notice-error" style={{ marginTop: 8 }}>
+                  {missingDescriptorKeysInExport.length > 0 ? `Missing in export: ${missingDescriptorKeysInExport.join(', ')}.` : ''}
+                  {missingDescriptorKeysInExport.length > 0 && missingDescriptorKeysInDebug.length > 0 ? ' ' : ''}
+                  {missingDescriptorKeysInDebug.length > 0 ? `Missing in debug descriptor list: ${missingDescriptorKeysInDebug.join(', ')}.` : ''}
+                </div>
+              ) : null}
+              {exportAudit && Array.isArray(exportAudit.errors) && exportAudit.errors.length > 0 ? (
+                <div className="meta" style={{ marginTop: 8 }}>
+                  Export audit errors: {exportAudit.errors.slice(0, 3).map((item) => String(item || '').trim()).filter(Boolean).join(' | ')}
+                </div>
+              ) : null}
+              <div className="row" style={{ marginTop: 8, gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="status-chip"
+                  disabled={!canManage || quickActionBusyId === 'descriptor-export-drift-check'}
+                  onClick={() => { void handleQuickAction('descriptor-export-drift-check') }}
+                >
+                  {quickActionBusyId === 'descriptor-export-drift-check' ? 'Running...' : 'Run descriptor drift check'}
+                </button>
+                {descriptorDriftDetected ? (
+                  <>
+                    <button
+                      type="button"
+                      className="status-chip"
+                      disabled={!canManage || quickActionBusyId === 'runtime-contract-audit'}
+                      onClick={() => { void handleQuickAction('runtime-contract-audit') }}
+                    >
+                      {quickActionBusyId === 'runtime-contract-audit' ? 'Running...' : 'Run runtime contract audit'}
+                    </button>
+                    <button
+                      type="button"
+                      className="status-chip"
+                      disabled={!canManage || quickActionBusyId === 'recovery-sequence'}
+                      onClick={() => { void handleQuickAction('recovery-sequence') }}
+                    >
+                      {quickActionBusyId === 'recovery-sequence' ? 'Running...' : 'Run recovery sequence'}
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            </>
+          ) : null}
+        </>
+      ) : null}
+      {runtimeHealth ? (
+        <>
+          <div className="row" style={{ marginTop: 12, gap: 8, flexWrap: 'wrap' }}>
+            <span className="status-chip" style={healthStatusStyle(runtimeHealth.overall_status)}>
+              Runtime health: {healthStatusLabel(runtimeHealth.overall_status)}
+            </span>
+            <span className="status-chip">Score {runtimeHealthScore}/100</span>
+            <span className="status-chip">Snapshot {formatDateTime(runtimeHealth.generated_at)}</span>
+            <span className="status-chip" style={healthStatusStyle(runtimeContractAuditStale ? 'warning' : 'healthy')}>
+              Contract audit: {runtimeContractAuditStale ? 'stale' : 'fresh'} ({runtimeContractAuditAgeLabel})
+            </span>
+            <span className="status-chip">
+              Last contract audit: {runtimeContractAuditLastAt ? formatDateTime(runtimeContractAuditLastAt) : 'never'}
+            </span>
+            <button
+              type="button"
+              className="status-chip"
+              onClick={() => setIncidentMode((prev) => !prev)}
+              style={incidentMode ? healthStatusStyle('failing') : undefined}
+            >
+              Incident mode {incidentMode ? 'ON' : 'OFF'}
+            </button>
+            <button
+              type="button"
+              className="status-chip"
+              disabled={!canManage || quickActionBusyId === 'recovery-sequence'}
+              onClick={() => { void handleQuickAction('recovery-sequence') }}
+            >
+              {quickActionBusyId === 'recovery-sequence' ? 'Running...' : 'Run recovery sequence'}
+            </button>
+          </div>
+          {runtimeDomains ? (
+            <dl className="profile-facts" style={{ marginTop: 10 }}>
+              {showDomainInIncident(runtimeDomains.contracts?.status) ? (
+                <div className="profile-fact">
+                  <dt>Contracts</dt>
+                  <dd>
+                    <span className="status-chip" style={healthStatusStyle(runtimeDomains.contracts?.status)}>
+                      {healthStatusLabel(runtimeDomains.contracts?.status)}
+                    </span>
+                  </dd>
+                </div>
+              ) : null}
+              {showDomainInIncident(runtimeDomains.bootstrap?.status) ? (
+                <div className="profile-fact">
+                  <dt>Bootstrap</dt>
+                  <dd>
+                    <span className="status-chip" style={healthStatusStyle(runtimeDomains.bootstrap?.status)}>
+                      {healthStatusLabel(runtimeDomains.bootstrap?.status)}
+                    </span>
+                  </dd>
+                </div>
+              ) : null}
+              {showDomainInIncident(runtimeDomains.plugins?.status) ? (
+                <div className="profile-fact">
+                  <dt>Plugins</dt>
+                  <dd>
+                    <span className="status-chip" style={healthStatusStyle(runtimeDomains.plugins?.status)}>
+                      {healthStatusLabel(runtimeDomains.plugins?.status)}
+                    </span>
+                  </dd>
+                </div>
+              ) : null}
+              {showDomainInIncident(runtimeDomains.agent_runtime?.status) ? (
+                <div className="profile-fact">
+                  <dt>Agent runtime</dt>
+                  <dd>
+                    <span className="status-chip" style={healthStatusStyle(runtimeDomains.agent_runtime?.status)}>
+                      {healthStatusLabel(runtimeDomains.agent_runtime?.status)}
+                    </span>
+                  </dd>
+                </div>
+              ) : null}
+            </dl>
+          ) : null}
+          {runtimeDomains ? (
+            <div style={{ marginTop: 10 }}>
+              <strong>Domain details</strong>
+              <div className="profile-facts" style={{ marginTop: 8 }}>
+                {(['contracts', 'bootstrap', 'plugins', 'agent_runtime'] as const).map((domainKey) => {
+                  const domain = (runtimeDomains as Record<string, any>)[domainKey] || {}
+                  if (!showDomainInIncident(domain.status)) return null
+                  const issues = Array.isArray(domain.issues) ? domain.issues : []
+                  const metrics = metricEntries(domain.metrics)
+                  return (
+                    <div className="profile-fact" key={`domain-detail:${domainKey}`}>
+                      <dt>{domainKey.replace('_', ' ')}</dt>
+                      <dd>
+                        <span className="status-chip" style={healthStatusStyle(domain.status)}>
+                          {healthStatusLabel(domain.status)}
+                        </span>
+                        <div className="meta" style={{ marginTop: 6 }}>{String(domain.summary || '').trim() || 'No summary.'}</div>
+                        {issues.length > 0 ? (
+                          <div className="meta" style={{ marginTop: 6 }}>
+                            Top issues: {issues.slice(0, 2).map((item: unknown) => String(item || '').trim()).filter(Boolean).join(' | ')}
+                          </div>
+                        ) : (
+                          <div className="meta" style={{ marginTop: 6 }}>Top issues: none</div>
+                        )}
+                        {metrics.length > 0 ? (
+                          <div className="meta" style={{ marginTop: 6 }}>
+                            Metrics: {metrics.map((item) => `${item.key}=${item.value}`).join(', ')}
+                          </div>
+                        ) : null}
+                      </dd>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          ) : null}
+          {previousRuntimeHealth ? (
+            <div style={{ marginTop: 10 }}>
+              <strong>Domain trends</strong>
+              <dl className="profile-facts" style={{ marginTop: 8 }}>
+                {(['contracts', 'bootstrap', 'plugins', 'agent_runtime'] as const).map((domainKey) => {
+                  const currentDomain = runtimeDomains ? (runtimeDomains as Record<string, any>)[domainKey] : null
+                  if (!showDomainInIncident(currentDomain?.status)) return null
+                  const previousDomain = domainValue(previousRuntimeHealth, domainKey)
+                  const currentStatus = currentDomain?.status
+                  const previousStatus = previousDomain?.status
+                  return (
+                    <div className="profile-fact" key={`trend:${domainKey}`}>
+                      <dt>{domainKey.replace('_', ' ')}</dt>
+                      <dd>
+                        <span className="status-chip" style={healthStatusStyle(currentStatus)}>
+                          {healthStatusLabel(currentStatus)}
+                        </span>
+                        {previousStatus ? (
+                          <span className="status-chip" style={{ marginLeft: 8 }}>
+                            {trendLabel(currentStatus, previousStatus)} (prev {healthStatusLabel(previousStatus)})
+                          </span>
+                        ) : null}
+                      </dd>
+                    </div>
+                  )
+                })}
+              </dl>
+            </div>
+          ) : null}
+          {recommendedActions.length > 0 ? (
+            <div style={{ marginTop: 10 }}>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <strong>Recommended actions</strong>
+                <button
+                  type="button"
+                  className="status-chip"
+                  disabled={bulkQuickActionsRunning || Boolean(quickActionBusyId) || highPriorityRecommendedActions.length <= 0}
+                  onClick={() => { void handleRunHighPriorityActions() }}
+                >
+                  {bulkQuickActionsRunning ? 'Running high-priority actions...' : 'Run high-priority actions'}
+                </button>
+              </div>
+              <div className="profile-facts" style={{ marginTop: 8 }}>
+                {visibleRecommendedActions.map((action) => (
+                  <div className="profile-fact" key={action.id}>
+                    <dt>{action.title}</dt>
+                    <dd>
+                      <span className="status-chip" style={healthStatusStyle(action.priority === 'high' ? 'failing' : (action.priority === 'medium' ? 'warning' : 'healthy'))}>
+                        {String(action.priority || 'medium').toUpperCase()}
+                      </span>
+                      <div className="meta" style={{ marginTop: 6 }}>{action.description}</div>
+                      <div className="row" style={{ marginTop: 8, gap: 8, flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          className="status-chip"
+                          disabled={
+                            quickActionBusyId === action.id
+                            || bulkQuickActionsRunning
+                            || (executeDoctorQuickActionPending && String(executeDoctorQuickActionId || '') === String(action.id || ''))
+                            || (!canManage && requiresManagePermission(String(action.id || '').trim()))
+                          }
+                          onClick={() => { void handleQuickAction(String(action.id || '')) }}
+                        >
+                          {(quickActionBusyId === action.id || (executeDoctorQuickActionPending && String(executeDoctorQuickActionId || '') === String(action.id || ''))) ? 'Running...' : 'Fix now'}
+                        </button>
+                      </div>
+                    </dd>
+                  </div>
+                ))}
+              </div>
+              {quickActionFeedback ? (
+                <div className="notice" style={{ marginTop: 8 }}>{quickActionFeedback}</div>
+              ) : null}
+            </div>
+          ) : null}
+        </>
+      ) : null}
+      {lastAction ? (
+        <div style={{ marginTop: 10 }}>
+          <strong>Last quick action</strong>
+          <dl className="profile-facts" style={{ marginTop: 8 }}>
+            <div className="profile-fact">
+              <dt>Action</dt>
+              <dd>{String(lastAction.id || '').trim() || 'n/a'}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Status</dt>
+              <dd>{String(lastAction.status || '').trim() || 'unknown'}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Executed at</dt>
+              <dd>{formatDateTime(lastAction.at || null)}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Message</dt>
+              <dd>{String(lastAction.message || '').trim() || 'n/a'}</dd>
+            </div>
+          </dl>
+        </div>
+      ) : null}
+      {recentActions.length > 0 ? (
+        <div style={{ marginTop: 10 }}>
+          <strong>Recent quick actions</strong>
+          <div className="row" style={{ marginTop: 8, gap: 8, flexWrap: 'wrap' }}>
+            <span className="status-chip">Filter</span>
+            {(['all', 'failed', 'warning', 'passed'] as const).map((value) => (
+              <button
+                key={`action-filter:${value}`}
+                type="button"
+                className="status-chip"
+                onClick={() => setRecentActionStatusFilter(value)}
+                style={recentActionStatusFilter === value ? { fontWeight: 700 } : undefined}
+              >
+                {value}
+              </button>
+            ))}
+            <span className="status-chip">Sort</span>
+            {(['newest', 'oldest', 'status'] as const).map((value) => (
+              <button
+                key={`action-sort:${value}`}
+                type="button"
+                className="status-chip"
+                onClick={() => setRecentActionSort(value)}
+                style={recentActionSort === value ? { fontWeight: 700 } : undefined}
+              >
+                {value}
+              </button>
+            ))}
+          </div>
+          {quickActionStats ? (
+            <div className="row" style={{ marginTop: 8, gap: 8, flexWrap: 'wrap' }}>
+              <span className="status-chip">
+                24h total {Number(quickActionStats.total || 0)} ({formatDelta(quickActionStats.delta_total)} vs prev)
+              </span>
+              <span className="status-chip" style={healthStatusStyle('healthy')}>
+                Passed {Number(quickActionStats.passed || 0)} ({formatDelta(quickActionStats.delta_passed)})
+              </span>
+              <span className="status-chip" style={healthStatusStyle('warning')}>
+                Warning {Number(quickActionStats.warning || 0)} ({formatDelta(quickActionStats.delta_warning)})
+              </span>
+              <span className="status-chip" style={healthStatusStyle('failing')}>
+                Failed {Number(quickActionStats.failed || 0)} ({formatDelta(quickActionStats.delta_failed)})
+              </span>
+            </div>
+          ) : null}
+          <div className="profile-facts" style={{ marginTop: 8 }}>
+            {visibleRecentActions.map((item, index) => (
+              <div className="profile-fact" key={`recent-action:${index}:${String(item.id || '')}`}>
+                <dt>{String(item.id || '').trim() || 'unknown'}</dt>
+                <dd>
+                  <span className="status-chip">{String(item.status || 'unknown')}</span>
+                  <div className="meta" style={{ marginTop: 6 }}>
+                    {formatDateTime(item.at || null)} - {String(item.message || '').trim() || 'n/a'}
+                  </div>
+                </dd>
+              </div>
+            ))}
+            {visibleRecentActions.length === 0 ? (
+              <div className="profile-fact">
+                <dt>No actions</dt>
+                <dd>No quick actions match the active filter.</dd>
+              </div>
+            ) : null}
+          </div>
+        </div>
       ) : null}
       {recentRuns.length > 0 ? (
         <div style={{ marginTop: 14 }}>
@@ -2321,13 +2993,23 @@ export function WorkspacePanel({
   workspaceRole,
   canManageUsers,
   doctorStatus,
+  doctorOpenRequestId,
   architectureInventorySummary,
+  architectureExport,
+  architectureExportLoading,
+  architectureExportError,
+  pluginDescriptorsPayload,
+  pluginDescriptorsLoading,
+  pluginDescriptorsError,
   doctorLoading,
   doctorError,
   onSeedDoctor,
   seedDoctorPending,
   onRunDoctor,
   runDoctorPending,
+  onExecuteDoctorQuickAction,
+  executeDoctorQuickActionPending,
+  executeDoctorQuickActionId,
   onResetDoctor,
   resetDoctorPending,
   workspaceUsersCount,
@@ -2370,13 +3052,23 @@ export function WorkspacePanel({
   workspaceRole: string
   canManageUsers: boolean
   doctorStatus: WorkspaceDoctorStatus | null
+  doctorOpenRequestId?: number
   architectureInventorySummary: ArchitectureInventorySummary | null
+  architectureExport: ArchitectureExportPayload | null
+  architectureExportLoading: boolean
+  architectureExportError: string | null
+  pluginDescriptorsPayload: PluginDescriptorsPayload | null
+  pluginDescriptorsLoading: boolean
+  pluginDescriptorsError: string | null
   doctorLoading: boolean
   doctorError: string | null
   onSeedDoctor: () => Promise<unknown>
   seedDoctorPending: boolean
   onRunDoctor: () => Promise<unknown>
   runDoctorPending: boolean
+  onExecuteDoctorQuickAction: (actionId: string) => Promise<unknown>
+  executeDoctorQuickActionPending: boolean
+  executeDoctorQuickActionId: string | null
   onResetDoctor: () => Promise<unknown>
   resetDoctorPending: boolean
   workspaceUsersCount: number
@@ -2781,6 +3473,11 @@ export function WorkspacePanel({
   }, [scrollClaudeAuthIntoView])
 
   React.useEffect(() => {
+    if (!doctorOpenRequestId) return
+    setWorkspaceTab('doctor')
+  }, [doctorOpenRequestId])
+
+  React.useEffect(() => {
     if (
       canManageCodexAuth
       && !codexAuthHasSystemOverride
@@ -3142,6 +3839,13 @@ export function WorkspacePanel({
               <WorkspaceDoctorCard
                 doctorStatus={doctorStatus}
                 architectureInventorySummary={architectureInventorySummary}
+                architectureExport={architectureExport}
+                architectureExportLoading={architectureExportLoading}
+                architectureExportError={architectureExportError}
+                pluginDescriptorsPayload={pluginDescriptorsPayload}
+                pluginDescriptorsLoading={pluginDescriptorsLoading}
+                pluginDescriptorsError={pluginDescriptorsError}
+                forceIncidentModeRequestId={doctorOpenRequestId}
                 doctorLoading={doctorLoading}
                 doctorError={doctorError}
                 canManage={canManageUsers}
@@ -3149,6 +3853,9 @@ export function WorkspacePanel({
                 seedDoctorPending={seedDoctorPending}
                 onRunDoctor={onRunDoctor}
                 runDoctorPending={runDoctorPending}
+                onExecuteDoctorQuickAction={onExecuteDoctorQuickAction}
+                executeDoctorQuickActionPending={executeDoctorQuickActionPending}
+                executeDoctorQuickActionId={executeDoctorQuickActionId}
                 onResetDoctor={onResetDoctor}
                 resetDoctorPending={resetDoctorPending}
               />

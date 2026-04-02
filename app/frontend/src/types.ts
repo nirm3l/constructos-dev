@@ -161,12 +161,104 @@ export type WorkspaceDoctorStatus = {
   last_run_status: string | null
   last_run?: DoctorRun | null
   recent_runs: DoctorRun[]
+  last_action?: {
+    id: string
+    status: string
+    message: string
+    at: string | null
+    result: Record<string, unknown>
+  } | null
+  last_action_at?: string | null
+  last_action_result?: Record<string, unknown> | null
+  recent_actions?: Array<{
+    id: string
+    status: string
+    message: string
+    at: string | null
+    result: Record<string, unknown>
+  }>
+  quick_action_stats?: {
+    window_hours: number
+    total: number
+    passed: number
+    warning: number
+    failed: number
+    previous_total: number
+    previous_passed: number
+    previous_warning: number
+    previous_failed: number
+    delta_total: number
+    delta_passed: number
+    delta_warning: number
+    delta_failed: number
+  } | null
+  runtime_health?: {
+    generated_at: string
+    overall_status: 'healthy' | 'warning' | 'failing' | string
+    health_score: number
+    domains: {
+      contracts: {
+        status: 'healthy' | 'warning' | 'failing' | string
+        summary: string
+        metrics: Record<string, unknown>
+        issues: string[]
+      }
+      bootstrap: {
+        status: 'healthy' | 'warning' | 'failing' | string
+        summary: string
+        metrics: Record<string, unknown>
+        issues: string[]
+      }
+      plugins: {
+        status: 'healthy' | 'warning' | 'failing' | string
+        summary: string
+        metrics: Record<string, unknown>
+        issues: string[]
+      }
+      agent_runtime: {
+        status: 'healthy' | 'warning' | 'failing' | string
+        summary: string
+        metrics: Record<string, unknown>
+        issues: string[]
+      }
+    }
+    recommended_actions: Array<{
+      id: string
+      priority: 'low' | 'medium' | 'high' | string
+      title: string
+      description: string
+    }>
+  } | null
   setup?: Record<string, unknown> | null
 }
 
 export type WorkspaceDoctorRunResponse = {
   workspace_id: string
   run: DoctorRun
+  status: WorkspaceDoctorStatus
+}
+
+export type WorkspaceDoctorAuditResponse = {
+  workspace_id: string
+  audit: {
+    ok: boolean
+    error_count: number
+    warning_count: number
+    errors: string[]
+    warnings: string[]
+    generated_at: string
+    elapsed_ms: number
+    counts: Record<string, number>
+  }
+  status: WorkspaceDoctorStatus
+}
+
+export type WorkspaceDoctorQuickActionResponse = {
+  workspace_id: string
+  action_id: string
+  ok: boolean
+  message: string
+  result: Record<string, unknown>
   status: WorkspaceDoctorStatus
 }
 
@@ -408,6 +500,125 @@ export type ArchitectureInventorySummary = {
   }
 }
 
+export type PluginDescriptor = {
+  key: string
+  name: string
+  description: string
+  category: string
+  configurable: boolean
+  config_surface?: string | null
+  has_workflow_plugin_class: boolean
+  runtime_enabled: boolean
+  module?: string | null
+  class_name?: string | null
+  check_scope?: string | null
+  default_required_checks: string[]
+  default_required_check_count: number
+  available_checks: Record<string, string>
+  available_check_ids: string[]
+  skill_dependencies: Record<string, string[]>
+}
+
+export type PluginDescriptorsPayload = {
+  generated_at: string
+  count: number
+  items: PluginDescriptor[]
+}
+
+export type ArchitectureExportPayload = {
+  export_version: number
+  generated_at: string
+  inventory_generated_at?: string | null
+  counts: Record<string, number>
+  execution_providers: Array<{
+    provider: string
+    is_default: boolean
+    default_model?: string | null
+    default_reasoning_effort?: string | null
+  }>
+  workflow_plugins: Array<{
+    key: string
+    check_scope?: string | null
+    default_required_check_count: number
+    available_check_count: number
+  }>
+  plugin_descriptors: Array<{
+    key: string
+    name: string
+    category: string
+    configurable: boolean
+    runtime_enabled: boolean
+    has_workflow_plugin_class: boolean
+    config_surface?: string | null
+  }>
+  audit: {
+    ok: boolean
+    errors: string[]
+    warnings: string[]
+  }
+}
+
+export type BootstrapPlan = {
+  generated_at: string
+  startup_phase_count: number
+  shutdown_phase_count: number
+  phases: {
+    startup: Array<{
+      id: string
+      name: string
+      phase_type: 'startup' | string
+      order: number
+      condition?: string | null
+      status: string
+    }>
+    shutdown: Array<{
+      id: string
+      name: string
+      phase_type: 'shutdown' | string
+      order: number
+      condition?: string | null
+      status: string
+    }>
+  }
+  runtime_health: {
+    bootstrap_discovery_cache: {
+      has_payload: boolean
+      expires_in_seconds: number
+      hit_count: number
+      miss_count: number
+    }
+    architecture_inventory_cache: {
+      has_payload: boolean
+      expires_in_seconds: number
+      hit_count: number
+      miss_count: number
+    }
+  }
+}
+
+export type ArchitectureExportSummary = {
+  generated_at: string
+  inventory_generated_at: string
+  counts: Record<string, number>
+  plugin_descriptor_keys: string[]
+  audit: {
+    ok: boolean
+    error_count: number
+    warning_count: number
+    errors: string[]
+    warnings: string[]
+  }
+  cache_ttl_seconds: number
+  cache_hit: boolean
+  cache_status: {
+    key: string
+    has_payload: boolean
+    hit_count: number
+    miss_count: number
+    expires_in_seconds: number
+  }
+}
+
 export type BootstrapPayload = {
   current_user: User
   workspaces: Workspace[]
@@ -423,6 +634,8 @@ export type BootstrapPayload = {
   agent_chat_available_models?: string[]
   agent_chat_available_mcp_servers?: AgentChatMcpServer[]
   architecture_inventory_summary?: ArchitectureInventorySummary
+  architecture_export_summary?: ArchitectureExportSummary
+  bootstrap_plan?: BootstrapPlan
   users: Array<{ id: string; username: string; full_name: string; user_type: 'human' | 'agent' }>
   project_members: Array<{ project_id: string; user_id: string; role: string }>
   notifications: Notification[]
@@ -1065,6 +1278,30 @@ export type ProjectPolicyChecksVerifyResponse = {
   delivery?: ProjectPolicyCheckResult & {
     runtime_deploy_health?: Record<string, unknown>
   }
+  team_mode_automation_session_log?: {
+    id: string
+    workspace_id: string
+    project_id: string
+    command_id?: string | null
+    trigger?: string | null
+    status: string
+    phase?: string | null
+    started_at?: string | null
+    completed_at?: string | null
+    updated_at?: string | null
+    provider_context?: {
+      provider?: string | null
+      model?: string | null
+      reasoning_effort?: string | null
+    }
+    lineage?: Record<string, unknown>
+    transcript?: Array<{
+      event_type: string
+      index: number
+      at?: string | null
+      [key: string]: unknown
+    }>
+  } | null
   execution_gates?: {
     tasks: Array<{
       task_id: string
@@ -1108,6 +1345,25 @@ export type ProjectPolicyChecksVerifyResponse = {
   catalog?: Record<string, ProjectPolicyCheckCatalogItem[] | undefined>
   ok: boolean
 } & Record<string, unknown>
+
+export type ProjectTeamModeExecutionSessionsPage = {
+  project_id: string
+  items: Array<{
+    execution_session: Record<string, unknown> | null
+    automation_session_log: Record<string, unknown> | null
+  }>
+  total: number
+  limit: number
+  offset: number
+}
+
+export type ProjectTeamModeAutomationSessionLogsPage = {
+  project_id: string
+  items: Array<Record<string, unknown>>
+  total: number
+  limit: number
+  offset: number
+}
 
 export type ProjectPluginConfig = {
   workspace_id: string

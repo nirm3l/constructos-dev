@@ -1089,6 +1089,9 @@ def build_automation_usage_metadata(outcome: AutomationOutcome) -> dict[str, obj
     execution_model = str(usage_raw.get("execution_model") or "").strip()
     if execution_model:
         usage["execution_model"] = execution_model
+    reasoning_effort_raw = str(usage_raw.get("reasoning_effort") or "").strip().lower()
+    if reasoning_effort_raw in {"low", "medium", "high", "xhigh"}:
+        usage["reasoning_effort"] = reasoning_effort_raw
     cost_usd = _sanitize_non_negative_float(
         usage_raw.get("total_cost_usd")
         if usage_raw.get("total_cost_usd") is not None

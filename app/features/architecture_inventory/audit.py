@@ -61,6 +61,34 @@ def audit_architecture_inventory(inventory: dict[str, Any] | None = None) -> Arc
         errors.append(f"duplicate workflow plugin keys: {', '.join(plugin_duplicates)}")
     if not plugin_keys:
         errors.append("workflow plugin inventory is empty")
+    descriptors = list(capabilities.get("plugin_descriptors") or [])
+    descriptor_keys = [
+        str(item.get("key") or "").strip().lower()
+        for item in descriptors
+        if str(item.get("key") or "").strip()
+    ]
+    descriptor_duplicates = _duplicate_values(descriptor_keys)
+    if descriptor_duplicates:
+        errors.append(f"duplicate plugin descriptor keys: {', '.join(descriptor_duplicates)}")
+    if not descriptor_keys:
+        errors.append("plugin descriptor inventory is empty")
+    for required_descriptor in ("team_mode", "git_delivery", "docker_compose"):
+        if required_descriptor not in descriptor_keys:
+            errors.append(f"required plugin descriptor missing: {required_descriptor}")
+    for item in descriptors:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip().lower()
+        if not key:
+            continue
+        if not str(item.get("name") or "").strip():
+            errors.append(f"plugin descriptor missing name: {key}")
+        if not str(item.get("description") or "").strip():
+            errors.append(f"plugin descriptor missing description: {key}")
+        if bool(item.get("has_workflow_plugin_class")) and key not in plugin_keys:
+            errors.append(f"plugin descriptor references missing workflow plugin class key: {key}")
+        if bool(item.get("configurable")) and not str(item.get("config_surface") or "").strip():
+            errors.append(f"plugin descriptor missing config surface for configurable plugin: {key}")
 
     mcp_tools = list(capabilities.get("constructos_mcp_tools") or [])
     mcp_tool_names = [str(item.get("name") or "").strip() for item in mcp_tools if str(item.get("name") or "").strip()]
@@ -96,6 +124,11 @@ def audit_architecture_inventory(inventory: dict[str, Any] | None = None) -> Arc
         errors.append("bootstrap shutdown phase inventory is empty")
 
     internal_docs = dict(source.get("internal_docs") or {})
+    docs_available = bool(internal_docs.get("available", True))
+    if not docs_available:
+        # Internal markdown docs are optional runtime metadata and must not
+        # degrade runtime health when unavailable in deployment images.
+        return ArchitectureInventoryAuditResult(errors=errors, warnings=warnings)
     reading_order = list(internal_docs.get("reading_order") or [])
     missing_docs = [str(item).strip() for item in (internal_docs.get("missing_from_reading_order") or []) if str(item).strip()]
     if not reading_order:

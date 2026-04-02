@@ -20,7 +20,8 @@ It is organized as a single reading path, with each document containing:
 7. `06-omc-patterns-and-adoption.md`
 8. `10-orchestration-hardening-plan.md`
 9. `11-claw-code-parity-analysis.md`
-10. `99-glossary.md`
+10. `12-architecture-export-contract.md`
+11. `99-glossary.md`
 
 Use `90-policy-appendix.md` when you need full legacy policy details.
 
@@ -34,7 +35,8 @@ flowchart TD
   F --> G[06 OMC Patterns and Adoption]
   G --> J[10 Orchestration Hardening Plan]
   J --> K[11 Claw Code Parity Analysis]
-  K --> H[99 Glossary]
+  K --> L[12 Architecture Export Contract]
+  L --> H[99 Glossary]
   D --> I[90 Policy Appendix when deep policy detail is needed]
 ```
 
@@ -50,6 +52,7 @@ flowchart TD
 | OMC-inspired adoption roadmap | `06-omc-patterns-and-adoption.md` | orchestration pattern adoption policy |
 | Prompt-agnostic orchestration hardening execution plan | `10-orchestration-hardening-plan.md` | runtime determinism and orchestration quality policy |
 | Claw parity-inspired architecture inventory and reimplementation guidance | `11-claw-code-parity-analysis.md` | runtime inventory, audit, and registry adoption policy |
+| Generated architecture export and bootstrap mirror contract | `12-architecture-export-contract.md` | runtime contract and drift-diagnostics policy |
 
 ## Non-Negotiable Boundaries
 

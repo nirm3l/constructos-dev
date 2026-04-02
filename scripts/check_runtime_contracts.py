@@ -48,6 +48,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"OK: {audit_result.ok}")
         print(f"Providers: {inventory['counts'].get('execution_providers', 0)}")
         print(f"Workflow plugins: {inventory['counts'].get('workflow_plugins', 0)}")
+        print(f"Plugin descriptors: {inventory['counts'].get('plugin_descriptors', 0)}")
         print(f"MCP tools: {inventory['counts'].get('constructos_mcp_tools', 0)}")
         print(f"Prompt templates: {inventory['counts'].get('prompt_templates', 0)}")
         print(f"Bootstrap startup phases: {inventory['counts'].get('bootstrap_startup_phases', 0)}")
@@ -68,4 +69,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -40,21 +40,82 @@ ConstructOS has already implemented part of the earlier OMC-inspired operational
 
 So this document focuses on the next improvement layer: making ConstructOS more self-describing, auditable, and reimplementation-friendly.
 
-## Implementation Status (ConstructOS, 2026-04-02)
+## Implementation Status (ConstructOS, 2026-04-02, refreshed)
 
-The following recommendations from this analysis are now implemented in ConstructOS:
+The following recommendations from this analysis are implemented in ConstructOS:
 
-1. Generated architecture inventory and audit layer:
+1. Phase 1 inventory and audit foundation:
+   - `app/features/agents/capability_registry.py`
    - `app/features/architecture_inventory/build.py`
    - `app/features/architecture_inventory/audit.py`
    - `scripts/check_runtime_contracts.py`
 2. Runtime visibility endpoints:
    - `GET /api/debug/architecture-inventory`
+   - `GET /api/workspaces/{workspace_id}/doctor`
+   - `POST /api/workspaces/{workspace_id}/doctor/audit`
+   - `POST /api/workspaces/{workspace_id}/doctor/actions/{action_id}`
 3. CI contract gate:
    - `.github/workflows/runtime-contracts.yml` runs `python scripts/check_runtime_contracts.py`
 4. Bootstrap contract integration:
-   - `/api/bootstrap` now includes `architecture_inventory_summary`
+   - `/api/bootstrap` includes `architecture_inventory_summary`
+   - `/api/bootstrap` includes `bootstrap_plan`
    - `bootstrap.config.architecture_inventory_summary` mirrors the same payload for compatibility
+   - `bootstrap.config.bootstrap_plan` mirrors the same payload for compatibility
+5. Doctor operational control-plane hardening (high-visibility UX + recovery loop):
+   - runtime health domains (`contracts`, `bootstrap`, `plugins`, `agent_runtime`)
+   - health score and recommended actions
+   - server-side quick actions (`runtime-contract-audit`, `warm-bootstrap-caches`, `recovery-sequence`, etc.)
+   - incident mode surfaces in Workspace -> Doctor
+   - global incident banner/timeline/modal/recovery outcome feedback in frontend
+6. Provider-neutral session artifact bootstrap (incremental, DB-backed):
+   - `app/features/agents/session_serializers.py`
+   - `app/features/agents/automation_session_logs.py`
+   - Team Mode kickoff response now includes `automation_session_log` derived from persisted session rows
+7. Plugin descriptor baseline (seeded metadata + debug surface):
+   - `app/plugins/descriptors.py`
+   - `GET /api/debug/plugin-descriptors`
+   - capability registry now exposes `plugin_descriptors` and corresponding count
+8. Generated architecture export surface (UI/Doctor/CI contract):
+   - `app/features/architecture_inventory/export.py`
+   - `GET /api/debug/architecture-export`
+   - runtime contract audit now validates plugin descriptor integrity
+9. Doctor UI drift diagnostics (visible impact):
+   - frontend queries `GET /api/debug/architecture-export` and `GET /api/debug/plugin-descriptors`
+   - Workspace -> Doctor now shows descriptor/export drift status, count mismatches, and key-level missing descriptor signals
+10. Team Mode automation log API and replay improvements:
+   - `GET /api/projects/{project_id}/team-mode/automation-session-logs`
+   - `GET /api/projects/{project_id}/team-mode/automation-session-logs/{session_id}`
+   - Project Checks UI now consumes log stream and shows enriched transcript replay (`verify_fix` attempts/errors + summary context)
+11. Runtime-contract CI hardening:
+   - `.github/workflows/runtime-contracts.yml` now executes targeted pytest contract bundle in addition to audit script
+   - added descriptor/export consistency assertions and `verify_fix` replay event invariants in backend tests
+   - frontend runtime smoke tests now run in the same workflow (`npm --prefix app/frontend run test`)
+12. Doctor drift remediation linkage (high-visibility operational impact):
+   - runtime health now includes descriptor/export drift signals in contracts metrics/issues
+   - new quick action: `descriptor-export-drift-check`
+   - recovery sequence now includes a descriptor drift verification step
+   - contracts domain now includes runtime-contract-audit freshness signal (`runtime_contract_audit_stale`) with stale/missing issue codes
+13. Bootstrap architecture export summary mirror (boot-path compatibility):
+   - `/api/bootstrap` now includes `architecture_export_summary`
+   - `bootstrap.config.architecture_export_summary` mirrors the same payload for compatibility
+   - contract tests added for root + config mirror payload shape
+14. Doctor UI drift action shortcuts:
+   - descriptor/export diagnostics section now links directly to `descriptor-export-drift-check`, `runtime-contract-audit`, and `recovery-sequence`
+   - recommended actions panel can execute `descriptor-export-drift-check`
+15. Frontend smoke-test baseline (high-visibility UI safety net):
+   - frontend now includes `vitest` + `@testing-library/react` + `jsdom` test runner setup
+   - added Doctor incident/recovery UI smoke test, Doctor drift action panel smoke test, Project Checks replay parser smoke test, and Project Checks transcript timeline render smoke test
+   - test command: `npm --prefix app/frontend run test`
+16. Scheduled runtime-contract audit worker (operational freshness hardening):
+   - added background worker that periodically executes Doctor runtime-contract-audit quick action for enabled Doctor workspaces
+   - lifecycle wired in app startup/shutdown (`main.py`)
+   - contracts domain now tracks stale/missing audit freshness and auto-worker ticks refresh that signal
+17. Transcript timeline polish in Project Checks (high-visibility replay UX):
+   - Team Mode automation transcript panel now includes event counters (`Events`, `Attempts`, `Fixes`, `Runner errors`)
+   - added event-type filter and newest/oldest sorting controls with explicit `Showing X of Y` visibility
+18. Doctor recommended-action bulk remediation (high-visibility operational UX):
+   - new `Run high-priority actions` control executes all visible HIGH-priority recommendations sequentially
+   - panel now reports aggregated run outcome (`passed/failed/skipped`) for faster incident remediation cycles
 
 Current `architecture_inventory_summary` shape:
 
@@ -82,6 +143,20 @@ Bootstrap consumer migration note:
 - Preferred field: `bootstrap.architecture_inventory_summary`
 - Compatibility mirror: `bootstrap.config.architecture_inventory_summary`
 - Existing consumers can switch to the root field without breaking during transition because both fields currently carry identical payloads.
+- Preferred field: `bootstrap.bootstrap_plan`
+- Compatibility mirror: `bootstrap.config.bootstrap_plan`
+
+Current `bootstrap_plan` shape:
+
+- `generated_at`
+- `startup_phase_count`
+- `shutdown_phase_count`
+- `phases`:
+  - `startup[]` (`id`, `name`, `phase_type`, `order`, `condition`, `status`)
+  - `shutdown[]` (`id`, `name`, `phase_type`, `order`, `condition`, `status`)
+- `runtime_health`:
+  - `bootstrap_discovery_cache`
+  - `architecture_inventory_cache`
 
 ## What Exists In `claw-code-parity`
 
@@ -640,6 +715,12 @@ ConstructOS should keep structured LLM classification and safe-negative behavior
 
 ## Recommended ConstructOS Reimplementation Path
 
+### Current Completion Matrix
+
+- Phase 1: `Done` (inventory, registry, contract audit, docs/index validation gate, bootstrap inventory surface).
+- Phase 2: `Done` (bootstrap plan + provider-neutral session artifacts + session list/get API + checks surface + UI log panel + historical fallback coverage).
+- Phase 3: `Done` (plugin descriptors/manifests baseline + generated metadata export layer + Doctor/UI drift diagnostics + bootstrap export summary mirror).
+
 ### Phase 1: Inventory And Audit
 
 Add immediately:
@@ -669,6 +750,16 @@ Suggested files:
 - `app/features/agents/automation_session_logs.py`
 - `app/features/agents/session_serializers.py`
 
+Current status:
+
+- `app/features/bootstrap/plan.py`: implemented (bootstrap plan now in bootstrap payload).
+- `app/features/agents/automation_session_logs.py`: implemented baseline serializer (provider-neutral log from persisted Team Mode session row).
+- `app/features/agents/session_serializers.py`: implemented baseline transcript serialization.
+
+Still pending in Phase 2:
+
+- none for the baseline parity scope; dedicated log-only API and transcript timeline controls are now implemented.
+
 ### Phase 3: Metadata-Backed Extensibility
 
 Add for reimplementation readiness:
@@ -682,6 +773,31 @@ Suggested files:
 - `app/plugins/descriptors.py`
 - `app/features/architecture_inventory/export.py`
 - `app/features/agents/capability_registry.py` extensions
+
+Current status:
+
+- `app/plugins/descriptors.py`: implemented
+- `app/features/architecture_inventory/export.py`: implemented
+- capability registry extensions for plugin descriptor export and UI contracts: implemented
+
+### Next 10 Execution Blocks (Large Chunks)
+
+1. `Done` Backfill migration/test coverage for historical sessions without usage metadata.
+2. `Done` Add runtime-facing descriptor drift signal in Doctor quick actions/recovery sequence.
+3. `Done` Add architecture export consumption in bootstrap summary (optional mirror for UI boot path).
+4. `Done` Add thin schema docs for architecture export contract in `docs/internal`.
+5. `Done` Add frontend quick-link from drift issues to Doctor quick actions where applicable.
+6. `Done` Add small e2e sanity flow for Doctor incident mode + recovery + drift re-check.
+7. `Done` Add lightweight UI smoke assertion for Project Checks replay rendering.
+8. `Done` Add backend assertions for mixed old/new session rows in list/get log endpoints.
+9. `Done` Add frontend fallback rendering for missing provider_context in historical logs.
+10. `Done` Final pass: refresh this document and `00-index.md` with completion evidence and residual risks.
+
+### Residual Risks (After Current Execution Blocks)
+
+- Frontend test runner is now configured, but coverage is intentionally narrow (Doctor incident/recovery + replay parser smoke); broader Workspace/Project panel coverage should expand incrementally.
+- Descriptor/export drift still depends on runtime-generated metadata consistency; periodic auto-audit is now available, but interval tuning and rollout policy should be adjusted per environment.
+- A frontend guardrail test now enforces root bootstrap field usage; remaining `bootstrap.config.*` mirror usage risk is primarily external/legacy client-facing and should be tracked before mirror deprecation.
 
 ## Priority Matrix
 

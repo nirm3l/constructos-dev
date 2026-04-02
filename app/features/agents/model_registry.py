@@ -437,6 +437,7 @@ def model_registry_cache_status() -> dict[str, object]:
         codex_count = len(_CACHE_CODEX_MODELS)
         opencode_count = len(_CACHE_OPENCODE_MODELS)
     return {
+        "has_payload": bool(codex_count > 0 or opencode_count > 0),
         "codex_cache_ttl_seconds": float(_CACHE_TTL_SECONDS),
         "opencode_cache_ttl_seconds": float(_OPENCODE_CACHE_TTL_SECONDS),
         "codex_list_timeout_seconds": float(_MODEL_LIST_TIMEOUT_SECONDS),

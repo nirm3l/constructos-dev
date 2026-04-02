@@ -14,9 +14,12 @@ from features.agents.gates import plugin_check_catalog_by_scope
 from features.agents.gateway import build_ui_gateway
 from plugins.team_mode.runtime_snapshot import build_team_mode_runtime_snapshot
 from plugins.team_mode.execution_sessions import (
+    get_team_mode_execution_session,
+    get_team_mode_execution_sessions_page,
     get_latest_team_mode_execution_session,
     serialize_team_mode_execution_session,
 )
+from features.agents.automation_session_logs import build_automation_session_log_from_row
 from shared.core import (
     Project,
     ProjectCreate,
@@ -847,8 +850,12 @@ def project_checks_verify(
 ):
     with SessionLocal() as db:
         project_execution_snapshot = _project_execution_gate_snapshot(db=db, user=user, project_id=project_id)
-        latest_execution_session = serialize_team_mode_execution_session(
-            get_latest_team_mode_execution_session(db=db, project_id=project_id)
+        latest_session_row = get_latest_team_mode_execution_session(db=db, project_id=project_id)
+        latest_execution_session = serialize_team_mode_execution_session(latest_session_row)
+        latest_automation_session_log = (
+            build_automation_session_log_from_row(session=latest_session_row)
+            if latest_session_row is not None
+            else None
         )
     gateway = build_ui_gateway(actor_user_id=user.id)
     team_mode = gateway.verify_team_mode_workflow(project_id=project_id)
@@ -859,11 +866,112 @@ def project_checks_verify(
         "team_mode_runtime": project_execution_snapshot.get("team_mode_runtime") or {"active": False, "agents": [], "tasks": [], "summary": {}},
         "delivery": delivery,
         "team_mode_execution_session": latest_execution_session,
+        "team_mode_automation_session_log": latest_automation_session_log,
         "execution_gates": project_execution_snapshot.get("execution_gates") or {"tasks": [], "totals": {}},
         "workflow_communication": project_execution_snapshot.get("workflow_communication")
         or {"events": [], "totals": {}, "events_total": 0},
         "catalog": plugin_check_catalog_by_scope(),
         "ok": bool(team_mode.get("ok")) and bool(delivery.get("ok")),
+    }
+
+
+@router.get("/api/projects/{project_id}/team-mode/execution-sessions")
+def project_team_mode_execution_sessions(
+    project_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    user=Depends(get_current_user_detached),
+):
+    with SessionLocal() as db:
+        _load_project_with_access(db, user, project_id)
+        rows, total = get_team_mode_execution_sessions_page(
+            db=db,
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+        )
+        items = [
+            {
+                "execution_session": serialize_team_mode_execution_session(row),
+                "automation_session_log": build_automation_session_log_from_row(session=row),
+            }
+            for row in rows
+        ]
+    return {
+        "project_id": project_id,
+        "items": items,
+        "total": int(total),
+        "limit": int(limit),
+        "offset": int(offset),
+    }
+
+
+@router.get("/api/projects/{project_id}/team-mode/execution-sessions/{session_id}")
+def project_team_mode_execution_session_get(
+    project_id: str,
+    session_id: str,
+    user=Depends(get_current_user_detached),
+):
+    with SessionLocal() as db:
+        _load_project_with_access(db, user, project_id)
+        row = get_team_mode_execution_session(
+            db=db,
+            project_id=project_id,
+            session_id=session_id,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Team Mode execution session not found")
+    return {
+        "project_id": project_id,
+        "execution_session": serialize_team_mode_execution_session(row),
+        "automation_session_log": build_automation_session_log_from_row(session=row),
+    }
+
+
+@router.get("/api/projects/{project_id}/team-mode/automation-session-logs")
+def project_team_mode_automation_session_logs(
+    project_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    user=Depends(get_current_user_detached),
+):
+    with SessionLocal() as db:
+        _load_project_with_access(db, user, project_id)
+        rows, total = get_team_mode_execution_sessions_page(
+            db=db,
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+        )
+        items = [build_automation_session_log_from_row(session=row) for row in rows]
+    return {
+        "project_id": project_id,
+        "items": items,
+        "total": int(total),
+        "limit": int(limit),
+        "offset": int(offset),
+    }
+
+
+@router.get("/api/projects/{project_id}/team-mode/automation-session-logs/{session_id}")
+def project_team_mode_automation_session_log_get(
+    project_id: str,
+    session_id: str,
+    user=Depends(get_current_user_detached),
+):
+    with SessionLocal() as db:
+        _load_project_with_access(db, user, project_id)
+        row = get_team_mode_execution_session(
+            db=db,
+            project_id=project_id,
+            session_id=session_id,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Team Mode automation session log not found")
+    return {
+        "project_id": project_id,
+        "session_id": str(session_id or "").strip(),
+        "automation_session_log": build_automation_session_log_from_row(session=row),
     }
 
 

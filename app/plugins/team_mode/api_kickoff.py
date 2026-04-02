@@ -24,6 +24,18 @@ from .execution_sessions import (
 KICKOFF_VERIFY_FIX_MAX_ATTEMPTS = 3
 
 
+def _pick_primary_key(counts: dict[str, int]) -> str | None:
+    normalized_items = [
+        (str(key or "").strip(), int(value or 0))
+        for key, value in dict(counts or {}).items()
+        if str(key or "").strip() and int(value or 0) > 0
+    ]
+    if not normalized_items:
+        return None
+    normalized_items.sort(key=lambda item: (-item[1], item[0]))
+    return normalized_items[0][0]
+
+
 def _run_kickoff_verify_fix_loop(
     *,
     max_attempts: int,
@@ -55,6 +67,7 @@ def _run_kickoff_verify_fix_loop(
         developer_task_ids = [str(item or "").strip() for item in list(state.get("developer_task_ids") or []) if str(item or "").strip()]
         developer_active_task_ids = [str(item or "").strip() for item in list(state.get("developer_active_task_ids") or []) if str(item or "").strip()]
         developer_idle_task_ids = [str(item or "").strip() for item in list(state.get("developer_idle_task_ids") or []) if str(item or "").strip()]
+        usage_summary = dict(state.get("usage_summary") or {})
         dispatch_confirmed = bool(state.get("developer_dispatch_confirmed"))
         if not developer_task_ids:
             dispatch_confirmed = True
@@ -67,6 +80,9 @@ def _run_kickoff_verify_fix_loop(
                 "developer_task_count": len(developer_task_ids),
                 "developer_active_count": len(developer_active_task_ids),
                 "developer_idle_count": len(developer_idle_task_ids),
+                "provider": str(usage_summary.get("provider") or "").strip().lower() or None,
+                "model": str(usage_summary.get("model") or "").strip() or None,
+                "reasoning_effort": str(usage_summary.get("reasoning_effort") or "").strip().lower() or None,
             }
         )
         if dispatch_confirmed:
@@ -80,6 +96,7 @@ def _run_kickoff_verify_fix_loop(
                 "developer_task_ids": developer_task_ids,
                 "developer_active_task_ids": developer_active_task_ids,
                 "developer_idle_task_ids": developer_idle_task_ids,
+                "usage_summary": usage_summary,
             }
 
     developer_task_ids = [str(item or "").strip() for item in list(last_state.get("developer_task_ids") or []) if str(item or "").strip()]
@@ -103,6 +120,7 @@ def _run_kickoff_verify_fix_loop(
         "developer_task_ids": developer_task_ids,
         "developer_active_task_ids": developer_active_task_ids,
         "developer_idle_task_ids": developer_idle_task_ids,
+        "usage_summary": dict(last_state.get("usage_summary") or {}),
     }
 
 
@@ -120,6 +138,10 @@ def _collect_team_mode_developer_dispatch_state(
     developer_task_ids: list[str] = []
     active_task_ids: list[str] = []
     idle_task_ids: list[str] = []
+    provider_counts: dict[str, int] = {}
+    model_counts: dict[str, int] = {}
+    reasoning_counts: dict[str, int] = {}
+    tasks_with_usage = 0
     for task in runtime_context.tasks:
         task_id = str(task.id or "").strip()
         if not task_id:
@@ -136,11 +158,34 @@ def _collect_team_mode_developer_dispatch_state(
             idle_task_ids.append(task_id)
         else:
             active_task_ids.append(task_id)
+        last_agent_usage = state.get("last_agent_usage") if isinstance(state.get("last_agent_usage"), dict) else {}
+        usage_payload = dict(last_agent_usage or {}) if isinstance(last_agent_usage, dict) else {}
+        usage_provider = str(usage_payload.get("execution_provider") or "").strip().lower()
+        usage_model = str(usage_payload.get("execution_model") or "").strip()
+        usage_reasoning = str(usage_payload.get("reasoning_effort") or "").strip().lower()
+        if usage_provider or usage_model or usage_reasoning:
+            tasks_with_usage += 1
+        if usage_provider:
+            provider_counts[usage_provider] = int(provider_counts.get(usage_provider) or 0) + 1
+        if usage_model:
+            model_counts[usage_model] = int(model_counts.get(usage_model) or 0) + 1
+        if usage_reasoning:
+            reasoning_counts[usage_reasoning] = int(reasoning_counts.get(usage_reasoning) or 0) + 1
+    usage_summary = {
+        "tasks_with_usage": tasks_with_usage,
+        "provider": _pick_primary_key(provider_counts),
+        "model": _pick_primary_key(model_counts),
+        "reasoning_effort": _pick_primary_key(reasoning_counts),
+        "providers": provider_counts,
+        "models": model_counts,
+        "reasoning_efforts": reasoning_counts,
+    }
     return {
         "developer_task_ids": developer_task_ids,
         "developer_active_task_ids": active_task_ids,
         "developer_idle_task_ids": idle_task_ids,
         "developer_dispatch_confirmed": bool(active_task_ids),
+        "usage_summary": usage_summary,
     }
 
 
@@ -212,15 +257,34 @@ def maybe_dispatch_execution_kickoff(
         blocked_reasons: list[str] | None = None,
     ) -> dict[str, object]:
         verify_fix = payload.get("verify_fix") if isinstance(payload.get("verify_fix"), dict) else {}
+        verify_fix_usage = dict(verify_fix.get("usage_summary") or {}) if verify_fix else {}
+        provider = str(verify_fix_usage.get("provider") or payload.get("provider") or "").strip().lower() or None
+        model = str(verify_fix_usage.get("model") or payload.get("model") or "").strip() or None
+        reasoning_effort = (
+            str(verify_fix_usage.get("reasoning_effort") or payload.get("reasoning_effort") or "").strip().lower() or None
+        )
+        attempts = list(verify_fix.get("attempts") or []) if verify_fix else []
+        runner_error_count = len(
+            [
+                item
+                for item in attempts
+                if isinstance(item, dict) and str(item.get("runner_status") or "").strip().lower() == "error"
+            ]
+        )
         summary_payload = {
             "ok": bool(payload.get("ok")),
             "summary": str(payload.get("summary") or "").strip(),
             "comment": str(payload.get("comment") or "").strip(),
             "kickoff_dispatched": bool(payload.get("kickoff_dispatched")),
             "failed_count": len(list(payload.get("failed") or [])) if isinstance(payload.get("failed"), list) else 0,
+            "provider": provider,
+            "model": model,
+            "reasoning_effort": reasoning_effort,
             "verify_fix_ok": bool(verify_fix.get("ok")) if verify_fix else None,
             "verify_fix_attempts": len(list(verify_fix.get("attempts") or [])) if verify_fix else 0,
             "verify_fix_fix_attempt_count": int(verify_fix.get("fix_attempt_count") or 0) if verify_fix else 0,
+            "verify_fix_runner_error_count": runner_error_count,
+            "verify_fix_attempts_detail": attempts,
             "verify_fix_blocked_reason_code": (
                 str(verify_fix.get("blocked_reason_code") or "").strip() or None
                 if verify_fix
@@ -234,7 +298,10 @@ def maybe_dispatch_execution_kickoff(
             queued_task_ids=[str(item or "").strip() for item in list(payload.get("queued_task_ids") or []) if str(item or "").strip()],
             blocked_reasons=blocked_reasons or [str(item or "").strip() for item in list(payload.get("blocked_reasons") or []) if str(item or "").strip()],
         )
+        from features.agents.automation_session_logs import build_automation_session_log_from_row
+
         payload["execution_session"] = serialize_team_mode_execution_session(execution_session)
+        payload["automation_session_log"] = build_automation_session_log_from_row(session=execution_session)
         return payload
 
     promote_plugin_policy_to_execution_mode_if_needed(

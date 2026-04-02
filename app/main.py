@@ -10,6 +10,10 @@ from fastapi.staticfiles import StaticFiles
 from features.bootstrap.api import router as bootstrap_router
 from features.debug.api import router as debug_router
 from features.doctor.api import router as doctor_router
+from features.doctor.audit_worker import (
+    start_doctor_runtime_contract_audit_worker,
+    stop_doctor_runtime_contract_audit_worker,
+)
 from features.licensing.api import router as licensing_router
 from features.licensing.sync import (
     LicenseStartupError,
@@ -75,11 +79,13 @@ async def lifespan(_app: FastAPI):
     start_event_storming_projection_worker()
     start_license_sync_worker()
     start_system_notifications_worker()
+    start_doctor_runtime_contract_audit_worker()
     if AGENT_RUNNER_ENABLED:
         start_automation_runner()
     yield
     if AGENT_RUNNER_ENABLED:
         stop_automation_runner()
+    stop_doctor_runtime_contract_audit_worker()
     stop_system_notifications_worker()
     stop_license_sync_worker()
     stop_event_storming_projection_worker()

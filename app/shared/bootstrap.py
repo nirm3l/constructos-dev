@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import func, inspect, select, text
 from sqlalchemy.orm import Session
 
+from features.agents.model_registry import list_available_agent_models
 from features.bootstrap.read_models import bootstrap_payload_read_model
 from .eventing import append_event, current_version, get_kurrent_client
 from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
@@ -2096,6 +2097,18 @@ def startup_bootstrap():
             time.sleep(1)
     if last_exc is not None:
         raise last_exc
+    _warm_agent_model_registry_cache()
+
+
+def _warm_agent_model_registry_cache() -> None:
+    """
+    Prime provider model caches during startup so Doctor runtime health does not
+    report false-positive cold-cache warnings after a fresh recreate/deploy.
+    """
+    try:
+        list_available_agent_models(force_refresh=True, allow_runtime_discovery=True)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Agent model registry warmup failed during startup: %s", exc)
 
 
 def bootstrap_payload(db: Session, user: User) -> dict[str, Any]:

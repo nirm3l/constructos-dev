@@ -5,7 +5,9 @@ import type {
   AdminUserRoleUpdateResponse,
   AdminUserResetPasswordResponse,
   AdminUsersPage,
+  ArchitectureExportPayload,
   DoctorRun,
+  PluginDescriptorsPayload,
   AuthMePayload,
   BootstrapPayload,
   FeedbackCreateRequest,
@@ -52,6 +54,8 @@ import type {
   ProjectStarterCatalog,
   ProjectMembersPage,
   ProjectPolicyChecksVerifyResponse,
+  ProjectTeamModeAutomationSessionLogsPage,
+  ProjectTeamModeExecutionSessionsPage,
   ProjectCapabilities,
   ProjectPluginConfig,
   ProjectPluginConfigDiff,
@@ -62,6 +66,8 @@ import type {
   ProjectSkillsPage,
   WorkspaceSkill,
   WorkspaceDoctorRunResponse,
+  WorkspaceDoctorAuditResponse,
+  WorkspaceDoctorQuickActionResponse,
   WorkspaceDoctorStatus,
   WorkspaceSkillsPage,
   Specification,
@@ -153,6 +159,10 @@ async function uploadApi<T>(path: string, userId: string, body: FormData): Promi
 }
 
 export const getBootstrap = (userId: string) => api<BootstrapPayload>('/api/bootstrap', userId)
+export const getArchitectureExport = (userId: string) =>
+  api<ArchitectureExportPayload>('/api/debug/architecture-export', userId)
+export const getPluginDescriptors = (userId: string) =>
+  api<PluginDescriptorsPayload>('/api/debug/plugin-descriptors', userId)
 export const getLicenseStatus = (userId: string) => api<LicenseStatusResponse>('/api/license/status', userId)
 export const activateLicense = (userId: string, payload: { activation_code: string }) =>
   api<LicenseActivationResponse>('/api/license/activate', userId, {
@@ -303,6 +313,16 @@ export const seedWorkspaceDoctor = (userId: string, workspaceId: string) =>
 
 export const runWorkspaceDoctor = (userId: string, workspaceId: string) =>
   api<WorkspaceDoctorRunResponse>(`/api/workspaces/${workspaceId}/doctor/run`, userId, {
+    method: 'POST',
+  })
+
+export const runWorkspaceDoctorAudit = (userId: string, workspaceId: string) =>
+  api<WorkspaceDoctorAuditResponse>(`/api/workspaces/${workspaceId}/doctor/audit`, userId, {
+    method: 'POST',
+  })
+
+export const executeWorkspaceDoctorQuickAction = (userId: string, workspaceId: string, actionId: string) =>
+  api<WorkspaceDoctorQuickActionResponse>(`/api/workspaces/${workspaceId}/doctor/actions/${encodeURIComponent(actionId)}`, userId, {
     method: 'POST',
   })
 
@@ -1304,6 +1324,32 @@ export const getProjectEventStormingOverview = (userId: string, projectId: strin
 
 export const getProjectPolicyChecksVerification = (userId: string, projectId: string) =>
   api<ProjectPolicyChecksVerifyResponse>(`/api/projects/${projectId}/checks/verify`, userId)
+
+export const getProjectTeamModeExecutionSessions = (
+  userId: string,
+  projectId: string,
+  params?: { limit?: number; offset?: number }
+) =>
+  api<ProjectTeamModeExecutionSessionsPage>(
+    `/api/projects/${projectId}/team-mode/execution-sessions${queryString({
+      limit: params?.limit ?? 20,
+      offset: params?.offset ?? 0,
+    })}`,
+    userId
+  )
+
+export const getProjectTeamModeAutomationSessionLogs = (
+  userId: string,
+  projectId: string,
+  params?: { limit?: number; offset?: number }
+) =>
+  api<ProjectTeamModeAutomationSessionLogsPage>(
+    `/api/projects/${projectId}/team-mode/automation-session-logs${queryString({
+      limit: params?.limit ?? 20,
+      offset: params?.offset ?? 0,
+    })}`,
+    userId
+  )
 
 export const getProjectPluginConfig = (
   userId: string,

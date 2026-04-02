@@ -13,10 +13,12 @@ import {
   deleteClaudeAuthOverride,
   deleteCodexAuthOverride,
   getProjectPluginConfig,
+  getArchitectureExport,
   getBootstrap,
   getClaudeAuthStatus,
   getCodexAuthStatus,
   getOpenCodeAuthStatus,
+  getPluginDescriptors,
   getLicenseStatus,
   getWorkspaceDoctorStatus,
   resetWorkspaceDoctor,
@@ -26,6 +28,7 @@ import {
   patchMyPreferences,
   resetAdminUserPassword,
   runWorkspaceDoctor,
+  executeWorkspaceDoctorQuickAction,
   seedWorkspaceDoctor,
   startClaudeDeviceAuth,
   startCodexDeviceAuth,
@@ -191,6 +194,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     if (initialUrlState.taskId) return 'tasks'
     return parseStoredTab(localStorage.getItem('ui_tab'))
   })
+  const [workspaceDoctorOpenRequestId, setWorkspaceDoctorOpenRequestId] = React.useState(0)
   const [theme, setTheme] = React.useState<'light' | 'dark'>('light')
   const [speechLang, setSpeechLang] = React.useState<string>(resolveInitialSpeechLang)
   const [agentChatModel, setAgentChatModel] = React.useState('')
@@ -634,7 +638,25 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   const workspaceDoctorQuery = useQuery({
     queryKey: ['workspace-doctor', userId, workspaceId],
     queryFn: () => getWorkspaceDoctorStatus(userId, workspaceId),
-    enabled: Boolean(workspaceId && tab === 'settings'),
+    enabled: Boolean(workspaceId),
+    refetchInterval: (query) => {
+      if (!workspaceId) return false
+      const data = query.state.data as { runtime_health?: { overall_status?: string } } | undefined
+      const status = String(data?.runtime_health?.overall_status || '').trim().toLowerCase()
+      if (status === 'failing') return 10_000
+      if (status === 'warning') return 15_000
+      return false
+    },
+  })
+  const architectureExportQuery = useQuery({
+    queryKey: ['architecture-export', userId],
+    queryFn: () => getArchitectureExport(userId),
+    enabled: Boolean(workspaceId),
+  })
+  const pluginDescriptorsQuery = useQuery({
+    queryKey: ['plugin-descriptors', userId],
+    queryFn: () => getPluginDescriptors(userId),
+    enabled: Boolean(workspaceId),
   })
   const seedWorkspaceDoctorMutation = useMutation({
     mutationFn: () => seedWorkspaceDoctor(userId, workspaceId),
@@ -656,6 +678,16 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     },
     onError: (err: any) => {
       setUiError(err?.message || 'Unable to run ConstructOS Doctor')
+    },
+  })
+  const executeDoctorQuickActionMutation = useMutation({
+    mutationFn: (actionId: string) => executeWorkspaceDoctorQuickAction(userId, workspaceId, actionId),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['workspace-doctor', userId, workspaceId] })
+      setUiError(null)
+    },
+    onError: (err: any) => {
+      setUiError(err?.message || 'Unable to execute Doctor quick action')
     },
   })
   const resetWorkspaceDoctorMutation = useMutation({
@@ -1899,6 +1931,10 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     tab,
     taskIsDirty,
   ])
+  const openWorkspaceDoctorIncident = React.useCallback(() => {
+    setWorkspaceDoctorOpenRequestId((previous) => previous + 1)
+    setTabWithGuards('settings')
+  }, [setTabWithGuards])
 
   const {
     saveProjectMutation,
@@ -2268,6 +2304,8 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       setUiError,
       uiInfo,
       setUiInfo,
+      openWorkspaceDoctorIncident,
+      workspaceDoctorOpenRequestId,
       showQuickAdd,
       setShowQuickAdd,
       taskTitle,
@@ -2386,8 +2424,11 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       projectMemberCounts,
       canManageUsers,
       workspaceDoctorQuery,
+      architectureExportQuery,
+      pluginDescriptorsQuery,
       seedWorkspaceDoctorMutation,
       runWorkspaceDoctorMutation,
+      executeDoctorQuickActionMutation,
       resetWorkspaceDoctorMutation,
       adminUsers,
       adminUsersLoading: adminUsersQuery.isLoading,

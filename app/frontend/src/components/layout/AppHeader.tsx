@@ -35,6 +35,8 @@ type AppHeaderProps = {
   onOpenNote: (noteId: string, projectId?: string | null) => boolean
   onOpenSpecification: (specificationId: string, projectId?: string | null) => void
   onOpenProject: (projectId: string) => void
+  doctorRuntimeStatus?: string | null
+  onOpenDoctorIncident?: () => void
   onStartQuickTour: () => void
   onStartAdvancedTour: () => void
 }
@@ -152,6 +154,8 @@ export function AppHeader({
   onOpenNote,
   onOpenSpecification,
   onOpenProject,
+  doctorRuntimeStatus,
+  onOpenDoctorIncident,
   onStartQuickTour,
   onStartAdvancedTour,
 }: AppHeaderProps) {
@@ -163,6 +167,9 @@ export function AppHeader({
   const licensePlanCode = String(license?.plan_code || '').trim().toLowerCase()
   const betaSubscription = licenseStatus === 'beta' || licensePlanCode.includes('beta')
   const graphPagesActive = tab === 'knowledge-graph' || tab === 'task-flow'
+  const normalizedDoctorRuntimeStatus = String(doctorRuntimeStatus || '').trim().toLowerCase()
+  const doctorHasAlert = normalizedDoctorRuntimeStatus === 'warning' || normalizedDoctorRuntimeStatus === 'failing'
+  const doctorHealthLabel = normalizedDoctorRuntimeStatus === 'failing' ? 'Failing' : 'Warning'
   const projectSelectValue = React.useMemo(() => {
     if (!selectedProjectId) return undefined
     return bootstrapData.projects.some((project) => project.id === selectedProjectId) ? selectedProjectId : undefined
@@ -470,14 +477,30 @@ export function AppHeader({
                       data-tour-id="header-settings-menu"
                     >
                       <Icon path="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zm8 3.5-1.9.7a6.9 6.9 0 0 1-.6 1.5l.9 1.8-2 2-.6-.3-1.2-.6a6.9 6.9 0 0 1-1.5.6L12 20l-1-.1-1-.2-.7-1.9a6.9 6.9 0 0 1-1.5-.6l-1.8.9-2-2 .9-1.8a6.9 6.9 0 0 1-.6-1.5L4 12l.1-1 .2-1 .6-.2 1.3-.5a6.9 6.9 0 0 1 .6-1.5L5.9 6l2-2 1.8.9a6.9 6.9 0 0 1 1.5-.6L12 4l1 .1 1 .2.7 1.9a6.9 6.9 0 0 1 1.5.6L18 5.9l2 2-.9 1.8a6.9 6.9 0 0 1 .6 1.5L20 12z" />
+                      {doctorHasAlert ? (
+                        <span
+                          className={`top-profile-health-dot ${normalizedDoctorRuntimeStatus === 'failing' ? 'is-failing' : 'is-warning'}`.trim()}
+                          aria-hidden="true"
+                        />
+                      ) : null}
                     </button>
                   </DropdownMenu.Trigger>
                 </HeaderTooltip>
                 <DropdownMenu.Portal>
                   <DropdownMenu.Content className="header-settings-menu-content" sideOffset={8} align="end">
                     <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('settings')}>
-                      Settings
+                      <span>Settings</span>
+                      {doctorHasAlert ? (
+                        <span className={`header-settings-health-chip ${normalizedDoctorRuntimeStatus === 'failing' ? 'is-failing' : 'is-warning'}`.trim()}>
+                          Doctor {doctorHealthLabel}
+                        </span>
+                      ) : null}
                     </DropdownMenu.Item>
+                    {doctorHasAlert && typeof onOpenDoctorIncident === 'function' ? (
+                      <DropdownMenu.Item className="header-settings-menu-item" onSelect={onOpenDoctorIncident}>
+                        Open Doctor Incident Mode
+                      </DropdownMenu.Item>
+                    ) : null}
                     <DropdownMenu.Item className="header-settings-menu-item" onSelect={() => setTab('projects')}>
                       Manage projects
                     </DropdownMenu.Item>

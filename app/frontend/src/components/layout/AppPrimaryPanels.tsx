@@ -497,13 +497,23 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             workspaceRole={String(currentWorkspaceRole || '').trim()}
             canManageUsers={state.canManageUsers}
             doctorStatus={state.workspaceDoctorQuery.data ?? null}
+            doctorOpenRequestId={state.workspaceDoctorOpenRequestId ?? 0}
             architectureInventorySummary={state.bootstrap.data?.architecture_inventory_summary ?? null}
+            architectureExport={state.architectureExportQuery?.data ?? null}
+            architectureExportLoading={Boolean(state.architectureExportQuery?.isLoading || state.architectureExportQuery?.isFetching)}
+            architectureExportError={state.architectureExportQuery?.isError ? 'Unable to load architecture export.' : null}
+            pluginDescriptorsPayload={state.pluginDescriptorsQuery?.data ?? null}
+            pluginDescriptorsLoading={Boolean(state.pluginDescriptorsQuery?.isLoading || state.pluginDescriptorsQuery?.isFetching)}
+            pluginDescriptorsError={state.pluginDescriptorsQuery?.isError ? 'Unable to load plugin descriptors.' : null}
             doctorLoading={Boolean(state.workspaceDoctorQuery.isLoading || state.workspaceDoctorQuery.isFetching)}
             doctorError={state.workspaceDoctorQuery.isError ? 'Unable to load ConstructOS Doctor status.' : null}
             onSeedDoctor={() => state.seedWorkspaceDoctorMutation.mutateAsync()}
             seedDoctorPending={state.seedWorkspaceDoctorMutation.isPending}
             onRunDoctor={() => state.runWorkspaceDoctorMutation.mutateAsync()}
             runDoctorPending={state.runWorkspaceDoctorMutation.isPending}
+            onExecuteDoctorQuickAction={(actionId) => state.executeDoctorQuickActionMutation.mutateAsync(actionId)}
+            executeDoctorQuickActionPending={state.executeDoctorQuickActionMutation.isPending}
+            executeDoctorQuickActionId={state.executeDoctorQuickActionMutation.variables ?? null}
             onResetDoctor={() => state.resetWorkspaceDoctorMutation.mutateAsync()}
             resetDoctorPending={state.resetWorkspaceDoctorMutation.isPending}
             workspaceUsersCount={state.adminUsers.length}

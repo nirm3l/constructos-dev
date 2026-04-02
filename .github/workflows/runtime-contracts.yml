@@ -23,5 +23,28 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Run runtime contract audit
         run: python scripts/check_runtime_contracts.py
+
+      - name: Run runtime contract test bundle
+        run: |
+          python -m pytest -q \
+            app/tests/core/contexts/platform/test_architecture_inventory.py \
+            app/tests/core/contexts/platform/test_bootstrap_architecture_inventory_contract.py \
+            app/tests/core/contexts/platform/test_bootstrap_root_field_consumers.py \
+            app/tests/core/contexts/platform/test_doctor_api.py \
+            app/tests/core/contexts/platform/test_doctor_audit_worker.py \
+            app/tests/core/contexts/agents/test_automation_session_logs.py \
+            app/tests/core/contexts/agents/test_capability_registry.py \
+            app/tests/core/contexts/platform/test_team_mode_kickoff_verify_fix_loop.py
+
+      - name: Install frontend test dependencies
+        run: npm --prefix app/frontend ci
+
+      - name: Run frontend runtime smoke tests
+        run: npm --prefix app/frontend run -s test

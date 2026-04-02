@@ -386,6 +386,7 @@ def mcp_registry_cache_status() -> dict[str, Any]:
     expires_in_seconds = max(0.0, expires_at - now) if expires_at > 0 else 0.0
     refresh_age_seconds = max(0.0, now - refresh_finished_at) if refresh_finished_at > 0 else None
     return {
+        "has_payload": bool(row_count > 0),
         "cache_ttl_seconds": float(_CACHE_TTL_SECONDS),
         "cache_timeout_seconds": float(_MCP_LIST_TIMEOUT_SECONDS),
         "cache_row_count": int(row_count),

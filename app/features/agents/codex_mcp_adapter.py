@@ -3240,6 +3240,7 @@ def main() -> int:
     usage_payload["prompt_segment_chars"] = effective_prompt_segments
     usage_payload["execution_provider"] = runtime_provider
     usage_payload["execution_model"] = str(preferred_model or "").strip() or None
+    usage_payload["reasoning_effort"] = str(preferred_reasoning_effort or "").strip().lower() or None
     skill_trace = _build_skill_trace_payload(ctx.get("project_skills") if isinstance(ctx.get("project_skills"), list) else [])
     if skill_trace:
         usage_payload["project_skill_trace"] = skill_trace

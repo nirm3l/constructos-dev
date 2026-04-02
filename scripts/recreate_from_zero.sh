@@ -189,7 +189,71 @@ for i in {1..60}; do
   sleep 2
 done
 
-echo "[6/6] Current stack status:"
+echo "[6/7] Running Doctor recovery sequence and validating runtime health..."
+DOCTOR_RECOVERY_ENABLED="${DOCTOR_RECOVERY_ENABLED:-true}"
+if [[ "$DOCTOR_RECOVERY_ENABLED" == "true" ]]; then
+  doctor_username="${DOCTOR_RECOVERY_USERNAME:-$(resolve_compose_env_value "BOOTSTRAP_USERNAME" || true)}"
+  doctor_password="${DOCTOR_RECOVERY_PASSWORD:-$(resolve_compose_env_value "BOOTSTRAP_PASSWORD" || true)}"
+  legacy_password="${DOCTOR_LEGACY_PASSWORD:-$(resolve_compose_env_value "LEGACY_BOOTSTRAP_PASSWORD" || true)}"
+  workspace_id="${DOCTOR_WORKSPACE_ID:-10000000-0000-0000-0000-000000000001}"
+  if [[ -z "$doctor_username" ]]; then
+    doctor_username="admin"
+  fi
+  if [[ -z "$doctor_password" ]]; then
+    doctor_password="admin"
+  fi
+  if [[ -z "$legacy_password" ]]; then
+    legacy_password="testtest"
+  fi
+
+  cookie_jar="$(mktemp)"
+  trap 'rm -f "$cookie_jar"' EXIT
+
+  login_status="$(curl -sS -o /tmp/doctor-login.json -w "%{http_code}" -c "$cookie_jar" \
+    -H "Content-Type: application/json" \
+    -d "{\"username\":\"${doctor_username}\",\"password\":\"${doctor_password}\"}" \
+    "http://localhost:1102/api/auth/login" || true)"
+
+  if [[ "$login_status" != "200" ]]; then
+    login_status="$(curl -sS -o /tmp/doctor-login.json -w "%{http_code}" -c "$cookie_jar" \
+      -H "Content-Type: application/json" \
+      -d "{\"username\":\"${doctor_username}\",\"password\":\"${legacy_password}\"}" \
+      "http://localhost:1102/api/auth/login" || true)"
+  fi
+
+  if [[ "$login_status" != "200" ]]; then
+    echo "Doctor recovery login failed (HTTP ${login_status})."
+    cat /tmp/doctor-login.json || true
+    rm -f /tmp/doctor-login.json
+    exit 1
+  fi
+
+  rm -f /tmp/doctor-login.json
+
+  recovery_status="$(curl -sS -o /tmp/doctor-recovery.json -w "%{http_code}" -b "$cookie_jar" \
+    -X POST "http://localhost:1102/api/workspaces/${workspace_id}/doctor/actions/recovery-sequence" || true)"
+  if [[ "$recovery_status" != "200" ]]; then
+    echo "Doctor recovery quick action failed (HTTP ${recovery_status})."
+    cat /tmp/doctor-recovery.json || true
+    rm -f /tmp/doctor-recovery.json
+    exit 1
+  fi
+  rm -f /tmp/doctor-recovery.json
+
+  doctor_payload="$(curl -sS -b "$cookie_jar" "http://localhost:1102/api/workspaces/${workspace_id}/doctor")"
+  if ! grep -q '"overall_status":"healthy"' <<<"$doctor_payload"; then
+    echo "Doctor runtime health is not healthy after recovery."
+    echo "$doctor_payload"
+    exit 1
+  fi
+
+  rm -f "$cookie_jar"
+  trap - EXIT
+else
+  echo "Doctor recovery skipped (DOCTOR_RECOVERY_ENABLED=${DOCTOR_RECOVERY_ENABLED})."
+fi
+
+echo "[7/7] Current stack status:"
 ${COMPOSE_CMD} -p "${APP_COMPOSE_PROJECT_NAME}" "${COMPOSE_ARGS[@]}" ps
 echo "---"
 echo "Health:"

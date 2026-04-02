@@ -12,7 +12,15 @@ _BACKTICKED_DOC_RE = re.compile(r"`([^`]+\.md)`")
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    module_path = Path(__file__).resolve()
+    # Support both repository checkout layout (`.../task-management/app/features/...`)
+    # and container image layout where the app is copied into `/app`.
+    for candidate in [*module_path.parents]:
+        docs_index = candidate / "docs" / "internal" / "00-index.md"
+        if docs_index.exists():
+            return candidate
+    # Safe fallback for environments where docs are intentionally omitted.
+    return module_path.parents[2]
 
 
 def _docs_internal_root() -> Path:
@@ -23,9 +31,35 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _empty_internal_docs_inventory(*, docs_root: Path, index_path: Path, reason: str) -> dict[str, Any]:
+    return {
+        "available": False,
+        "reason": reason,
+        "root": str(docs_root),
+        "index_path": str(index_path),
+        "reading_order": [],
+        "referenced_docs": [],
+        "existing_docs": [],
+        "missing_from_reading_order": [],
+        "unreferenced_docs": [],
+    }
+
+
 def build_internal_docs_inventory() -> dict[str, Any]:
     docs_root = _docs_internal_root()
     index_path = docs_root / "00-index.md"
+    if not docs_root.exists():
+        return _empty_internal_docs_inventory(
+            docs_root=docs_root,
+            index_path=index_path,
+            reason="internal_docs_directory_missing",
+        )
+    if not index_path.exists():
+        return _empty_internal_docs_inventory(
+            docs_root=docs_root,
+            index_path=index_path,
+            reason="internal_docs_index_missing",
+        )
     index_text = _read_text(index_path)
     reading_order: list[str] = []
     for line in index_text.splitlines():
@@ -37,6 +71,8 @@ def build_internal_docs_inventory() -> dict[str, Any]:
     missing_from_reading_order = [name for name in reading_order if not (docs_root / name).exists()]
     unreferenced_docs = [name for name in existing_docs if name not in referenced_docs]
     return {
+        "available": True,
+        "reason": "",
         "root": str(docs_root),
         "index_path": str(index_path),
         "reading_order": reading_order,
@@ -61,4 +97,3 @@ def build_architecture_inventory() -> dict[str, Any]:
             "internal_docs_reading_order": len(internal_docs.get("reading_order") or []),
         },
     }
-
