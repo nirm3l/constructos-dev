@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
+from features.architecture_inventory import build_architecture_inventory
 from shared.core import ensure_project_access, ensure_role, get_current_user, get_db, load_events_after, metrics_snapshot
 from shared.models import ChatMessage, ChatSession, StoredEvent
 from shared.settings import (
@@ -16,6 +17,11 @@ from shared.settings import (
 )
 
 router = APIRouter()
+
+
+@router.get("/api/debug/architecture-inventory")
+def architecture_inventory(_user=Depends(get_current_user)):
+    return build_architecture_inventory()
 
 
 @router.get("/api/events/{aggregate_type}/{aggregate_id}")
