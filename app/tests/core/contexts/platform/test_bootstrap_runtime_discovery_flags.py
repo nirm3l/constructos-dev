@@ -79,3 +79,69 @@ def test_bootstrap_discovery_sections_are_cached_within_ttl(tmp_path: Path, monk
     assert second.status_code == 200
     assert calls["models"] == 1
     assert calls["mcp"] == 1
+
+
+def test_bootstrap_includes_architecture_inventory_summary_and_caches(tmp_path: Path, monkeypatch):
+    client = build_client(tmp_path)
+    import features.bootstrap.read_models as bootstrap_read_models
+
+    calls = {
+        "build_inventory": 0,
+    }
+
+    def fake_build_architecture_inventory():
+        calls["build_inventory"] += 1
+        return {
+            "generated_at": "2026-04-02T00:00:00+00:00",
+            "counts": {
+                "execution_providers": 3,
+                "workflow_plugins": 4,
+                "constructos_mcp_tools": 5,
+                "prompt_templates": 2,
+                "bootstrap_startup_phases": 3,
+                "bootstrap_shutdown_phases": 2,
+                "internal_docs": 11,
+                "internal_docs_reading_order": 11,
+            },
+            "internal_docs": {
+                "existing_docs": [f"{idx:02d}.md" for idx in range(1, 12)],
+                "reading_order": [f"{idx:02d}.md" for idx in range(1, 12)],
+                "missing_from_reading_order": [],
+                "unreferenced_docs": [],
+            },
+        }
+
+    def fake_audit_architecture_inventory(_inventory):
+        class _Result:
+            ok = True
+            errors: list[str] = []
+            warnings: list[str] = []
+
+        return _Result()
+
+    monkeypatch.setattr(
+        bootstrap_read_models, "_build_architecture_inventory_for_bootstrap", fake_build_architecture_inventory
+    )
+    monkeypatch.setattr(
+        bootstrap_read_models, "_audit_architecture_inventory_for_bootstrap", fake_audit_architecture_inventory
+    )
+    bootstrap_read_models._clear_bootstrap_architecture_inventory_cache_for_tests()
+
+    first = client.get("/api/bootstrap")
+    second = client.get("/api/bootstrap")
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    summary = first.json().get("architecture_inventory_summary") or {}
+    assert isinstance(summary, dict)
+    assert summary.get("generated_at") == "2026-04-02T00:00:00+00:00"
+    assert (summary.get("counts") or {}).get("execution_providers") == 3
+    assert (summary.get("audit") or {}).get("ok") is True
+    cache_status = summary.get("cache_status") or {}
+    assert isinstance(cache_status, dict)
+    assert isinstance(cache_status.get("hit_count", 0), int)
+    assert isinstance(cache_status.get("miss_count", 0), int)
+    mirrored = ((first.json().get("config") or {}).get("architecture_inventory_summary") or {})
+    assert mirrored.get("generated_at") == "2026-04-02T00:00:00+00:00"
+    assert ((mirrored.get("audit") or {}).get("ok")) is True
+    assert calls["build_inventory"] == 1

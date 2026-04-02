@@ -497,6 +497,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             workspaceRole={String(currentWorkspaceRole || '').trim()}
             canManageUsers={state.canManageUsers}
             doctorStatus={state.workspaceDoctorQuery.data ?? null}
+            architectureInventorySummary={state.bootstrap.data?.architecture_inventory_summary ?? null}
             doctorLoading={Boolean(state.workspaceDoctorQuery.isLoading || state.workspaceDoctorQuery.isFetching)}
             doctorError={state.workspaceDoctorQuery.isError ? 'Unable to load ConstructOS Doctor status.' : null}
             onSeedDoctor={() => state.seedWorkspaceDoctorMutation.mutateAsync()}

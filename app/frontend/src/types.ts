@@ -379,6 +379,35 @@ export type AppVersionPayload = {
   deployed_at_utc: string
 }
 
+export type ArchitectureInventorySummary = {
+  generated_at: string
+  counts: Record<string, number>
+  internal_docs: {
+    existing_docs_count: number
+    reading_order_count: number
+    missing_from_reading_order_count: number
+    unreferenced_docs_count: number
+    missing_from_reading_order: string[]
+    unreferenced_docs: string[]
+  }
+  audit: {
+    ok: boolean
+    error_count: number
+    warning_count: number
+    errors: string[]
+    warnings: string[]
+  }
+  cache_ttl_seconds: number
+  cache_hit: boolean
+  cache_status: {
+    key: string
+    has_payload: boolean
+    hit_count: number
+    miss_count: number
+    expires_in_seconds: number
+  }
+}
+
 export type BootstrapPayload = {
   current_user: User
   workspaces: Workspace[]
@@ -393,6 +422,7 @@ export type BootstrapPayload = {
   agent_chat_default_reasoning_effort?: ChatReasoningEffort | string
   agent_chat_available_models?: string[]
   agent_chat_available_mcp_servers?: AgentChatMcpServer[]
+  architecture_inventory_summary?: ArchitectureInventorySummary
   users: Array<{ id: string; username: string; full_name: string; user_type: 'human' | 'agent' }>
   project_members: Array<{ project_id: string; user_id: string; role: string }>
   notifications: Notification[]

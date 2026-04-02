@@ -51,10 +51,30 @@ def _load_positive_float_env(name: str, default: float) -> float:
 
 _BOOTSTRAP_DISCOVERY_CACHE_TTL_SECONDS = _load_positive_float_env("BOOTSTRAP_DISCOVERY_CACHE_TTL_SECONDS", 30.0)
 _BOOTSTRAP_DISCOVERY_CACHE_KEY = "bootstrap_discovery_registry"
+_BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_TTL_SECONDS = _load_positive_float_env(
+    "BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_TTL_SECONDS", 60.0
+)
+_BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_KEY = "bootstrap_architecture_inventory_summary"
 
 
 def _clear_bootstrap_discovery_cache_for_tests() -> None:
     clear_bootstrap_cache(key=_BOOTSTRAP_DISCOVERY_CACHE_KEY)
+
+
+def _clear_bootstrap_architecture_inventory_cache_for_tests() -> None:
+    clear_bootstrap_cache(key=_BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_KEY)
+
+
+def _build_architecture_inventory_for_bootstrap() -> dict[str, Any]:
+    from features.architecture_inventory import build_architecture_inventory
+
+    return build_architecture_inventory()
+
+
+def _audit_architecture_inventory_for_bootstrap(inventory: dict[str, Any]):
+    from features.architecture_inventory import audit_architecture_inventory
+
+    return audit_architecture_inventory(inventory)
 
 
 def _bootstrap_discovery_snapshot(*, force_refresh: bool = False) -> dict[str, Any]:
@@ -80,6 +100,46 @@ def _bootstrap_discovery_snapshot(*, force_refresh: bool = False) -> dict[str, A
     )
     snapshot["cache_hit"] = bool(cache_hit)
     snapshot["cache_status"] = bootstrap_cache_status(key=_BOOTSTRAP_DISCOVERY_CACHE_KEY)
+    return snapshot
+
+
+def _bootstrap_architecture_inventory_summary_snapshot(*, force_refresh: bool = False) -> dict[str, Any]:
+    def _compute() -> dict[str, Any]:
+        inventory = _build_architecture_inventory_for_bootstrap()
+        audit = _audit_architecture_inventory_for_bootstrap(inventory)
+        counts = dict(inventory.get("counts") or {})
+        internal_docs = dict(inventory.get("internal_docs") or {})
+        missing_docs = list(internal_docs.get("missing_from_reading_order") or [])
+        unreferenced_docs = list(internal_docs.get("unreferenced_docs") or [])
+        return {
+            "generated_at": str(inventory.get("generated_at") or ""),
+            "counts": counts,
+            "internal_docs": {
+                "existing_docs_count": len(internal_docs.get("existing_docs") or []),
+                "reading_order_count": len(internal_docs.get("reading_order") or []),
+                "missing_from_reading_order_count": len(missing_docs),
+                "unreferenced_docs_count": len(unreferenced_docs),
+                "missing_from_reading_order": missing_docs,
+                "unreferenced_docs": unreferenced_docs,
+            },
+            "audit": {
+                "ok": bool(audit.ok),
+                "error_count": len(audit.errors),
+                "warning_count": len(audit.warnings),
+                "errors": list(audit.errors),
+                "warnings": list(audit.warnings),
+            },
+            "cache_ttl_seconds": float(_BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_TTL_SECONDS),
+        }
+
+    snapshot, cache_hit = get_or_compute_bootstrap_cache(
+        key=_BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_KEY,
+        ttl_seconds=_BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_TTL_SECONDS,
+        force_refresh=force_refresh,
+        compute=_compute,
+    )
+    snapshot["cache_hit"] = bool(cache_hit)
+    snapshot["cache_status"] = bootstrap_cache_status(key=_BOOTSTRAP_ARCHITECTURE_INVENTORY_CACHE_KEY)
     return snapshot
 
 
@@ -243,6 +303,7 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
         )
     vector_enabled = bool(vector_store_enabled())
     discovery_snapshot = _bootstrap_discovery_snapshot()
+    architecture_inventory_summary = _bootstrap_architecture_inventory_summary_snapshot()
     discovered_agent_chat_models = list(discovery_snapshot.get("discovered_agent_chat_models") or [])
     discovered_default_agent_chat_model = str(discovery_snapshot.get("discovered_default_agent_chat_model") or "").strip()
     preferred_default_provider = _resolve_available_default_provider()
@@ -326,6 +387,7 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
         "agent_chat_available_models": agent_chat_available_models,
         "agent_chat_available_mcp_servers": agent_chat_available_mcp_servers,
         "agent_chat_registry_debug": agent_chat_registry_debug,
+        "architecture_inventory_summary": architecture_inventory_summary,
         # Backward-compatible mirror for older UI bundles reading bootstrap.config.*
         "config": {
             "embedding_allowed_models": embedding_models,
@@ -338,6 +400,7 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             "agent_chat_available_models": agent_chat_available_models,
             "agent_chat_available_mcp_servers": agent_chat_available_mcp_servers,
             "agent_chat_registry_debug": agent_chat_registry_debug,
+            "architecture_inventory_summary": architecture_inventory_summary,
         },
         "users": [{"id": u.id, "username": u.username, "full_name": u.full_name, "user_type": u.user_type} for u in users],
         "project_members": [

@@ -20,6 +20,7 @@ import type {
   Specification,
   Task,
   WorkspaceDoctorStatus,
+  ArchitectureInventorySummary,
   WorkspaceSkill,
   WorkspaceSkillsPage,
 } from '../types'
@@ -356,6 +357,7 @@ function WorkspaceAuthCard({
 
 function WorkspaceDoctorCard({
   doctorStatus,
+  architectureInventorySummary,
   doctorLoading,
   doctorError,
   canManage,
@@ -367,6 +369,7 @@ function WorkspaceDoctorCard({
   resetDoctorPending,
 }: {
   doctorStatus: WorkspaceDoctorStatus | null
+  architectureInventorySummary: ArchitectureInventorySummary | null
   doctorLoading: boolean
   doctorError: string | null
   canManage: boolean
@@ -399,6 +402,11 @@ function WorkspaceDoctorCard({
     setSelectedRunId(String((doctorStatus?.last_run ?? recentRuns[0])?.id || ''))
   }, [doctorStatus?.last_run, recentRuns, selectedRunId])
   const checks = Array.isArray(selectedRun?.summary?.checks) ? selectedRun.summary.checks : []
+  const architectureAudit = architectureInventorySummary?.audit ?? null
+  const architectureCounts = architectureInventorySummary?.counts ?? null
+  const architectureGeneratedAt = architectureInventorySummary?.generated_at ?? null
+  const architectureCacheStatus = architectureInventorySummary?.cache_status ?? null
+  const architectureAuditLabel = architectureAudit?.ok ? 'Healthy' : 'Issues detected'
   return (
     <section className="profile-pane-card" aria-label="ConstructOS Doctor" data-tour-id="workspace-doctor-card">
       <div className="profile-pane-head">
@@ -486,6 +494,47 @@ function WorkspaceDoctorCard({
           </dd>
         </div>
       </dl>
+      {architectureInventorySummary ? (
+        <>
+          <p className="meta" style={{ marginTop: 12 }}>
+            Runtime contract summary from `/api/bootstrap`.
+          </p>
+          <dl className="profile-facts" style={{ marginTop: 8 }}>
+            <div className="profile-fact">
+              <dt>Architecture audit</dt>
+              <dd>{architectureAuditLabel}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Audit errors / warnings</dt>
+              <dd>
+                {architectureAudit?.error_count ?? 0} / {architectureAudit?.warning_count ?? 0}
+              </dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Execution providers / plugins</dt>
+              <dd>
+                {Number(architectureCounts?.execution_providers ?? 0)} / {Number(architectureCounts?.workflow_plugins ?? 0)}
+              </dd>
+            </div>
+            <div className="profile-fact">
+              <dt>MCP tools / prompt templates</dt>
+              <dd>
+                {Number(architectureCounts?.constructos_mcp_tools ?? 0)} / {Number(architectureCounts?.prompt_templates ?? 0)}
+              </dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Summary generated</dt>
+              <dd>{formatDateTime(architectureGeneratedAt)}</dd>
+            </div>
+            <div className="profile-fact">
+              <dt>Summary cache</dt>
+              <dd>
+                hits {Number(architectureCacheStatus?.hit_count ?? 0)} / misses {Number(architectureCacheStatus?.miss_count ?? 0)}
+              </dd>
+            </div>
+          </dl>
+        </>
+      ) : null}
       {recentRuns.length > 0 ? (
         <div style={{ marginTop: 14 }}>
           <strong>Recent runs</strong>
@@ -2272,6 +2321,7 @@ export function WorkspacePanel({
   workspaceRole,
   canManageUsers,
   doctorStatus,
+  architectureInventorySummary,
   doctorLoading,
   doctorError,
   onSeedDoctor,
@@ -2320,6 +2370,7 @@ export function WorkspacePanel({
   workspaceRole: string
   canManageUsers: boolean
   doctorStatus: WorkspaceDoctorStatus | null
+  architectureInventorySummary: ArchitectureInventorySummary | null
   doctorLoading: boolean
   doctorError: string | null
   onSeedDoctor: () => Promise<unknown>
@@ -3090,6 +3141,7 @@ export function WorkspacePanel({
             <div className="profile-pane-grid profile-workspace-grid">
               <WorkspaceDoctorCard
                 doctorStatus={doctorStatus}
+                architectureInventorySummary={architectureInventorySummary}
                 doctorLoading={doctorLoading}
                 doctorError={doctorError}
                 canManage={canManageUsers}
