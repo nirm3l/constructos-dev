@@ -19,7 +19,8 @@ It is organized as a single reading path, with each document containing:
 6. `05-testing-and-quality.md`
 7. `06-omc-patterns-and-adoption.md`
 8. `10-orchestration-hardening-plan.md`
-9. `99-glossary.md`
+9. `11-claw-code-parity-analysis.md`
+10. `99-glossary.md`
 
 Use `90-policy-appendix.md` when you need full legacy policy details.
 
@@ -32,7 +33,8 @@ flowchart TD
   E --> F[05 Testing and Quality]
   F --> G[06 OMC Patterns and Adoption]
   G --> J[10 Orchestration Hardening Plan]
-  J --> H[99 Glossary]
+  J --> K[11 Claw Code Parity Analysis]
+  K --> H[99 Glossary]
   D --> I[90 Policy Appendix when deep policy detail is needed]
 ```
 
@@ -47,6 +49,7 @@ flowchart TD
 | Test structure and enforcement | `05-testing-and-quality.md` | testing and quality policy |
 | OMC-inspired adoption roadmap | `06-omc-patterns-and-adoption.md` | orchestration pattern adoption policy |
 | Prompt-agnostic orchestration hardening execution plan | `10-orchestration-hardening-plan.md` | runtime determinism and orchestration quality policy |
+| Claw parity-inspired architecture inventory and reimplementation guidance | `11-claw-code-parity-analysis.md` | runtime inventory, audit, and registry adoption policy |
 
 ## Non-Negotiable Boundaries
 
