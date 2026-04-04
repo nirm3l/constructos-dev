@@ -23,10 +23,12 @@ from features.tasks.command_handlers import CommandContext as TaskCommandContext
 from features.tasks.api import list_comments as list_task_comments
 from features.tasks.application import TaskApplicationService
 from shared.core import CommentCreate, TaskCreate, User, ensure_role, load_note_view, load_specification_view, load_task_view
+from shared.eventing import rebuild_state
 from shared.models import DoctorRun, Note, Project, ProjectPluginConfig, SessionLocal, Specification, Task, TaskComment, WorkspaceDoctorConfig
 from shared.command_ids import derive_child_command_id
 from shared.project_repository import ensure_project_repository_initialized
 from shared.settings import AGENT_ENABLED_PLUGINS, AGENT_RUNNER_ENABLED
+from shared.automation_errors import classify_automation_error
 
 DOCTOR_PLUGIN_KEY = "doctor"
 DOCTOR_FIXTURE_VERSION = "2"
@@ -41,6 +43,7 @@ DOCTOR_TASK_NOTE_TITLE = "Doctor task note"
 DOCTOR_TASK_COMMENT_BODY = "Doctor fixture task comment validates task comment persistence."
 DOCTOR_TEAM_TASK_CODES = ("dev-a", "dev-b", "qa-a", "lead-a")
 DOCTOR_RUNTIME_CONTRACT_AUDIT_STALE_HOURS = 24.0
+DOCTOR_QUICK_ACTION_COOLDOWN_SECONDS = 20
 DOCTOR_TASK_BLUEPRINTS = (
     {
         "code": "dev-a",
@@ -436,7 +439,15 @@ def _seed_doctor_delivery_fixture(
     required_codes = set(DOCTOR_TEAM_TASK_CODES)
     if not required_codes.issubset(task_by_code.keys()):
         missing = sorted(required_codes.difference(task_by_code.keys()))
-        raise HTTPException(status_code=500, detail=f"Doctor fixture tasks are missing codes: {', '.join(missing)}")
+        return {
+            "ok": False,
+            "error": f"Doctor fixture tasks are missing codes: {', '.join(missing)}",
+            "missing_codes": missing,
+            "project": project_payload,
+            "manifest_path": manifest_path,
+            "task_ids": {code: str((task_by_code.get(code) or {}).get("id") or "") for code in sorted(required_codes)},
+            "deploy_snapshot": None,
+        }
 
     timestamp = _now_utc().replace(microsecond=0).isoformat().replace("+00:00", "Z")
     deploy_snapshot = {
@@ -560,6 +571,7 @@ def _seed_doctor_delivery_fixture(
 
     db.commit()
     return {
+        "ok": True,
         "project": project_payload,
         "manifest_path": manifest_path,
         "task_ids": {code: str((task_by_code.get(code) or {}).get("id") or "") for code in sorted(required_codes)},
@@ -1203,7 +1215,397 @@ def _record_doctor_quick_action_event(
     db.commit()
 
 
-def _ensure_doctor_team_tasks(*, gateway: Any, workspace_id: str, project_id: str, command_id: str | None = None) -> dict[str, Any]:
+def _normalize_doctor_event_at(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _find_latest_quick_action_event(
+    db: Session,
+    *,
+    workspace_id: str,
+    action_id: str,
+) -> tuple[DoctorRun, dict[str, Any]] | None:
+    normalized_action_id = str(action_id or "").strip()
+    if not normalized_action_id:
+        return None
+    rows = db.execute(
+        select(DoctorRun).where(
+            DoctorRun.workspace_id == workspace_id,
+            DoctorRun.is_deleted == False,  # noqa: E712
+        ).order_by(DoctorRun.started_at.desc(), DoctorRun.id.desc()).limit(60)
+    ).scalars().all()
+    for row in rows:
+        summary = _doctor_run_summary_payload(row)
+        if not _is_quick_action_summary(summary):
+            continue
+        if str(summary.get("action_id") or "").strip() != normalized_action_id:
+            continue
+        return row, summary
+    return None
+
+
+def _doctor_quick_action_cooldown_state(
+    db: Session,
+    *,
+    workspace_id: str,
+    action_id: str,
+) -> dict[str, Any]:
+    latest_event = _find_latest_quick_action_event(
+        db,
+        workspace_id=workspace_id,
+        action_id=action_id,
+    )
+    if latest_event is None:
+        return {"active": False}
+    row, summary = latest_event
+    at_value = _normalize_doctor_event_at(
+        getattr(row, "finished_at", None)
+        or getattr(row, "started_at", None)
+        or getattr(row, "created_at", None)
+    )
+    if at_value is None:
+        return {"active": False}
+    now_utc = _now_utc()
+    elapsed_seconds = max(0.0, (now_utc - at_value).total_seconds())
+    cooldown_seconds = int(DOCTOR_QUICK_ACTION_COOLDOWN_SECONDS)
+    if elapsed_seconds >= float(cooldown_seconds):
+        return {"active": False}
+    retry_after_seconds = max(1, int(round(float(cooldown_seconds) - elapsed_seconds)))
+    return {
+        "active": True,
+        "retry_after_seconds": retry_after_seconds,
+        "cooldown_seconds": cooldown_seconds,
+        "last_event_at": at_value.isoformat(),
+        "last_event_message": str(summary.get("message") or "").strip() or None,
+    }
+
+
+def _doctor_team_slot_integrity(items: list[dict[str, Any]]) -> dict[str, Any]:
+    expected_slots = [str(code or "").strip().lower() for code in DOCTOR_TEAM_TASK_CODES if str(code or "").strip()]
+    expected_slot_set = set(expected_slots)
+    expected_titles = {
+        str(item.get("code") or "").strip().lower(): str(item.get("title") or "").strip()
+        for item in DOCTOR_TASK_BLUEPRINTS
+        if isinstance(item, dict) and str(item.get("code") or "").strip()
+    }
+    by_slot: dict[str, list[dict[str, str]]] = {}
+    unexpected_slots: dict[str, list[str]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        slot = str(item.get("assigned_agent_code") or "").strip().lower()
+        if not slot:
+            continue
+        task_id = str(item.get("id") or "").strip()
+        title = str(item.get("title") or "").strip()
+        payload = {
+            "task_id": task_id,
+            "title": title,
+        }
+        if slot in expected_slot_set:
+            by_slot.setdefault(slot, []).append(payload)
+        else:
+            unexpected_slots.setdefault(slot, []).append(task_id)
+    missing_slots = [slot for slot in expected_slots if slot not in by_slot]
+    duplicate_slots = [slot for slot in expected_slots if len(by_slot.get(slot) or []) > 1]
+    slot_task_ids = {
+        slot: [
+            str(entry.get("task_id") or "").strip()
+            for entry in (by_slot.get(slot) or [])
+            if str(entry.get("task_id") or "").strip()
+        ]
+        for slot in expected_slots
+        if by_slot.get(slot)
+    }
+    title_mismatches: list[dict[str, str | None]] = []
+    for slot in expected_slots:
+        expected_title = str(expected_titles.get(slot) or "").strip() or None
+        if not expected_title:
+            continue
+        for entry in by_slot.get(slot) or []:
+            observed_title = str(entry.get("title") or "").strip()
+            if observed_title == expected_title:
+                continue
+            title_mismatches.append(
+                {
+                    "slot": slot,
+                    "task_id": str(entry.get("task_id") or "").strip() or None,
+                    "expected_title": expected_title,
+                    "observed_title": observed_title or None,
+                }
+            )
+    slot_integrity_ok = (
+        len(missing_slots) == 0
+        and len(duplicate_slots) == 0
+        and len(title_mismatches) == 0
+    )
+    return {
+        "expected_slots": expected_slots,
+        "present_slots": [slot for slot in expected_slots if slot in by_slot],
+        "missing_slots": missing_slots,
+        "duplicate_slots": duplicate_slots,
+        "slot_task_ids": slot_task_ids,
+        "title_mismatches": title_mismatches,
+        "unexpected_slots": unexpected_slots,
+        "slot_integrity_ok": bool(slot_integrity_ok),
+    }
+
+
+def _doctor_executor_worktree_guard_diagnostics() -> dict[str, Any]:
+    try:
+        from features.agents.executor import (
+            _repo_root_changed_outside_task_worktree,
+            _should_prepare_task_worktree,
+        )
+    except Exception as exc:  # pragma: no cover - defensive import guard
+        return {
+            "ok": False,
+            "status": "failing",
+            "issues": ["executor_guard_diagnostics_unavailable"],
+            "metrics": {
+                "runner_artifact_allowlist_enforced": False,
+                "real_repo_root_edits_detected": False,
+                "worktree_policy_requires_team_mode": False,
+                "worktree_policy_requires_git_delivery": False,
+                "worktree_policy_requires_developer_role": False,
+                "worktree_policy_accepts_developer_assignee": False,
+            },
+            "summary": f"Executor guard diagnostics unavailable: {exc}",
+        }
+
+    runner_artifact_allowlist_enforced = not _repo_root_changed_outside_task_worktree(
+        repo_root_before={
+            "head_sha": "1111111",
+            "status_entries": [],
+        },
+        repo_root_after={
+            "head_sha": "2222222",
+            "status_entries": [
+                "?? .constructos.host.compose.yml",
+                "?? .constructos/",
+            ],
+        },
+    )
+    real_repo_root_edits_detected = _repo_root_changed_outside_task_worktree(
+        repo_root_before={
+            "head_sha": "1111111",
+            "status_entries": [],
+        },
+        repo_root_after={
+            "head_sha": "1111111",
+            "status_entries": [
+                " M src/app.js",
+            ],
+        },
+    )
+    worktree_policy_requires_team_mode = not _should_prepare_task_worktree(
+        team_mode_enabled=False,
+        git_delivery_enabled=True,
+        task_status="In Progress",
+        actor_project_role="DeveloperAgent",
+        assignee_project_role="DeveloperAgent",
+    )
+    worktree_policy_requires_git_delivery = not _should_prepare_task_worktree(
+        team_mode_enabled=True,
+        git_delivery_enabled=False,
+        task_status="In Progress",
+        actor_project_role="DeveloperAgent",
+        assignee_project_role="DeveloperAgent",
+    )
+    worktree_policy_requires_developer_role = not _should_prepare_task_worktree(
+        team_mode_enabled=True,
+        git_delivery_enabled=True,
+        task_status="In Progress",
+        actor_project_role="Member",
+        assignee_project_role="Member",
+    )
+    worktree_policy_accepts_developer_assignee = _should_prepare_task_worktree(
+        team_mode_enabled=True,
+        git_delivery_enabled=True,
+        task_status="In Progress",
+        actor_project_role="Owner",
+        assignee_project_role="DeveloperAgent",
+    )
+
+    metrics = {
+        "runner_artifact_allowlist_enforced": bool(runner_artifact_allowlist_enforced),
+        "real_repo_root_edits_detected": bool(real_repo_root_edits_detected),
+        "worktree_policy_requires_team_mode": bool(worktree_policy_requires_team_mode),
+        "worktree_policy_requires_git_delivery": bool(worktree_policy_requires_git_delivery),
+        "worktree_policy_requires_developer_role": bool(worktree_policy_requires_developer_role),
+        "worktree_policy_accepts_developer_assignee": bool(worktree_policy_accepts_developer_assignee),
+    }
+    issues: list[str] = []
+    if not runner_artifact_allowlist_enforced:
+        issues.append("executor_guard_runner_artifact_allowlist_missing")
+    if not real_repo_root_edits_detected:
+        issues.append("executor_guard_repo_root_edit_detection_missing")
+    if not worktree_policy_requires_team_mode:
+        issues.append("executor_guard_team_mode_gate_missing")
+    if not worktree_policy_requires_git_delivery:
+        issues.append("executor_guard_git_delivery_gate_missing")
+    if not worktree_policy_requires_developer_role:
+        issues.append("executor_guard_developer_role_gate_missing")
+    if not worktree_policy_accepts_developer_assignee:
+        issues.append("executor_guard_developer_assignee_gate_missing")
+    status = "healthy" if not issues else "failing"
+    return {
+        "ok": len(issues) == 0,
+        "status": status,
+        "issues": issues,
+        "metrics": metrics,
+        "summary": "Executor task worktree isolation guardrails are healthy." if not issues else "Executor task worktree isolation guardrails require attention.",
+    }
+
+
+def _doctor_recent_worktree_isolation_incidents(db: Session, tasks: list[Any]) -> dict[str, Any]:
+    incident_items: list[dict[str, Any]] = []
+    code_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    for task in tasks:
+        if task is None:
+            continue
+        task_id = str(getattr(task, "id", "") or "").strip()
+        if not task_id:
+            continue
+        task_state, _ = rebuild_state(db, "Task", task_id)
+        error_text = str(task_state.get("last_agent_error") or "").strip()
+        if not error_text:
+            continue
+        classified = classify_automation_error(error_text)
+        if not bool(classified.get("worktree_isolation_related")):
+            continue
+        happened_at = (
+            str(task_state.get("automation_failed_at") or "").strip()
+            or str(task_state.get("last_agent_run_at") or "").strip()
+            or str(task_state.get("updated_at") or "").strip()
+            or None
+        )
+        source = str(task_state.get("last_requested_source") or "").strip() or None
+        source_task_id = str(task_state.get("last_requested_source_task_id") or "").strip() or None
+        task_project_id = (
+            str(task_state.get("project_id") or "").strip()
+            or str(getattr(task, "project_id", "") or "").strip()
+            or None
+        )
+        task_status = str(task_state.get("status") or getattr(task, "status", "") or "").strip()
+        normalized_code = str(classified.get("code") or "").strip().upper() or "UNKNOWN"
+        normalized_source = str(source or "").strip().lower() or "unknown"
+        is_open = task_status.lower() not in {"done", "completed"}
+        code_counts[normalized_code] = int(code_counts.get(normalized_code, 0)) + 1
+        source_counts[normalized_source] = int(source_counts.get(normalized_source, 0)) + 1
+        incident_items.append(
+            {
+                "task_id": task_id,
+                "title": str(task_state.get("title") or getattr(task, "title", "") or "").strip(),
+                "status": task_status,
+                "incident_state": "open" if is_open else "resolved",
+                "automation_state": str(task_state.get("automation_state") or "").strip(),
+                "error_code": normalized_code,
+                "error_title": str(classified.get("title") or "").strip() or None,
+                "error_message": str(classified.get("message") or "").strip() or None,
+                "happened_at": happened_at,
+                "source": source,
+                "source_task_id": source_task_id,
+                "task_link": (
+                    f"?tab=tasks&project={task_project_id}&task={task_id}"
+                    if task_project_id
+                    else None
+                ),
+            }
+        )
+    incident_items_sorted = sorted(
+        incident_items,
+        key=lambda item: str(item.get("happened_at") or ""),
+        reverse=True,
+    )
+    latest_incident_at = (
+        str((incident_items_sorted[0] or {}).get("happened_at") or "").strip()
+        if incident_items_sorted
+        else None
+    )
+    return {
+        "incident_count": len(incident_items),
+        "open_incident_count": sum(1 for item in incident_items if str(item.get("status") or "").strip().lower() not in {"done", "completed"}),
+        "resolved_incident_count": sum(1 for item in incident_items if str(item.get("status") or "").strip().lower() in {"done", "completed"}),
+        "latest_incident_at": latest_incident_at,
+        "code_counts": [
+            {"code": key, "count": int(value)}
+            for key, value in sorted(code_counts.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))
+        ],
+        "source_counts": [
+            {"source": key, "count": int(value)}
+            for key, value in sorted(source_counts.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))
+        ],
+        "items": incident_items_sorted[:10],
+    }
+
+
+def _doctor_suggested_quick_action_for_check(check_id: str) -> str | None:
+    normalized = str(check_id or "").strip().lower()
+    if not normalized:
+        return None
+    action_map = {
+        "seeded_team_slot_integrity": "doctor-plugin-wiring",
+        "seeded_team_tasks": "doctor-plugin-wiring",
+        "team_mode_enabled": "doctor-plugin-wiring",
+        "git_delivery_enabled": "doctor-plugin-wiring",
+        "team_mode_workflow": "recovery-sequence",
+        "delivery_workflow": "recovery-sequence",
+        "compose_manifest_present": "recovery-sequence",
+        "repo_context_present": "recovery-sequence",
+        "git_contract_ok": "recovery-sequence",
+        "qa_handoff_current_cycle_ok": "recovery-sequence",
+        "qa_has_verifiable_artifacts": "recovery-sequence",
+        "deploy_execution_evidence_present": "recovery-sequence",
+        "executor_worktree_isolation_guard": "executor-worktree-guard-diagnostics",
+        "recent_executor_worktree_incidents": "executor-worktree-guard-diagnostics",
+    }
+    return action_map.get(normalized)
+
+
+def _doctor_enrich_run_check(item: dict[str, Any]) -> dict[str, Any]:
+    check = dict(item or {})
+    check_id = str(check.get("id") or "").strip()
+    status = str(check.get("status") or "").strip().lower()
+    details = check.get("details")
+    details_payload = dict(details or {}) if isinstance(details, dict) else {}
+    severity = "high" if status == "failed" else ("medium" if status == "warning" else "low")
+    suggested_action_id = _doctor_suggested_quick_action_for_check(check_id)
+    if status in {"passed"}:
+        suggested_action_id = None
+    rationale_map = {
+        "seeded_team_slot_integrity": "Doctor fixture team slots must match canonical role allocation.",
+        "seeded_team_tasks": "Doctor fixture must include the canonical seeded team tasks.",
+        "team_mode_enabled": "Doctor workflows require Team Mode plugin wiring.",
+        "git_delivery_enabled": "Doctor workflows require Git Delivery plugin wiring.",
+        "team_mode_workflow": "Team Mode topology and role wiring must satisfy required checks.",
+        "delivery_workflow": "Delivery workflow must satisfy evidence and runtime contracts.",
+        "executor_worktree_isolation_guard": "Executor task automation must be isolated to task worktrees and branch-level edits.",
+        "recent_executor_worktree_incidents": "Recent task automation incidents indicate possible executor worktree isolation regressions.",
+    }
+    runbook = {
+        "suggested_quick_action_id": suggested_action_id,
+        "severity": severity,
+        "rationale": rationale_map.get(check_id) or "Review check details and execute the suggested quick action.",
+    }
+    details_payload["runbook"] = runbook
+    check["details"] = details_payload
+    return check
+
+
+def _ensure_doctor_team_tasks(
+    *,
+    gateway: Any,
+    workspace_id: str,
+    project_id: str,
+    command_id: str | None = None,
+    reconcile_assignments: bool = False,
+) -> dict[str, Any]:
     listed = gateway.list_tasks(
         workspace_id=workspace_id,
         project_id=project_id,
@@ -1213,15 +1615,56 @@ def _ensure_doctor_team_tasks(*, gateway: Any, workspace_id: str, project_id: st
     items = listed.get("items") if isinstance(listed, dict) else []
     if not isinstance(items, list):
         items = []
-    existing_by_code = {
-        str((item or {}).get("assigned_agent_code") or "").strip().lower(): item
-        for item in items
-        if isinstance(item, dict) and str((item or {}).get("assigned_agent_code") or "").strip()
+    expected_codes = [str(item or "").strip().lower() for item in DOCTOR_TEAM_TASK_CODES if str(item or "").strip()]
+    blueprint_by_code = {
+        str((item or {}).get("code") or "").strip().lower(): dict(item or {})
+        for item in DOCTOR_TASK_BLUEPRINTS
+        if isinstance(item, dict) and str((item or {}).get("code") or "").strip()
     }
+    by_code: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        code = str((item or {}).get("assigned_agent_code") or "").strip().lower()
+        if not code:
+            continue
+        by_code.setdefault(code, []).append(item)
+    missing_codes = [code for code in expected_codes if len(by_code.get(code) or []) <= 0]
+    reassigned_task_ids: list[dict[str, str]] = []
+    if reconcile_assignments:
+        for code in expected_codes:
+            entries = by_code.get(code) or []
+            if len(entries) <= 1:
+                continue
+            extras = entries[1:]
+            for entry in extras:
+                if not missing_codes:
+                    break
+                replacement_code = missing_codes.pop(0)
+                task_id = str((entry or {}).get("id") or "").strip()
+                if not task_id:
+                    continue
+                gateway.update_task(
+                    task_id=task_id,
+                    patch={"assigned_agent_code": replacement_code},
+                    command_id=_doctor_effective_command_id(
+                        command_id=command_id,
+                        kind="task",
+                        scope_id=project_id,
+                        suffix=f"reassign:{task_id[:8]}:{replacement_code}",
+                    ),
+                )
+                reassigned_task_ids.append(
+                    {
+                        "task_id": task_id,
+                        "from_code": code,
+                        "to_code": replacement_code,
+                    }
+                )
     created_task_ids: dict[str, str] = {}
     for idx, blueprint in enumerate(DOCTOR_TASK_BLUEPRINTS):
         code = str(blueprint["code"]).strip().lower()
-        if code in existing_by_code:
+        if code in expected_codes and code not in missing_codes:
             continue
         created = gateway.create_task(
             workspace_id=workspace_id,
@@ -1244,9 +1687,52 @@ def _ensure_doctor_team_tasks(*, gateway: Any, workspace_id: str, project_id: st
         archived=False,
         limit=100,
     )
+    refreshed_items = refreshed.get("items") if isinstance(refreshed, dict) else []
+    if not isinstance(refreshed_items, list):
+        refreshed_items = []
+    title_updates: list[dict[str, str]] = []
+    for code in expected_codes:
+        expected_title = str((blueprint_by_code.get(code) or {}).get("title") or "").strip()
+        if not expected_title:
+            continue
+        matching = [
+            item for item in refreshed_items
+            if isinstance(item, dict)
+            and str((item or {}).get("assigned_agent_code") or "").strip().lower() == code
+        ]
+        for item in matching[:1]:
+            task_id = str((item or {}).get("id") or "").strip()
+            observed_title = str((item or {}).get("title") or "").strip()
+            if not task_id or observed_title == expected_title:
+                continue
+            gateway.update_task(
+                task_id=task_id,
+                patch={"title": expected_title},
+                command_id=_doctor_effective_command_id(
+                    command_id=command_id,
+                    kind="task",
+                    scope_id=project_id,
+                    suffix=f"retitle:{task_id[:8]}",
+                ),
+            )
+            title_updates.append(
+                {
+                    "task_id": task_id,
+                    "from_title": observed_title,
+                    "to_title": expected_title,
+                }
+            )
+    final_listed = gateway.list_tasks(
+        workspace_id=workspace_id,
+        project_id=project_id,
+        archived=False,
+        limit=100,
+    )
     return {
         "created_task_ids": created_task_ids,
-        "items": refreshed.get("items") if isinstance(refreshed, dict) else [],
+        "reassigned_task_ids": reassigned_task_ids,
+        "title_updates": title_updates,
+        "items": final_listed.get("items") if isinstance(final_listed, dict) else [],
     }
 
 
@@ -1337,6 +1823,9 @@ def _build_doctor_runtime_health_snapshot(
     last_run_status: str | None,
     runtime_contract_audit_last_at: str | None = None,
     runtime_contract_audit_age_hours: float | None = None,
+    recent_worktree_incident_count: int = 0,
+    recent_worktree_open_incident_count: int = 0,
+    recent_worktree_latest_incident_at: str | None = None,
 ) -> dict[str, Any]:
     from features.architecture_inventory import audit_architecture_inventory, build_architecture_inventory
 
@@ -1419,6 +1908,17 @@ def _build_doctor_runtime_health_snapshot(
     if not bool(mcp_status.get("has_payload")):
         agent_runtime_issues.append("mcp_registry_cache_cold")
     agent_runtime_status = "warning" if agent_runtime_issues else "healthy"
+    executor_guard = _doctor_executor_worktree_guard_diagnostics()
+    executor_guard_issues = [
+        str(item).strip()
+        for item in (executor_guard.get("issues") or [])
+        if str(item).strip()
+    ]
+    executor_guard_status = str(executor_guard.get("status") or "warning").strip().lower()
+    if executor_guard_status not in {"healthy", "warning", "failing"}:
+        executor_guard_status = "warning"
+    normalized_recent_incident_count = max(0, int(recent_worktree_incident_count or 0))
+    normalized_recent_open_incident_count = max(0, int(recent_worktree_open_incident_count or 0))
 
     domains = {
         "contracts": {
@@ -1490,6 +1990,19 @@ def _build_doctor_runtime_health_snapshot(
             },
             "issues": agent_runtime_issues,
         },
+        "executor_guardrails": {
+            "status": executor_guard_status,
+            "summary": str(executor_guard.get("summary") or "").strip() or "Executor worktree guard diagnostics.",
+            "metrics": {
+                **dict(executor_guard.get("metrics") or {}),
+                "recent_worktree_incident_count": normalized_recent_incident_count,
+                "recent_worktree_open_incident_count": normalized_recent_open_incident_count,
+                "recent_worktree_latest_incident_at": (
+                    str(recent_worktree_latest_incident_at or "").strip() or None
+                ),
+            },
+            "issues": executor_guard_issues,
+        },
     }
 
     domain_statuses = [str((item or {}).get("status") or "warning") for item in domains.values()]
@@ -1550,6 +2063,19 @@ def _build_doctor_runtime_health_snapshot(
                 "description": "Enable AGENT_RUNNER and configure at least one provider auth source for predictable automation runs.",
             }
         )
+    if executor_guard_status in {"failing", "warning"} or normalized_recent_open_incident_count > 0:
+        recommended_actions.append(
+            {
+                "id": "executor-worktree-guard-diagnostics",
+                "priority": (
+                    "high"
+                    if executor_guard_status == "failing" or normalized_recent_open_incident_count > 0
+                    else "medium"
+                ),
+                "title": "Inspect executor worktree guardrails",
+                "description": "Validate task worktree isolation and repo-root edit detection guardrails for task automation.",
+            }
+        )
     if bootstrap_status == "warning":
         recommended_actions.append(
             {
@@ -1570,12 +2096,79 @@ def _build_doctor_runtime_health_snapshot(
         score -= int(domain_penalties.get(str(status).strip().lower(), 15))
     score = max(0, min(100, score))
 
+    priority_weights = {
+        "high": 80,
+        "medium": 45,
+        "low": 15,
+    }
+    action_scores: dict[str, int] = {}
+    for index, action in enumerate(recommended_actions):
+        action_id = str(action.get("id") or "").strip()
+        if not action_id:
+            continue
+        action_priority = str(action.get("priority") or "medium").strip().lower()
+        score_value = int(priority_weights.get(action_priority, 45))
+        score_value += max(0, (12 - index))
+        if action_id == "executor-worktree-guard-diagnostics":
+            score_value += min(40, normalized_recent_open_incident_count * 10)
+            score_value += min(20, normalized_recent_incident_count * 4)
+            if normalized_recent_open_incident_count > 0:
+                score_value += 25
+            if executor_guard_status == "failing":
+                score_value += 30
+        if action_id == "runtime-contract-audit":
+            if runtime_contract_audit_stale:
+                score_value += 25
+            score_value += min(20, contracts_error_count * 4)
+        if action_id == "recovery-sequence":
+            if overall_status == "failing":
+                score_value += 18
+        action_scores[action_id] = score_value
+    if normalized_recent_open_incident_count > 0:
+        executor_action_exists = any(
+            str(action.get("id") or "").strip() == "executor-worktree-guard-diagnostics"
+            for action in recommended_actions
+        )
+        if executor_action_exists:
+            action_scores["executor-worktree-guard-diagnostics"] = int(action_scores.get("executor-worktree-guard-diagnostics", 0)) + 10_000
+    recommended_actions_sorted = sorted(
+        recommended_actions,
+        key=lambda action: (
+            -int(action_scores.get(str(action.get("id") or "").strip(), 0)),
+            str(action.get("id") or "").strip(),
+        ),
+    )
+    if normalized_recent_open_incident_count > 0:
+        executor_index = next(
+            (
+                index
+                for index, action in enumerate(recommended_actions_sorted)
+                if str(action.get("id") or "").strip() == "executor-worktree-guard-diagnostics"
+            ),
+            None,
+        )
+        if isinstance(executor_index, int):
+            executor_action = recommended_actions_sorted.pop(executor_index)
+            recommended_actions_sorted.insert(0, executor_action)
+    recommended_primary_action_id = (
+        str((recommended_actions_sorted[0] or {}).get("id") or "").strip()
+        if recommended_actions_sorted
+        else None
+    )
+
     return {
         "generated_at": _now_utc().isoformat(),
         "overall_status": overall_status,
         "health_score": score,
         "domains": domains,
-        "recommended_actions": recommended_actions,
+        "recommended_primary_action_id": recommended_primary_action_id,
+        "recommended_actions": [
+            {
+                **dict(action),
+                "rank_score": int(action_scores.get(str(action.get("id") or "").strip(), 0)),
+            }
+            for action in recommended_actions_sorted
+        ],
     }
 
 
@@ -1589,6 +2182,17 @@ def get_doctor_status(db: Session, *, workspace_id: str, user: User) -> dict[str
     team_mode_enabled = _plugin_enabled(db, workspace_id=workspace_id, project_id=project.id, plugin_key="team_mode") if project else False
     git_delivery_enabled = _plugin_enabled(db, workspace_id=workspace_id, project_id=project.id, plugin_key="git_delivery") if project else False
     tasks = _task_rows(db, workspace_id=workspace_id, project_id=project.id) if project else []
+    recent_worktree_incidents = _doctor_recent_worktree_isolation_incidents(db, tasks) if project else {"incident_count": 0, "open_incident_count": 0, "items": []}
+    task_items_for_slot_integrity = [
+        {
+            "id": str(getattr(task, "id", "") or "").strip(),
+            "title": str(getattr(task, "title", "") or "").strip(),
+            "assigned_agent_code": str(getattr(task, "assigned_agent_code", "") or "").strip(),
+        }
+        for task in tasks
+        if str(getattr(task, "assigned_agent_code", "") or "").strip()
+    ]
+    slot_integrity = _doctor_team_slot_integrity(task_items_for_slot_integrity)
     seeded_team_tasks = [
         task for task in tasks
         if str(getattr(task, "assigned_agent_code", "") or "").strip().lower() in DOCTOR_TEAM_TASK_CODES
@@ -1695,7 +2299,45 @@ def get_doctor_status(db: Session, *, workspace_id: str, user: User) -> dict[str
         last_run_status=last_run_status,
         runtime_contract_audit_last_at=runtime_contract_audit_last_at,
         runtime_contract_audit_age_hours=runtime_contract_audit_age_hours,
+        recent_worktree_incident_count=int(recent_worktree_incidents.get("incident_count") or 0),
+        recent_worktree_open_incident_count=int(recent_worktree_incidents.get("open_incident_count") or 0),
+        recent_worktree_latest_incident_at=str(recent_worktree_incidents.get("latest_incident_at") or "").strip() or None,
     )
+    known_action_ids: set[str] = {
+        "doctor-plugin-wiring",
+        "recovery-sequence",
+        "runtime-contract-audit",
+        "warm-bootstrap-caches",
+        "descriptor-export-drift-check",
+        "agent-runtime-configuration",
+        "executor-worktree-guard-diagnostics",
+    }
+    for action in (runtime_health.get("recommended_actions") or []):
+        if not isinstance(action, dict):
+            continue
+        action_id = str(action.get("id") or "").strip()
+        if action_id:
+            known_action_ids.add(action_id)
+    if isinstance(last_action_payload, dict):
+        last_action_id = str(last_action_payload.get("id") or "").strip()
+        if last_action_id:
+            known_action_ids.add(last_action_id)
+    quick_action_cooldowns: dict[str, dict[str, Any]] = {}
+    for action_id in sorted(known_action_ids):
+        cooldown_state = _doctor_quick_action_cooldown_state(
+            db,
+            workspace_id=workspace_id,
+            action_id=action_id,
+        )
+        if not cooldown_state:
+            continue
+        quick_action_cooldowns[action_id] = {
+            "active": bool(cooldown_state.get("active")),
+            "retry_after_seconds": int(cooldown_state.get("retry_after_seconds") or 0),
+            "cooldown_seconds": int(cooldown_state.get("cooldown_seconds") or int(DOCTOR_QUICK_ACTION_COOLDOWN_SECONDS)),
+            "last_event_at": str(cooldown_state.get("last_event_at") or "").strip() or None,
+            "last_event_message": str(cooldown_state.get("last_event_message") or "").strip() or None,
+        }
     return {
         "workspace_id": workspace_id,
         "plugin_key": DOCTOR_PLUGIN_KEY,
@@ -1718,6 +2360,15 @@ def get_doctor_status(db: Session, *, workspace_id: str, user: User) -> dict[str
             "team_mode_enabled": team_mode_enabled,
             "git_delivery_enabled": git_delivery_enabled,
             "seeded_team_task_count": len(seeded_team_tasks),
+            "seeded_team_slot_integrity": bool(slot_integrity.get("slot_integrity_ok")),
+            "seeded_team_missing_slots": list(slot_integrity.get("missing_slots") or []),
+            "seeded_team_duplicate_slots": list(slot_integrity.get("duplicate_slots") or []),
+            "seeded_team_title_mismatches": list(slot_integrity.get("title_mismatches") or []),
+            "executor_worktree_isolation_guard": bool(
+                (((runtime_health.get("domains") or {}).get("executor_guardrails") or {}).get("status") == "healthy")
+            ),
+            "recent_executor_worktree_incident_count": int(recent_worktree_incidents.get("incident_count") or 0),
+            "recent_executor_worktree_open_incident_count": int(recent_worktree_incidents.get("open_incident_count") or 0),
             "task_count": len(tasks),
         },
         "last_seeded_at": getattr(config, "last_seeded_at", None).isoformat() if getattr(config, "last_seeded_at", None) else None,
@@ -1733,6 +2384,7 @@ def get_doctor_status(db: Session, *, workspace_id: str, user: User) -> dict[str
             else {}
         ),
         "recent_actions": recent_actions_payload,
+        "quick_action_cooldowns": quick_action_cooldowns,
         "quick_action_stats": action_stats,
         "runtime_health": runtime_health,
     }
@@ -1823,6 +2475,7 @@ def seed_doctor_workspace(db: Session, *, workspace_id: str, user: User, command
         workspace_id=workspace_id,
         project_id=project_id,
         command_id=command_id or _doctor_command_id("seed", workspace_id),
+        reconcile_assignments=True,
     )
 
     now = _now_utc()
@@ -1896,6 +2549,7 @@ def run_doctor_workspace(db: Session, *, workspace_id: str, user: User, command_
             workspace_id=workspace_id,
             project_id=project.id,
             command_id=command_id or _doctor_command_id("run", workspace_id),
+            reconcile_assignments=False,
         )
         fixture = _seed_doctor_delivery_fixture(
             db,
@@ -1924,6 +2578,14 @@ def run_doctor_workspace(db: Session, *, workspace_id: str, user: User, command_
             item for item in items
             if str((item or {}).get("assigned_agent_code") or "").strip().lower() in DOCTOR_TEAM_TASK_CODES
         ]
+        slot_integrity = _doctor_team_slot_integrity(
+            [item for item in items if isinstance(item, dict)]
+        )
+        executor_guard = _doctor_executor_worktree_guard_diagnostics()
+        recent_worktree_incidents = _doctor_recent_worktree_isolation_incidents(
+            db,
+            _task_rows(db, workspace_id=workspace_id, project_id=project.id)
+        )
 
         capability_map = capabilities.get("capabilities") if isinstance(capabilities, dict) else {}
         delivery_checks = delivery_verify.get("checks") if isinstance(delivery_verify, dict) else {}
@@ -1956,6 +2618,12 @@ def run_doctor_workspace(db: Session, *, workspace_id: str, user: User, command_
                 },
             },
             {
+                "id": "seeded_team_slot_integrity",
+                "label": "Seeded team slot integrity",
+                "status": "passed" if bool(slot_integrity.get("slot_integrity_ok")) else "failed",
+                "details": slot_integrity,
+            },
+            {
                 "id": "team_mode_workflow",
                 "label": "Team Mode workflow verification",
                 "status": "passed" if bool(team_verify.get("ok")) else "failed",
@@ -1966,6 +2634,22 @@ def run_doctor_workspace(db: Session, *, workspace_id: str, user: User, command_
                 "label": "Delivery workflow verification",
                 "status": "passed" if bool(delivery_verify.get("ok")) else "failed",
                 "details": delivery_verify,
+            },
+            {
+                "id": "executor_worktree_isolation_guard",
+                "label": "Executor worktree isolation guard",
+                "status": (
+                    "passed"
+                    if str(executor_guard.get("status") or "").strip().lower() == "healthy"
+                    else "failed"
+                ),
+                "details": executor_guard,
+            },
+            {
+                "id": "recent_executor_worktree_incidents",
+                "label": "Recent executor worktree incidents",
+                "status": "passed" if int(recent_worktree_incidents.get("incident_count") or 0) <= 0 else "failed",
+                "details": recent_worktree_incidents,
             },
         ])
         for check_id in (
@@ -1984,6 +2668,11 @@ def run_doctor_workspace(db: Session, *, workspace_id: str, user: User, command_
                 "details": {"value": bool((delivery_checks or {}).get(check_id))},
             })
         checks.extend(surface_fixture.get("product_checks") or [])
+        checks = [
+            _doctor_enrich_run_check(item)
+            for item in checks
+            if isinstance(item, dict)
+        ]
         failed = [item for item in checks if item.get("status") == "failed"]
         warning = [item for item in checks if item.get("status") == "warning"]
         run_status = "failed" if failed else ("warning" if warning else "passed")
@@ -1995,6 +2684,9 @@ def run_doctor_workspace(db: Session, *, workspace_id: str, user: User, command_
             git_delivery_enabled=bool((capability_map or {}).get("git_delivery")),
             runner_enabled=bool(AGENT_RUNNER_ENABLED),
             last_run_status=run_status,
+            recent_worktree_incident_count=int(recent_worktree_incidents.get("incident_count") or 0),
+            recent_worktree_open_incident_count=int(recent_worktree_incidents.get("open_incident_count") or 0),
+            recent_worktree_latest_incident_at=str(recent_worktree_incidents.get("latest_incident_at") or "").strip() or None,
         )
         summary = {
             "project_id": project.id,
@@ -2007,6 +2699,7 @@ def run_doctor_workspace(db: Session, *, workspace_id: str, user: User, command_
             "ensured_tasks": ensured_tasks,
             "fixture": fixture,
             "surface_fixture": surface_fixture,
+            "team_slot_integrity": slot_integrity,
             "capabilities": capabilities,
             "verification": team_verify,
             "delivery_verification": delivery_verify,
@@ -2078,6 +2771,33 @@ def execute_doctor_quick_action(
     normalized_action = str(action_id or "").strip()
     if not normalized_action:
         raise HTTPException(status_code=400, detail="Quick action id is required")
+    cooldown_state = _doctor_quick_action_cooldown_state(
+        db,
+        workspace_id=workspace_id,
+        action_id=normalized_action,
+    )
+    if bool(cooldown_state.get("active")):
+        status_payload = get_doctor_status(db, workspace_id=workspace_id, user=user)
+        retry_after_seconds = int(cooldown_state.get("retry_after_seconds") or 1)
+        cooldown_seconds = int(cooldown_state.get("cooldown_seconds") or int(DOCTOR_QUICK_ACTION_COOLDOWN_SECONDS))
+        return {
+            "workspace_id": workspace_id,
+            "action_id": normalized_action,
+            "ok": True,
+            "skipped": True,
+            "message": (
+                f"Skipped duplicate quick action '{normalized_action}' due to cooldown. "
+                f"Retry in {retry_after_seconds}s."
+            ),
+            "result": {
+                "cooldown_active": True,
+                "retry_after_seconds": retry_after_seconds,
+                "cooldown_seconds": cooldown_seconds,
+                "last_event_at": str(cooldown_state.get("last_event_at") or "").strip() or None,
+                "last_event_message": str(cooldown_state.get("last_event_message") or "").strip() or None,
+            },
+            "status": status_payload,
+        }
 
     def _finalize(*, ok: bool, message: str, result: dict[str, Any], status_payload: dict[str, Any]) -> dict[str, Any]:
         project_payload = status_payload.get("project") if isinstance(status_payload.get("project"), dict) else {}
@@ -2088,7 +2808,7 @@ def execute_doctor_quick_action(
             project_id=project_id,
             user_id=str(user.id),
             action_id=normalized_action,
-            status="passed" if ok else "warning",
+            status="passed" if ok else "failed",
             message=message,
             result=result,
         )
@@ -2244,6 +2964,89 @@ def execute_doctor_quick_action(
                 "issues": issues,
                 "guidance": guidance,
                 "provider_sources": provider_sources,
+            },
+            status_payload=status,
+        )
+
+    if normalized_action == "executor-worktree-guard-diagnostics":
+        status = get_doctor_status(db, workspace_id=workspace_id, user=user)
+        project_payload = status.get("project") if isinstance(status.get("project"), dict) else {}
+        project_id = str((project_payload or {}).get("id") or "").strip()
+        incident_summary = {
+            "incident_count": 0,
+            "open_incident_count": 0,
+            "resolved_incident_count": 0,
+            "latest_incident_at": None,
+            "code_counts": [],
+            "source_counts": [],
+            "items": [],
+        }
+        if project_id:
+            incident_summary = _doctor_recent_worktree_isolation_incidents(
+                db,
+                _task_rows(db, workspace_id=workspace_id, project_id=project_id),
+            )
+        runtime_health = dict((status.get("runtime_health") or {}))
+        domains = dict((runtime_health.get("domains") or {}))
+        executor_guardrails = dict((domains.get("executor_guardrails") or {}))
+        issues = [str(item).strip() for item in (executor_guardrails.get("issues") or []) if str(item).strip()]
+        metrics = dict((executor_guardrails.get("metrics") or {}))
+        incident_count = int(incident_summary.get("incident_count") or 0)
+        open_incident_count = int(incident_summary.get("open_incident_count") or 0)
+        resolved_incident_count = int(incident_summary.get("resolved_incident_count") or 0)
+        latest_incident_at = str(incident_summary.get("latest_incident_at") or "").strip() or None
+        code_counts = list(incident_summary.get("code_counts") or [])
+        source_counts = list(incident_summary.get("source_counts") or [])
+        top_incidents = [
+            item
+            for item in (incident_summary.get("items") or [])
+            if isinstance(item, dict)
+        ][:3]
+        guidance: list[str] = []
+        if "executor_guard_runner_artifact_allowlist_missing" in issues:
+            guidance.append("Restore runner artifact allowlist handling in executor repo-root guard checks.")
+        if "executor_guard_repo_root_edit_detection_missing" in issues:
+            guidance.append("Restore hard-fail behavior when repo-root edits happen outside task worktree.")
+        if "executor_guard_team_mode_gate_missing" in issues or "executor_guard_git_delivery_gate_missing" in issues:
+            guidance.append("Ensure task worktree preparation remains gated by Team Mode and Git Delivery enablement.")
+        if "executor_guard_developer_role_gate_missing" in issues:
+            guidance.append("Restrict task worktree preparation to developer role semantics.")
+        if "executor_guard_developer_assignee_gate_missing" in issues:
+            guidance.append("Allow assigned developer role to activate task worktree preparation path.")
+        if open_incident_count > 0:
+            guidance.append(
+                f"Investigate open executor worktree incidents ({open_incident_count} open / {incident_count} total) and resolve failing task automation traces."
+            )
+        if latest_incident_at:
+            guidance.append(f"Latest incident timestamp: {latest_incident_at}.")
+        if top_incidents:
+            first = top_incidents[0]
+            first_task_id = str(first.get("task_id") or "").strip()
+            first_task_link = str(first.get("task_link") or "").strip()
+            first_code = str(first.get("error_code") or "").strip()
+            if first_task_id:
+                task_hint = f"Top incident task: {first_task_id}"
+                if first_code:
+                    task_hint = f"{task_hint} ({first_code})"
+                if first_task_link:
+                    task_hint = f"{task_hint} at {first_task_link}"
+                guidance.append(task_hint)
+        if not guidance:
+            guidance.append("Executor task worktree guardrails are healthy.")
+        return _finalize(
+            ok=(not bool(issues)) and open_incident_count <= 0,
+            message="Collected executor worktree guard diagnostics.",
+            result={
+                "issues": issues,
+                "guidance": guidance,
+                "metrics": metrics,
+                "incident_count": incident_count,
+                "open_incident_count": open_incident_count,
+                "resolved_incident_count": resolved_incident_count,
+                "latest_incident_at": latest_incident_at,
+                "code_counts": code_counts,
+                "source_counts": source_counts,
+                "top_incidents": top_incidents,
             },
             status_payload=status,
         )

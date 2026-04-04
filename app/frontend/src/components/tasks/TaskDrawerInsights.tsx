@@ -51,8 +51,18 @@ function normalizeAutomationStreamStatus(message: string): string {
   return text
 }
 
+function normalizeDoctorHealthLabel(value: unknown): string {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'healthy') return 'Healthy'
+  if (normalized === 'failing' || normalized === 'failed') return 'Failing'
+  if (normalized === 'warning') return 'Warning'
+  return 'Unknown'
+}
+
 export function TaskDrawerInsights({ state }: { state: any }) {
   const [confirmDeleteCommentId, setConfirmDeleteCommentId] = React.useState<number | null>(null)
+  const [doctorFixFeedback, setDoctorFixFeedback] = React.useState<string | null>(null)
+  const [doctorFixPending, setDoctorFixPending] = React.useState(false)
   const liveOutputRef = React.useRef<HTMLDivElement | null>(null)
   const automationHistoryRef = React.useRef<HTMLDivElement | null>(null)
   const selectedTaskId = String(state.selectedTaskId || '').trim()
@@ -151,6 +161,77 @@ export function TaskDrawerInsights({ state }: { state: any }) {
     if (lastAutomationSource) return 'dispatch'
     return 'unknown'
   })()
+  const automationErrorCode = String(state.automationStatus.data?.last_agent_error_code || '').trim()
+  const automationErrorTitle = String(state.automationStatus.data?.last_agent_error_title || '').trim()
+  const automationErrorRecommendedAction = String(
+    state.automationStatus.data?.last_agent_error_recommended_doctor_action_id || ''
+  ).trim()
+  const doctorRuntimeHealth = state.workspaceDoctorStatus?.runtime_health
+  const doctorQuickActionCooldowns = (state.workspaceDoctorStatus?.quick_action_cooldowns
+    && typeof state.workspaceDoctorStatus.quick_action_cooldowns === 'object')
+    ? state.workspaceDoctorStatus.quick_action_cooldowns
+    : {}
+  const doctorActionMutation = state.executeDoctorQuickActionMutation
+  const doctorFixCooldownState = (() => {
+    const cooldown = doctorQuickActionCooldowns[automationErrorRecommendedAction]
+    if (!cooldown || typeof cooldown !== 'object') {
+      return { active: false, retryAfterSeconds: 0 }
+    }
+    const active = Boolean((cooldown as Record<string, unknown>).active)
+    const retryAfter = Number((cooldown as Record<string, unknown>).retry_after_seconds)
+    return {
+      active,
+      retryAfterSeconds: Number.isFinite(retryAfter) ? Math.max(0, Math.round(retryAfter)) : 0,
+    }
+  })()
+  const doctorFixCooldownLabel = doctorFixCooldownState.active && doctorFixCooldownState.retryAfterSeconds > 0
+    ? `Retry in ${doctorFixCooldownState.retryAfterSeconds}s`
+    : null
+  const canRunDoctorFix = Boolean(
+    automationErrorRecommendedAction
+    && doctorActionMutation
+    && typeof doctorActionMutation.mutateAsync === 'function'
+  )
+  const doctorFixMutationPending = Boolean(
+    doctorActionMutation?.isPending
+    && String(doctorActionMutation?.variables || '').trim() === automationErrorRecommendedAction
+  )
+  const runDoctorFix = React.useCallback(async () => {
+    if (!canRunDoctorFix || doctorFixPending || doctorFixMutationPending) return
+    if (doctorFixCooldownLabel) {
+      setDoctorFixFeedback(`Doctor quick action is on cooldown. ${doctorFixCooldownLabel}.`)
+      return
+    }
+    try {
+      setDoctorFixPending(true)
+      setDoctorFixFeedback(null)
+      const response = await doctorActionMutation.mutateAsync(automationErrorRecommendedAction)
+      const message = String(response?.message || '').trim() || 'Doctor quick action completed.'
+      const runtimeHealth = response?.status?.runtime_health
+      const overall = normalizeDoctorHealthLabel(runtimeHealth?.overall_status)
+      const primaryAction = String(runtimeHealth?.recommended_primary_action_id || '').trim()
+      const runtimeSuffix = primaryAction
+        ? ` Runtime health: ${overall}. Primary action: ${primaryAction}.`
+        : ` Runtime health: ${overall}.`
+      setDoctorFixFeedback(`${message}${runtimeSuffix}`)
+      if (typeof state.openWorkspaceDoctorIncident === 'function') {
+        state.openWorkspaceDoctorIncident()
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Doctor quick action failed.'
+      setDoctorFixFeedback(message)
+    } finally {
+      setDoctorFixPending(false)
+    }
+  }, [
+    automationErrorRecommendedAction,
+    canRunDoctorFix,
+    doctorActionMutation,
+    doctorFixCooldownLabel,
+    doctorFixMutationPending,
+    doctorFixPending,
+    state,
+  ])
   const automationUsageRaw = state.automationStatus.data?.last_agent_usage
   const automationUsage = automationUsageRaw && typeof automationUsageRaw === 'object'
     ? (automationUsageRaw as Record<string, unknown>)
@@ -628,7 +709,40 @@ export function TaskDrawerInsights({ state }: { state: any }) {
             ) : (
               <div className="meta">No execution responses yet.</div>
             )}
-            {state.automationStatus.data?.last_agent_error && <div className="notice notice-error">Runner error: {state.automationStatus.data.last_agent_error}</div>}
+            {state.automationStatus.data?.last_agent_error && (
+              <div className="notice notice-error">
+                <div>Runner error: {state.automationStatus.data.last_agent_error}</div>
+                {(automationErrorCode || automationErrorTitle || automationErrorRecommendedAction) ? (
+                  <div className="row wrap" style={{ gap: 6, marginTop: 6 }}>
+                    {automationErrorCode ? <span className="badge">Code: {automationErrorCode}</span> : null}
+                    {automationErrorTitle ? <span className="badge">Type: {automationErrorTitle}</span> : null}
+                    {automationErrorRecommendedAction ? (
+                      <span className="badge">Doctor action: {automationErrorRecommendedAction}</span>
+                    ) : null}
+                    {doctorRuntimeHealth ? (
+                      <span className="badge">
+                        Doctor runtime: {normalizeDoctorHealthLabel(doctorRuntimeHealth.overall_status)}
+                      </span>
+                    ) : null}
+                    {canRunDoctorFix ? (
+                      <button
+                        type="button"
+                        className="status-chip"
+                        disabled={doctorFixPending || doctorFixMutationPending || Boolean(doctorFixCooldownLabel)}
+                        onClick={() => { void runDoctorFix() }}
+                      >
+                        {(doctorFixPending || doctorFixMutationPending)
+                          ? 'Running Doctor fix...'
+                          : (doctorFixCooldownLabel || 'Run Doctor fix')}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+                {doctorFixFeedback ? (
+                  <div className="meta" style={{ marginTop: 6 }}>{doctorFixFeedback}</div>
+                ) : null}
+              </div>
+            )}
             {(state.automationStatus.data?.last_requested_source || state.automationStatus.data?.last_requested_reason) ? (
               <div className="automation-gates" style={{ marginTop: 8 }}>
                 <div className="automation-gates-head">

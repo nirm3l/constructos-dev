@@ -378,8 +378,9 @@ def test_execute_task_automation_sets_task_worktree_context_for_team_mode_develo
         stderr = ""
 
     def fake_run(command, *, input, text, capture_output, timeout, check, cwd=None):  # noqa: A002
-        _ = (command, text, capture_output, timeout, check, cwd)
+        _ = (command, text, capture_output, timeout, check)
         captured.update(json.loads(input))
+        captured["_cwd"] = cwd
         return DummyProcess()
 
     monkeypatch.setattr(executor_module.subprocess, "run", fake_run)
@@ -401,6 +402,7 @@ def test_execute_task_automation_sets_task_worktree_context_for_team_mode_develo
     assert captured["task_workdir"] == "/home/app/workspace/team-mode-worktree/.constructos/worktrees/task1234"
     assert captured["task_branch"] == "task/task1234-feature"
     assert captured["repo_root"] == "/home/app/workspace/team-mode-worktree"
+    assert captured["_cwd"] == "/home/app/workspace/team-mode-worktree/.constructos/worktrees/task1234"
 
 
 def test_execute_task_automation_uses_assigned_bot_runtime_before_workspace_selection(tmp_path, monkeypatch):

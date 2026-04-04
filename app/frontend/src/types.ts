@@ -154,6 +154,13 @@ export type WorkspaceDoctorStatus = {
     team_mode_enabled: boolean
     git_delivery_enabled: boolean
     seeded_team_task_count: number
+    seeded_team_slot_integrity?: boolean
+    seeded_team_missing_slots?: string[]
+    seeded_team_duplicate_slots?: string[]
+    seeded_team_title_mismatches?: Array<Record<string, unknown>>
+    executor_worktree_isolation_guard?: boolean
+    recent_executor_worktree_incident_count?: number
+    recent_executor_worktree_open_incident_count?: number
     task_count: number
   }
   last_seeded_at: string | null
@@ -177,6 +184,13 @@ export type WorkspaceDoctorStatus = {
     at: string | null
     result: Record<string, unknown>
   }>
+  quick_action_cooldowns?: Record<string, {
+    active: boolean
+    retry_after_seconds: number
+    cooldown_seconds: number
+    last_event_at?: string | null
+    last_event_message?: string | null
+  }>
   quick_action_stats?: {
     window_hours: number
     total: number
@@ -196,6 +210,7 @@ export type WorkspaceDoctorStatus = {
     generated_at: string
     overall_status: 'healthy' | 'warning' | 'failing' | string
     health_score: number
+    recommended_primary_action_id?: string | null
     domains: {
       contracts: {
         status: 'healthy' | 'warning' | 'failing' | string
@@ -221,12 +236,19 @@ export type WorkspaceDoctorStatus = {
         metrics: Record<string, unknown>
         issues: string[]
       }
+      executor_guardrails: {
+        status: 'healthy' | 'warning' | 'failing' | string
+        summary: string
+        metrics: Record<string, unknown>
+        issues: string[]
+      }
     }
     recommended_actions: Array<{
       id: string
       priority: 'low' | 'medium' | 'high' | string
       title: string
       description: string
+      rank_score?: number
     }>
   } | null
   setup?: Record<string, unknown> | null
@@ -257,6 +279,7 @@ export type WorkspaceDoctorQuickActionResponse = {
   workspace_id: string
   action_id: string
   ok: boolean
+  skipped?: boolean
   message: string
   result: Record<string, unknown>
   status: WorkspaceDoctorStatus
@@ -682,6 +705,11 @@ export type TaskAutomationStatus = {
   last_agent_stream_updated_at: string | null
   last_agent_run_id: string | null
   last_agent_error: string | null
+  last_agent_error_code?: string | null
+  last_agent_error_title?: string | null
+  last_agent_error_message?: string | null
+  last_agent_error_recommended_doctor_action_id?: string | null
+  last_agent_error_worktree_isolation_related?: boolean
   last_agent_comment: string | null
   last_agent_usage?: Record<string, unknown> | null
   last_agent_prompt_mode?: 'full' | 'resume' | string | null

@@ -3,7 +3,7 @@ import * as AlertDialog from '@radix-ui/react-alert-dialog'
 import * as Accordion from '@radix-ui/react-accordion'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as ToggleGroup from '@radix-ui/react-toggle-group'
-import type { ProjectBoard, Task, TaskGroup } from '../../types'
+import type { ProjectBoard, Task, TaskGroup, WorkspaceDoctorStatus } from '../../types'
 import { orderProjectStatuses, priorityTone, tagHue } from '../../utils/ui'
 import { Icon } from '../shared/uiHelpers'
 import { PopularTagFilters } from '../shared/PopularTagFilters'
@@ -112,9 +112,9 @@ function formatBoardScheduleState(state: Task['schedule_state'] | null | undefin
 
 function formatBoardAutomationState(state: string | null | undefined): string {
   const raw = String(state ?? '').trim()
-  if (!raw || raw.toLowerCase() === 'idle') return 'Idle'
-  if (raw === 'completed') return 'Execution Completed'
-  return `Execution ${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
+  if (!raw || raw.toLowerCase() === 'idle') return 'Automation Idle'
+  if (raw === 'completed') return 'Automation Completed'
+  return `Automation ${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
 }
 
 function toBoardExecutionChipClassState(state: string | null | undefined): string {
@@ -130,6 +130,43 @@ function resolveBoardEffectiveExecutionState(task: Task): string {
   const schedule = String(task.schedule_state ?? '').trim().toLowerCase()
   if (task.task_type === 'scheduled_instruction' && schedule) return schedule
   return automation || 'idle'
+}
+
+function isBoardWorkflowCompleted(status: string | null | undefined): boolean {
+  const raw = String(status ?? '').trim().toLowerCase()
+  return raw === 'done' || raw === 'completed'
+}
+
+function resolveBoardExecutionAttention(
+  workflowStatus: string | null | undefined,
+  executionState: string | null | undefined,
+): { label: string; hint: string; tone: 'warning' | 'failing' } | null {
+  const workflowDone = isBoardWorkflowCompleted(workflowStatus)
+  const execution = String(executionState ?? '').trim().toLowerCase() || 'idle'
+  if (execution === 'failed') {
+    return {
+      label: 'Execution incident',
+      hint: workflowDone
+        ? 'Automation failed even though workflow is completed. Recheck run evidence and rerun automation if needed.'
+        : 'Automation failed for an active workflow task. Open task insights and run Doctor fix guidance.',
+      tone: 'failing',
+    }
+  }
+  if (workflowDone && (execution === 'queued' || execution === 'running')) {
+    return {
+      label: 'Execution still active',
+      hint: 'Workflow is completed, but automation is still queued/running. Verify if completion was premature.',
+      tone: 'warning',
+    }
+  }
+  if (!workflowDone && execution === 'completed') {
+    return {
+      label: 'Workflow not closed',
+      hint: 'Automation is completed, but workflow status is not Done/Completed.',
+      tone: 'warning',
+    }
+  }
+  return null
 }
 
 type BoardTaskCardProps = {
@@ -161,9 +198,9 @@ function BoardTaskCard({
   const isScheduled = task.task_type === 'scheduled_instruction'
   const externalRefCount = Array.isArray(task.external_refs) ? task.external_refs.length : 0
   const effectiveExecutionState = resolveBoardEffectiveExecutionState(task)
-  const hasVisibleAutomationState = effectiveExecutionState !== 'idle'
   const executionStateLabel = formatBoardAutomationState(effectiveExecutionState)
   const executionStateClass = toBoardExecutionChipClassState(effectiveExecutionState)
+  const executionAttention = resolveBoardExecutionAttention(status, effectiveExecutionState)
   const availableStatuses = statuses.filter((candidateStatus) => candidateStatus !== status)
   const currentStatusIndex = statuses.indexOf(status)
   const nextStatus = currentStatusIndex >= 0 && currentStatusIndex < statuses.length - 1
@@ -263,11 +300,18 @@ function BoardTaskCard({
       {isScheduled && (
         <div className="kanban-schedule-compact">
           <span className="kanban-schedule-chip kanban-schedule-chip-kind">Scheduled</span>
+          <span className="kanban-schedule-chip">Workflow: {status}</span>
           <span className="kanban-schedule-chip">{formatBoardScheduleTrigger(task.scheduled_at_utc)}</span>
           <span className="kanban-schedule-chip">{formatBoardRecurring(task.recurring_rule)}</span>
+          <span className="kanban-schedule-chip">{formatBoardScheduleState(task.schedule_state)}</span>
           <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
             {executionStateLabel}
           </span>
+        </div>
+      )}
+      {!isScheduled && (
+        <div className="kanban-schedule-compact">
+          <span className="kanban-schedule-chip">Workflow: {status}</span>
         </div>
       )}
       {(assigneeLabel || externalRefCount > 0) && (
@@ -281,11 +325,30 @@ function BoardTaskCard({
             )}
           </div>
           <div className="kanban-meta-right">
-            {!isScheduled && hasVisibleAutomationState && (
+            {!isScheduled && (
+              <span className="task-schedule-chip">
+                Workflow {status}
+              </span>
+            )}
+            {!isScheduled && (
               <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
                 {executionStateLabel}
               </span>
             )}
+            {executionAttention ? (
+              <ChipTooltip label={executionAttention.hint}>
+                <span
+                  className="task-schedule-chip"
+                  style={
+                    executionAttention.tone === 'failing'
+                      ? { background: 'rgba(239, 68, 68, 0.14)', borderColor: 'rgba(239, 68, 68, 0.35)', color: '#7f1d1d' }
+                      : { background: 'rgba(245, 158, 11, 0.16)', borderColor: 'rgba(245, 158, 11, 0.35)', color: '#7c2d12' }
+                  }
+                >
+                  {executionAttention.label}
+                </span>
+              </ChipTooltip>
+            ) : null}
             {externalRefCount > 0 && (
               <ChipTooltip label={`${externalRefCount} external link${externalRefCount === 1 ? '' : 's'}`}>
                 <span className="task-resource-chip">
@@ -354,6 +417,9 @@ type TasksPanelProps = {
   onReopenTask: (taskId: string) => void
   onCompleteTask: (taskId: string) => void
   onNewTask: (taskType?: 'manual' | 'scheduled_instruction') => void
+  doctorStatus?: WorkspaceDoctorStatus | null
+  onOpenDoctorIncident?: () => void
+  suppressDoctorIncidentSummary?: boolean
 }
 
 export function TasksPanel({
@@ -386,6 +452,9 @@ export function TasksPanel({
   onReopenTask,
   onCompleteTask,
   onNewTask,
+  doctorStatus = null,
+  onOpenDoctorIncident,
+  suppressDoctorIncidentSummary = false,
 }: TasksPanelProps) {
   const getTeamAgentLabel = React.useCallback((task: Task): string => {
     const projectId = String(task.project_id || '').trim()
@@ -645,6 +714,11 @@ export function TasksPanel({
     ? 'Set a new name for this task group.'
     : 'Create a new group to organize tasks in list and board views.'
   const taskGroupDialogSubmitLabel = taskGroupDialogMode === 'rename' ? 'Save' : 'Create'
+  const doctorIncidentTotal = Number(doctorStatus?.checks?.recent_executor_worktree_incident_count ?? 0)
+  const doctorIncidentOpen = Number(doctorStatus?.checks?.recent_executor_worktree_open_incident_count ?? 0)
+  const hasDoctorIncidentSummary = Number.isFinite(doctorIncidentTotal) && doctorIncidentTotal > 0
+  const doctorPrimaryActionId = String(doctorStatus?.runtime_health?.recommended_primary_action_id || '').trim()
+  const doctorPrimaryIsExecutor = doctorPrimaryActionId === 'executor-worktree-guard-diagnostics'
 
   return (
     <section className="card" data-tour-id="tasks-panel">
@@ -669,6 +743,33 @@ export function TasksPanel({
           </ToggleGroup.Root>
         )}
       </div>
+      {hasDoctorIncidentSummary && !suppressDoctorIncidentSummary ? (
+        <div
+          className={doctorIncidentOpen > 0 ? 'notice notice-error' : 'notice'}
+          style={{ marginBottom: 8 }}
+        >
+          <div className="row wrap" style={{ gap: 8, alignItems: 'center', justifyContent: 'space-between' }}>
+            <div className="row wrap" style={{ gap: 8, alignItems: 'center' }}>
+              <strong>Automation incidents</strong>
+              <span className="status-chip">
+                Open {Math.max(0, Number.isFinite(doctorIncidentOpen) ? doctorIncidentOpen : 0)} / Total {Math.max(0, doctorIncidentTotal)}
+              </span>
+              {doctorPrimaryIsExecutor ? (
+                <span className="status-chip">Doctor primary: executor guard diagnostics</span>
+              ) : null}
+            </div>
+            {typeof onOpenDoctorIncident === 'function' ? (
+              <button
+                type="button"
+                className="status-chip"
+                onClick={() => onOpenDoctorIncident()}
+              >
+                Open Doctor incidents
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       <div className="row wrap tasks-create-actions" style={{ justifyContent: 'flex-end', marginBottom: 8, gap: 8 }}>
         <button

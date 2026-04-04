@@ -435,6 +435,9 @@ export function WorkspaceDoctorCard({
   const [quickActionBusyId, setQuickActionBusyId] = React.useState<string | null>(null)
   const [bulkQuickActionsRunning, setBulkQuickActionsRunning] = React.useState(false)
   const [incidentMode, setIncidentMode] = React.useState(false)
+  const [incidentOnlyOpen, setIncidentOnlyOpen] = React.useState(true)
+  const [incidentCodeFilter, setIncidentCodeFilter] = React.useState('all')
+  const [incidentSourceFilter, setIncidentSourceFilter] = React.useState('all')
   const [recentActionStatusFilter, setRecentActionStatusFilter] = React.useState<'all' | 'passed' | 'warning' | 'failed'>('all')
   const [recentActionSort, setRecentActionSort] = React.useState<'newest' | 'oldest' | 'status'>('newest')
   const recentRuns = Array.isArray(doctorStatus?.recent_runs) ? doctorStatus.recent_runs : []
@@ -500,16 +503,41 @@ export function WorkspaceDoctorCard({
     ? 'n/a'
     : `${Math.round(runtimeContractAuditAgeHours * 10) / 10}h`
   const recommendedActions = Array.isArray(runtimeHealth?.recommended_actions) ? runtimeHealth.recommended_actions : []
+  const recommendedPrimaryActionId = String(runtimeHealth?.recommended_primary_action_id || '').trim() || null
+  const recommendedPrimaryAction = recommendedActions.find(
+    (action) => String(action.id || '').trim() === recommendedPrimaryActionId
+  ) || null
   const runtimeHealthScore = Number(runtimeHealth?.health_score ?? 0)
   const lastAction = doctorStatus?.last_action ?? null
   const recentActions = Array.isArray(doctorStatus?.recent_actions) ? doctorStatus.recent_actions : []
+  const quickActionCooldowns = (doctorStatus?.quick_action_cooldowns && typeof doctorStatus.quick_action_cooldowns === 'object')
+    ? doctorStatus.quick_action_cooldowns
+    : {}
   const quickActionStats = doctorStatus?.quick_action_stats ?? null
+  const quickActionCooldownState = (actionId: string): { active: boolean; retryAfterSeconds: number } => {
+    const cooldown = quickActionCooldowns[String(actionId || '').trim()]
+    if (!cooldown || typeof cooldown !== 'object') {
+      return { active: false, retryAfterSeconds: 0 }
+    }
+    const active = Boolean((cooldown as Record<string, unknown>).active)
+    const retryAfter = Number((cooldown as Record<string, unknown>).retry_after_seconds)
+    return {
+      active,
+      retryAfterSeconds: Number.isFinite(retryAfter) ? Math.max(0, Math.round(retryAfter)) : 0,
+    }
+  }
+  const quickActionCooldownLabel = (actionId: string): string | null => {
+    const state = quickActionCooldownState(actionId)
+    if (!state.active || state.retryAfterSeconds <= 0) return null
+    return `Retry in ${state.retryAfterSeconds}s`
+  }
   const requiresManagePermission = (actionId: string): boolean => (
     actionId === 'recovery-sequence'
     || actionId === 'doctor-plugin-wiring'
     || actionId === 'warm-bootstrap-caches'
     || actionId === 'runtime-contract-audit'
     || actionId === 'descriptor-export-drift-check'
+    || actionId === 'executor-worktree-guard-diagnostics'
   )
   const visibleRecommendedActions = recommendedActions
     .filter((action) => !incidentMode || String(action.priority || '').trim().toLowerCase() !== 'low')
@@ -528,6 +556,14 @@ export function WorkspaceDoctorCard({
     setRecentActionStatusFilter('failed')
     setRecentActionSort('newest')
   }, [incidentMode])
+  React.useEffect(() => {
+    if (!incidentMode) return
+    setIncidentOnlyOpen(true)
+  }, [incidentMode])
+  React.useEffect(() => {
+    setIncidentCodeFilter('all')
+    setIncidentSourceFilter('all')
+  }, [selectedRunId])
   const visibleRecentActions = React.useMemo(() => {
     const normalizeStatus = (value: unknown): 'passed' | 'warning' | 'failed' => {
       const normalized = String(value || '').trim().toLowerCase()
@@ -606,6 +642,130 @@ export function WorkspaceDoctorCard({
     if (parsed > 0) return `+${parsed}`
     return String(parsed)
   }
+  const normalizeRunCheckStatus = (value: unknown): 'passed' | 'warning' | 'failed' => {
+    const normalized = String(value || '').trim().toLowerCase()
+    if (normalized === 'passed') return 'passed'
+    if (normalized === 'warning') return 'warning'
+    return 'failed'
+  }
+  const suggestedQuickActionForCheck = (check: Record<string, unknown>): { id: string | null; rationale: string | null } => {
+    const checkId = String(check.id || '').trim()
+    const details = (check.details && typeof check.details === 'object')
+      ? (check.details as Record<string, unknown>)
+      : {}
+    const runbook = (details.runbook && typeof details.runbook === 'object')
+      ? (details.runbook as Record<string, unknown>)
+      : {}
+    const runbookActionId = String(runbook.suggested_quick_action_id || '').trim()
+    const runbookRationale = String(runbook.rationale || '').trim() || null
+    if (runbookActionId) {
+      return { id: runbookActionId, rationale: runbookRationale }
+    }
+    const normalized = String(checkId || '').trim().toLowerCase()
+    if (!normalized) return { id: null, rationale: null }
+    if (normalized === 'seeded_team_slot_integrity') return { id: 'doctor-plugin-wiring', rationale: null }
+    if (normalized === 'team_mode_enabled' || normalized === 'git_delivery_enabled') return { id: 'doctor-plugin-wiring', rationale: null }
+    if (normalized === 'team_mode_workflow' || normalized === 'delivery_workflow') return { id: 'recovery-sequence', rationale: null }
+    if (normalized === 'compose_manifest_present') return { id: 'recovery-sequence', rationale: null }
+    if (normalized === 'repo_context_present' || normalized === 'git_contract_ok') return { id: 'recovery-sequence', rationale: null }
+    if (normalized === 'qa_has_verifiable_artifacts' || normalized === 'qa_handoff_current_cycle_ok') return { id: 'recovery-sequence', rationale: null }
+    if (normalized === 'executor_worktree_isolation_guard') return { id: 'executor-worktree-guard-diagnostics', rationale: null }
+    return { id: null, rationale: null }
+  }
+  const deriveCheckIssueMessages = (check: Record<string, unknown>): string[] => {
+    const details = (check?.details && typeof check.details === 'object')
+      ? (check.details as Record<string, unknown>)
+      : {}
+    const messages: string[] = []
+    const missingSlots = Array.isArray(details.missing_slots) ? details.missing_slots : []
+    const duplicateSlots = Array.isArray(details.duplicate_slots) ? details.duplicate_slots : []
+    const titleMismatches = Array.isArray(details.title_mismatches) ? details.title_mismatches : []
+    if (missingSlots.length > 0) {
+      messages.push(`Missing slots: ${missingSlots.map((item) => String(item || '').trim()).filter(Boolean).join(', ')}`)
+    }
+    if (duplicateSlots.length > 0) {
+      messages.push(`Duplicate slots: ${duplicateSlots.map((item) => String(item || '').trim()).filter(Boolean).join(', ')}`)
+    }
+    if (titleMismatches.length > 0) {
+      messages.push(`Title mismatches: ${titleMismatches.length}`)
+    }
+    const errorText = String(details.error || '').trim()
+    if (errorText) messages.push(errorText)
+    const missingCodes = Array.isArray(details.missing_codes) ? details.missing_codes : []
+    if (missingCodes.length > 0) {
+      messages.push(`Missing task codes: ${missingCodes.map((item) => String(item || '').trim()).filter(Boolean).join(', ')}`)
+    }
+    const issueList = Array.isArray(details.issues) ? details.issues : []
+    if (issueList.length > 0) {
+      const compactIssues = issueList
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .slice(0, 2)
+      if (compactIssues.length > 0) {
+        messages.push(`Issues: ${compactIssues.join(' | ')}`)
+      }
+    }
+    const failedRequiredChecks = Array.isArray(details.required_failed_checks) ? details.required_failed_checks : []
+    if (failedRequiredChecks.length > 0) {
+      const compactChecks = failedRequiredChecks
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .slice(0, 2)
+      if (compactChecks.length > 0) {
+        messages.push(`Failed requirements: ${compactChecks.join(', ')}`)
+      }
+    }
+    const valueText = typeof details.value === 'boolean' ? (details.value ? 'true' : 'false') : ''
+    const incidentCount = Number(details.incident_count)
+    const openIncidentCount = Number(details.open_incident_count)
+    const resolvedIncidentCount = Number(details.resolved_incident_count)
+    if (Number.isFinite(incidentCount) && incidentCount > 0) {
+      const suffixParts: string[] = []
+      if (Number.isFinite(openIncidentCount)) suffixParts.push(`open ${openIncidentCount}`)
+      if (Number.isFinite(resolvedIncidentCount)) suffixParts.push(`resolved ${resolvedIncidentCount}`)
+      const suffix = suffixParts.length > 0 ? ` (${suffixParts.join(', ')})` : ''
+      messages.push(`Worktree incidents: ${incidentCount}${suffix}`)
+    }
+    const latestIncidentAt = String(details.latest_incident_at || '').trim()
+    if (latestIncidentAt) {
+      messages.push(`Latest incident: ${latestIncidentAt}`)
+    }
+    const incidentItems = Array.isArray(details.items) ? details.items : []
+    if (incidentItems.length > 0) {
+      const top = (incidentItems[0] && typeof incidentItems[0] === 'object')
+        ? (incidentItems[0] as Record<string, unknown>)
+        : null
+      if (top) {
+        const topTaskId = String(top.task_id || '').trim()
+        const topCode = String(top.error_code || '').trim()
+        const topSource = String(top.source || '').trim()
+        const topSummary = [topTaskId ? `task ${topTaskId}` : '', topCode, topSource ? `source ${topSource}` : '']
+          .filter(Boolean)
+          .join(', ')
+        if (topSummary) {
+          messages.push(`Top incident: ${topSummary}`)
+        }
+      }
+    }
+    if (!messages.length && valueText) {
+      messages.push(`Observed value: ${valueText}`)
+    }
+    return messages.slice(0, 3)
+  }
+  const groupedRunChecks = React.useMemo(() => {
+    const buckets: Record<'failed' | 'warning' | 'passed', Array<Record<string, unknown>>> = {
+      failed: [],
+      warning: [],
+      passed: [],
+    }
+    for (const item of checks) {
+      if (!item || typeof item !== 'object') continue
+      const record = item as Record<string, unknown>
+      const bucket = normalizeRunCheckStatus(record.status)
+      buckets[bucket].push(record)
+    }
+    return buckets
+  }, [checks])
   const showDomainInIncident = (status: unknown): boolean => {
     if (!incidentMode) return true
     return normalizeHealthStatus(status) !== 'healthy'
@@ -614,33 +774,66 @@ export function WorkspaceDoctorCard({
     actionId: string,
     { silent = false }: { silent?: boolean } = {},
   ): Promise<{ ok: boolean; message: string }> => {
+    const resolveSkippedPayload = (payload: any): { skipped: boolean; message: string } => {
+      const skipped = Boolean(payload?.skipped)
+      const skippedMessage = String(payload?.message || '').trim()
+      return {
+        skipped,
+        message: skippedMessage || 'Quick action skipped due to cooldown.',
+      }
+    }
     try {
       if (actionId === 'doctor-plugin-wiring') {
-        await onExecuteDoctorQuickAction(actionId)
+        const payload = await onExecuteDoctorQuickAction(actionId) as any
+        const skipped = resolveSkippedPayload(payload)
+        if (skipped.skipped) {
+          if (!silent) setQuickActionFeedback(skipped.message)
+          return { ok: true, message: skipped.message }
+        }
         const message = 'Doctor fixture re-seeded.'
         if (!silent) setQuickActionFeedback(message)
         return { ok: true, message }
       }
       if (actionId === 'recovery-sequence') {
-        await onExecuteDoctorQuickAction(actionId)
+        const payload = await onExecuteDoctorQuickAction(actionId) as any
+        const skipped = resolveSkippedPayload(payload)
+        if (skipped.skipped) {
+          if (!silent) setQuickActionFeedback(skipped.message)
+          return { ok: true, message: skipped.message }
+        }
         const message = 'Recovery sequence completed.'
         if (!silent) setQuickActionFeedback(message)
         return { ok: true, message }
       }
       if (actionId === 'warm-bootstrap-caches') {
-        await onExecuteDoctorQuickAction(actionId)
+        const payload = await onExecuteDoctorQuickAction(actionId) as any
+        const skipped = resolveSkippedPayload(payload)
+        if (skipped.skipped) {
+          if (!silent) setQuickActionFeedback(skipped.message)
+          return { ok: true, message: skipped.message }
+        }
         const message = 'Bootstrap caches warmed.'
         if (!silent) setQuickActionFeedback(message)
         return { ok: true, message }
       }
       if (actionId === 'runtime-contract-audit') {
-        await onExecuteDoctorQuickAction(actionId)
+        const payload = await onExecuteDoctorQuickAction(actionId) as any
+        const skipped = resolveSkippedPayload(payload)
+        if (skipped.skipped) {
+          if (!silent) setQuickActionFeedback(skipped.message)
+          return { ok: true, message: skipped.message }
+        }
         const message = 'Runtime contract audit completed server-side.'
         if (!silent) setQuickActionFeedback(message)
         return { ok: true, message }
       }
       if (actionId === 'descriptor-export-drift-check') {
         const payload = await onExecuteDoctorQuickAction(actionId) as any
+        const skipped = resolveSkippedPayload(payload)
+        if (skipped.skipped) {
+          if (!silent) setQuickActionFeedback(skipped.message)
+          return { ok: true, message: skipped.message }
+        }
         const driftDetected = Boolean(payload?.result?.descriptor_drift_detected)
         const message = driftDetected
           ? 'Descriptor/export drift is still detected. Run recovery and resolve descriptor mismatch issues.'
@@ -650,12 +843,40 @@ export function WorkspaceDoctorCard({
       }
       if (actionId === 'agent-runtime-configuration') {
         const payload = await onExecuteDoctorQuickAction(actionId) as any
+        const skipped = resolveSkippedPayload(payload)
+        if (skipped.skipped) {
+          if (!silent) setQuickActionFeedback(skipped.message)
+          return { ok: true, message: skipped.message }
+        }
         const guidance = Array.isArray(payload?.result?.guidance) ? payload.result.guidance : []
         const message = guidance.length > 0
           ? `Agent runtime diagnostics: ${guidance.join(' | ')}`
           : 'Agent runtime diagnostics completed.'
         if (!silent) setQuickActionFeedback(message)
         return { ok: true, message }
+      }
+      if (actionId === 'executor-worktree-guard-diagnostics') {
+        const payload = await onExecuteDoctorQuickAction(actionId) as any
+        const skipped = resolveSkippedPayload(payload)
+        if (skipped.skipped) {
+          if (!silent) setQuickActionFeedback(skipped.message)
+          return { ok: true, message: skipped.message }
+        }
+        const guidance = Array.isArray(payload?.result?.guidance) ? payload.result.guidance : []
+        const issues = Array.isArray(payload?.result?.issues) ? payload.result.issues : []
+        const incidentCount = Number(payload?.result?.incident_count || 0)
+        const openIncidentCount = Number(payload?.result?.open_incident_count || 0)
+        const guidanceText = guidance.length > 0
+          ? guidance.join(' | ')
+          : 'Review executor task-worktree guard diagnostics output.'
+        const incidentText = Number.isFinite(incidentCount) && incidentCount > 0
+          ? ` Incidents: ${incidentCount} total${Number.isFinite(openIncidentCount) ? `, ${openIncidentCount} open` : ''}.`
+          : ''
+        const message = issues.length > 0 || (Number.isFinite(openIncidentCount) && openIncidentCount > 0)
+          ? `Executor guard diagnostics: ${guidanceText}${incidentText}`
+          : 'Executor task worktree guardrails are healthy.'
+        if (!silent) setQuickActionFeedback(message)
+        return { ok: issues.length <= 0 && !(Number.isFinite(openIncidentCount) && openIncidentCount > 0), message }
       }
       const message = 'No quick action is mapped for this recommendation yet.'
       if (!silent) setQuickActionFeedback(message)
@@ -667,6 +888,11 @@ export function WorkspaceDoctorCard({
     }
   }
   const handleQuickAction = async (actionId: string) => {
+    const cooldownLabel = quickActionCooldownLabel(actionId)
+    if (cooldownLabel) {
+      setQuickActionFeedback(`Action "${actionId}" is on cooldown. ${cooldownLabel}.`)
+      return
+    }
     setQuickActionFeedback(null)
     setQuickActionBusyId(actionId)
     try {
@@ -690,6 +916,10 @@ export function WorkspaceDoctorCard({
         const actionId = String(action.id || '').trim()
         if (!actionId) continue
         if (!canManage && requiresManagePermission(actionId)) {
+          skipped += 1
+          continue
+        }
+        if (quickActionCooldownState(actionId).active) {
           skipped += 1
           continue
         }
@@ -900,28 +1130,46 @@ export function WorkspaceDoctorCard({
                 <button
                   type="button"
                   className="status-chip"
-                  disabled={!canManage || quickActionBusyId === 'descriptor-export-drift-check'}
+                  disabled={
+                    !canManage
+                    || quickActionBusyId === 'descriptor-export-drift-check'
+                    || quickActionCooldownState('descriptor-export-drift-check').active
+                  }
                   onClick={() => { void handleQuickAction('descriptor-export-drift-check') }}
                 >
-                  {quickActionBusyId === 'descriptor-export-drift-check' ? 'Running...' : 'Run descriptor drift check'}
+                  {quickActionBusyId === 'descriptor-export-drift-check'
+                    ? 'Running...'
+                    : (quickActionCooldownLabel('descriptor-export-drift-check') || 'Run descriptor drift check')}
                 </button>
                 {descriptorDriftDetected ? (
                   <>
                     <button
                       type="button"
                       className="status-chip"
-                      disabled={!canManage || quickActionBusyId === 'runtime-contract-audit'}
+                      disabled={
+                        !canManage
+                        || quickActionBusyId === 'runtime-contract-audit'
+                        || quickActionCooldownState('runtime-contract-audit').active
+                      }
                       onClick={() => { void handleQuickAction('runtime-contract-audit') }}
                     >
-                      {quickActionBusyId === 'runtime-contract-audit' ? 'Running...' : 'Run runtime contract audit'}
+                      {quickActionBusyId === 'runtime-contract-audit'
+                        ? 'Running...'
+                        : (quickActionCooldownLabel('runtime-contract-audit') || 'Run runtime contract audit')}
                     </button>
                     <button
                       type="button"
                       className="status-chip"
-                      disabled={!canManage || quickActionBusyId === 'recovery-sequence'}
+                      disabled={
+                        !canManage
+                        || quickActionBusyId === 'recovery-sequence'
+                        || quickActionCooldownState('recovery-sequence').active
+                      }
                       onClick={() => { void handleQuickAction('recovery-sequence') }}
                     >
-                      {quickActionBusyId === 'recovery-sequence' ? 'Running...' : 'Run recovery sequence'}
+                      {quickActionBusyId === 'recovery-sequence'
+                        ? 'Running...'
+                        : (quickActionCooldownLabel('recovery-sequence') || 'Run recovery sequence')}
                     </button>
                   </>
                 ) : null}
@@ -955,10 +1203,16 @@ export function WorkspaceDoctorCard({
             <button
               type="button"
               className="status-chip"
-              disabled={!canManage || quickActionBusyId === 'recovery-sequence'}
+              disabled={
+                !canManage
+                || quickActionBusyId === 'recovery-sequence'
+                || quickActionCooldownState('recovery-sequence').active
+              }
               onClick={() => { void handleQuickAction('recovery-sequence') }}
             >
-              {quickActionBusyId === 'recovery-sequence' ? 'Running...' : 'Run recovery sequence'}
+              {quickActionBusyId === 'recovery-sequence'
+                ? 'Running...'
+                : (quickActionCooldownLabel('recovery-sequence') || 'Run recovery sequence')}
             </button>
           </div>
           {runtimeDomains ? (
@@ -1003,13 +1257,26 @@ export function WorkspaceDoctorCard({
                   </dd>
                 </div>
               ) : null}
+              {showDomainInIncident((runtimeDomains as Record<string, any>).executor_guardrails?.status) ? (
+                <div className="profile-fact">
+                  <dt>Executor guardrails</dt>
+                  <dd>
+                    <span
+                      className="status-chip"
+                      style={healthStatusStyle((runtimeDomains as Record<string, any>).executor_guardrails?.status)}
+                    >
+                      {healthStatusLabel((runtimeDomains as Record<string, any>).executor_guardrails?.status)}
+                    </span>
+                  </dd>
+                </div>
+              ) : null}
             </dl>
           ) : null}
           {runtimeDomains ? (
             <div style={{ marginTop: 10 }}>
               <strong>Domain details</strong>
               <div className="profile-facts" style={{ marginTop: 8 }}>
-                {(['contracts', 'bootstrap', 'plugins', 'agent_runtime'] as const).map((domainKey) => {
+                {(['contracts', 'bootstrap', 'plugins', 'agent_runtime', 'executor_guardrails'] as const).map((domainKey) => {
                   const domain = (runtimeDomains as Record<string, any>)[domainKey] || {}
                   if (!showDomainInIncident(domain.status)) return null
                   const issues = Array.isArray(domain.issues) ? domain.issues : []
@@ -1045,7 +1312,7 @@ export function WorkspaceDoctorCard({
             <div style={{ marginTop: 10 }}>
               <strong>Domain trends</strong>
               <dl className="profile-facts" style={{ marginTop: 8 }}>
-                {(['contracts', 'bootstrap', 'plugins', 'agent_runtime'] as const).map((domainKey) => {
+                {(['contracts', 'bootstrap', 'plugins', 'agent_runtime', 'executor_guardrails'] as const).map((domainKey) => {
                   const currentDomain = runtimeDomains ? (runtimeDomains as Record<string, any>)[domainKey] : null
                   if (!showDomainInIncident(currentDomain?.status)) return null
                   const previousDomain = domainValue(previousRuntimeHealth, domainKey)
@@ -1072,6 +1339,11 @@ export function WorkspaceDoctorCard({
           ) : null}
           {recommendedActions.length > 0 ? (
             <div style={{ marginTop: 10 }}>
+              {recommendedPrimaryAction ? (
+                <div className="notice" style={{ marginBottom: 8 }}>
+                  Primary action: {recommendedPrimaryAction.title} ({String(recommendedPrimaryAction.id || '').trim()})
+                </div>
+              ) : null}
               <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                 <strong>Recommended actions</strong>
                 <button
@@ -1093,18 +1365,26 @@ export function WorkspaceDoctorCard({
                       </span>
                       <div className="meta" style={{ marginTop: 6 }}>{action.description}</div>
                       <div className="row" style={{ marginTop: 8, gap: 8, flexWrap: 'wrap' }}>
+                        {quickActionCooldownLabel(String(action.id || '').trim()) ? (
+                          <span className="status-chip">
+                            {quickActionCooldownLabel(String(action.id || '').trim())}
+                          </span>
+                        ) : null}
                         <button
                           type="button"
                           className="status-chip"
                           disabled={
                             quickActionBusyId === action.id
                             || bulkQuickActionsRunning
+                            || quickActionCooldownState(String(action.id || '').trim()).active
                             || (executeDoctorQuickActionPending && String(executeDoctorQuickActionId || '') === String(action.id || ''))
                             || (!canManage && requiresManagePermission(String(action.id || '').trim()))
                           }
                           onClick={() => { void handleQuickAction(String(action.id || '')) }}
                         >
-                          {(quickActionBusyId === action.id || (executeDoctorQuickActionPending && String(executeDoctorQuickActionId || '') === String(action.id || ''))) ? 'Running...' : 'Fix now'}
+                          {(quickActionBusyId === action.id || (executeDoctorQuickActionPending && String(executeDoctorQuickActionId || '') === String(action.id || '')))
+                            ? 'Running...'
+                            : (quickActionCooldownLabel(String(action.id || '').trim()) || 'Fix now')}
                         </button>
                       </div>
                     </dd>
@@ -1252,13 +1532,227 @@ export function WorkspaceDoctorCard({
           {checks.length > 0 ? (
             <div style={{ marginTop: 12 }}>
               <strong>Checks</strong>
+              <div className="row" style={{ marginTop: 8, gap: 8, flexWrap: 'wrap' }}>
+                <span className="status-chip" style={healthStatusStyle('failing')}>
+                  Failed {groupedRunChecks.failed.length}
+                </span>
+                <span className="status-chip" style={healthStatusStyle('warning')}>
+                  Warning {groupedRunChecks.warning.length}
+                </span>
+                <span className="status-chip" style={healthStatusStyle('healthy')}>
+                  Passed {groupedRunChecks.passed.length}
+                </span>
+              </div>
               <div className="profile-facts" style={{ marginTop: 10 }}>
-                {checks.map((item) => (
-                  <div className="profile-fact" key={item.id}>
-                    <dt>{item.label}</dt>
-                    <dd>{String(item.status || 'unknown')}</dd>
-                  </div>
-                ))}
+                {(['failed', 'warning', 'passed'] as const).map((groupKey) => {
+                  const groupItems = groupedRunChecks[groupKey]
+                  if (groupItems.length <= 0) return null
+                  const groupLabel = groupKey === 'failed' ? 'Failed checks' : (groupKey === 'warning' ? 'Warning checks' : 'Passed checks')
+                  return (
+                    <details key={`check-group:${groupKey}`} open={groupKey === 'failed'} style={{ marginBottom: 10 }}>
+                      <summary style={{ cursor: 'pointer' }}>
+                        <span className="status-chip" style={healthStatusStyle(groupKey === 'passed' ? 'healthy' : groupKey)}>
+                          {groupLabel}: {groupItems.length}
+                        </span>
+                      </summary>
+                      <div className="profile-facts" style={{ marginTop: 8 }}>
+                        {groupItems.map((item) => {
+                          const checkId = String(item.id || '').trim()
+                          const checkLabel = String(item.label || checkId || 'Unknown check').trim()
+                          const checkStatus = normalizeRunCheckStatus(item.status)
+                          const issueMessages = deriveCheckIssueMessages(item)
+                          const suggestedAction = suggestedQuickActionForCheck(item)
+                          const suggestedActionId = String(suggestedAction.id || '').trim() || null
+                          const canRunSuggestedAction = Boolean(suggestedActionId && canManage && requiresManagePermission(suggestedActionId))
+                          return (
+                            <div className="profile-fact" key={`run-check:${checkId}:${checkLabel}`}>
+                              <dt>{checkLabel}</dt>
+                              <dd>
+                                <span className="status-chip" style={healthStatusStyle(checkStatus === 'passed' ? 'healthy' : checkStatus)}>
+                                  {checkStatus.toUpperCase()}
+                                </span>
+                                {issueMessages.length > 0 ? (
+                                  <div className="meta" style={{ marginTop: 6 }}>
+                                    {issueMessages.join(' | ')}
+                                  </div>
+                                ) : null}
+                                {checkId === 'recent_executor_worktree_incidents' ? (
+                                  (() => {
+                                    const details = (item.details && typeof item.details === 'object')
+                                      ? (item.details as Record<string, unknown>)
+                                      : {}
+                                    const codeCounts = Array.isArray(details.code_counts) ? details.code_counts : []
+                                    const sourceCounts = Array.isArray(details.source_counts) ? details.source_counts : []
+                                    const incidentItems = Array.isArray(details.items) ? details.items : []
+                                    const filteredIncidentItems = incidentItems.filter((incident) => {
+                                      if (!incident || typeof incident !== 'object') return false
+                                      const row = incident as Record<string, unknown>
+                                      const code = String(row.error_code || '').trim().toUpperCase() || 'UNKNOWN'
+                                      const source = String(row.source || '').trim().toLowerCase() || 'unknown'
+                                      const state = String(row.incident_state || '').trim().toLowerCase() || 'open'
+                                      if (incidentOnlyOpen && state !== 'open') return false
+                                      if (incidentCodeFilter !== 'all' && code !== incidentCodeFilter) return false
+                                      if (incidentSourceFilter !== 'all' && source !== incidentSourceFilter) return false
+                                      return true
+                                    })
+                                    return (
+                                      <>
+                                        {codeCounts.length > 0 ? (
+                                          <div className="meta" style={{ marginTop: 6 }}>
+                                            Incident codes: {codeCounts
+                                              .map((entry) => {
+                                                if (!entry || typeof entry !== 'object') return ''
+                                                const row = entry as Record<string, unknown>
+                                                return `${String(row.code || '').trim()}:${Number(row.count || 0)}`
+                                              })
+                                              .filter(Boolean)
+                                              .slice(0, 4)
+                                              .join(' | ')}
+                                          </div>
+                                        ) : null}
+                                        {(codeCounts.length > 0 || sourceCounts.length > 0) ? (
+                                          <div className="row" style={{ marginTop: 8, gap: 6, flexWrap: 'wrap' }}>
+                                            <button
+                                              type="button"
+                                              className="status-chip"
+                                              onClick={() => setIncidentOnlyOpen((prev) => !prev)}
+                                              style={incidentOnlyOpen ? { fontWeight: 700 } : undefined}
+                                            >
+                                              {incidentOnlyOpen ? 'Open only ON' : 'Open only OFF'}
+                                            </button>
+                                            <button
+                                              type="button"
+                                              className="status-chip"
+                                              onClick={() => setIncidentCodeFilter('all')}
+                                              style={incidentCodeFilter === 'all' ? { fontWeight: 700 } : undefined}
+                                            >
+                                              Code: all
+                                            </button>
+                                            {codeCounts.slice(0, 4).map((entry, idx) => {
+                                              if (!entry || typeof entry !== 'object') return null
+                                              const row = entry as Record<string, unknown>
+                                              const code = String(row.code || '').trim().toUpperCase()
+                                              if (!code) return null
+                                              const count = Number(row.count || 0)
+                                              return (
+                                                <button
+                                                  key={`incident-code-filter:${code}:${idx}`}
+                                                  type="button"
+                                                  className="status-chip"
+                                                  onClick={() => setIncidentCodeFilter(code)}
+                                                  style={incidentCodeFilter === code ? { fontWeight: 700 } : undefined}
+                                                >
+                                                  {code} ({Number.isFinite(count) ? count : 0})
+                                                </button>
+                                              )
+                                            })}
+                                            <button
+                                              type="button"
+                                              className="status-chip"
+                                              onClick={() => setIncidentSourceFilter('all')}
+                                              style={incidentSourceFilter === 'all' ? { fontWeight: 700 } : undefined}
+                                            >
+                                              Source: all
+                                            </button>
+                                            {sourceCounts.slice(0, 3).map((entry, idx) => {
+                                              if (!entry || typeof entry !== 'object') return null
+                                              const row = entry as Record<string, unknown>
+                                              const source = String(row.source || '').trim().toLowerCase() || 'unknown'
+                                              const count = Number(row.count || 0)
+                                              return (
+                                                <button
+                                                  key={`incident-source-filter:${source}:${idx}`}
+                                                  type="button"
+                                                  className="status-chip"
+                                                  onClick={() => setIncidentSourceFilter(source)}
+                                                  style={incidentSourceFilter === source ? { fontWeight: 700 } : undefined}
+                                                >
+                                                  {source} ({Number.isFinite(count) ? count : 0})
+                                                </button>
+                                              )
+                                            })}
+                                          </div>
+                                        ) : null}
+                                        {incidentItems.length > 0 ? (
+                                          <div className="meta" style={{ marginTop: 6 }}>
+                                            Showing {filteredIncidentItems.length} of {incidentItems.length} incidents.
+                                          </div>
+                                        ) : null}
+                                        {incidentItems.length > 0 ? (
+                                          <div style={{ marginTop: 8 }}>
+                                            {filteredIncidentItems.slice(0, 5).map((incident, idx) => {
+                                              const row = (incident && typeof incident === 'object')
+                                                ? (incident as Record<string, unknown>)
+                                                : {}
+                                              const taskId = String(row.task_id || '').trim()
+                                              const taskLink = String(row.task_link || '').trim()
+                                              const code = String(row.error_code || '').trim()
+                                              const state = String(row.incident_state || '').trim() || 'open'
+                                              const happenedAt = String(row.happened_at || '').trim() || null
+                                              return (
+                                                <div className="meta" key={`incident-row:${taskId}:${idx}`} style={{ marginTop: 4 }}>
+                                                  [{state}] {code || 'UNKNOWN'} on{' '}
+                                                  {taskLink ? (
+                                                    <a href={taskLink}>{taskId || 'task'}</a>
+                                                  ) : (
+                                                    <span>{taskId || 'task'}</span>
+                                                  )}
+                                                  {happenedAt ? ` at ${happenedAt}` : ''}
+                                                </div>
+                                              )
+                                            })}
+                                            {filteredIncidentItems.length <= 0 ? (
+                                              <div className="meta" style={{ marginTop: 4 }}>
+                                                No incidents match active filters.
+                                              </div>
+                                            ) : null}
+                                          </div>
+                                        ) : null}
+                                      </>
+                                    )
+                                  })()
+                                ) : null}
+                                {checkStatus !== 'passed' && suggestedActionId ? (
+                                  <div className="row" style={{ marginTop: 8, gap: 8, flexWrap: 'wrap' }}>
+                                    <span className="status-chip">
+                                      Suggested fix: {suggestedActionId}
+                                    </span>
+                                    {quickActionCooldownLabel(suggestedActionId) ? (
+                                      <span className="status-chip">
+                                        {quickActionCooldownLabel(suggestedActionId)}
+                                      </span>
+                                    ) : null}
+                                    {suggestedAction.rationale ? (
+                                      <span className="status-chip">
+                                        {suggestedAction.rationale}
+                                      </span>
+                                    ) : null}
+                                    <button
+                                      type="button"
+                                      className="status-chip"
+                                      disabled={
+                                        !canRunSuggestedAction
+                                        || quickActionBusyId === suggestedActionId
+                                        || bulkQuickActionsRunning
+                                        || quickActionCooldownState(suggestedActionId).active
+                                        || (executeDoctorQuickActionPending && String(executeDoctorQuickActionId || '') === suggestedActionId)
+                                      }
+                                      onClick={() => { void handleQuickAction(suggestedActionId) }}
+                                    >
+                                      {(quickActionBusyId === suggestedActionId || (executeDoctorQuickActionPending && String(executeDoctorQuickActionId || '') === suggestedActionId))
+                                        ? 'Running...'
+                                        : (quickActionCooldownLabel(suggestedActionId) || 'Run suggested fix')}
+                                    </button>
+                                  </div>
+                                ) : null}
+                              </dd>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </details>
+                  )
+                })}
               </div>
             </div>
           ) : null}

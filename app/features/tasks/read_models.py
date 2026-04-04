@@ -38,6 +38,7 @@ from shared.task_automation import (
 from shared.task_delivery import normalize_delivery_mode
 from shared.task_relationships import normalize_task_relationships
 from shared.team_mode_lifecycle import task_has_merge_evidence, task_lifecycle_milestones
+from shared.automation_errors import classify_automation_error
 
 _COMMIT_SHA_EXPLICIT_RE = re.compile(
     r"(?i)(?:\\b(?:commit|sha|changeset|hash)\\s*[:=#]?\\s*|/commit/)([0-9a-f]{7,40})\\b"
@@ -739,6 +740,7 @@ def get_task_automation_status_read_model(db: Session, user, task_id: str) -> di
         if isinstance(state.get("last_lead_handoff_deploy_execution"), dict)
         else {}
     )
+    automation_error = classify_automation_error(state.get("last_agent_error"))
     if not derived_handoff_deploy_execution and structured_lead_handoff:
         source_task_id = str(state.get("last_requested_source_task_id") or "").strip()
         if source_task_id:
@@ -761,6 +763,11 @@ def get_task_automation_status_read_model(db: Session, user, task_id: str) -> di
         "last_agent_stream_updated_at": state.get("last_agent_stream_updated_at"),
         "last_agent_run_id": state.get("last_agent_run_id"),
         "last_agent_error": state.get("last_agent_error"),
+        "last_agent_error_code": automation_error.get("code"),
+        "last_agent_error_title": automation_error.get("title"),
+        "last_agent_error_message": automation_error.get("message"),
+        "last_agent_error_recommended_doctor_action_id": automation_error.get("recommended_doctor_action_id"),
+        "last_agent_error_worktree_isolation_related": bool(automation_error.get("worktree_isolation_related")),
         "last_agent_comment": state.get("last_agent_comment"),
         "last_agent_usage": state.get("last_agent_usage"),
         "last_agent_prompt_mode": state.get("last_agent_prompt_mode"),

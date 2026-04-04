@@ -425,7 +425,7 @@ def _require_task_scoped_git_worktree(
     if team_mode_enabled:
         return
     raise RuntimeError(
-        "Executor refused repo-root execution: Team Mode task with Git Delivery requires a task-scoped role and worktree."
+        "[EXECUTOR_WORKTREE_SCOPE_REQUIRED] Executor refused repo-root execution: Team Mode task with Git Delivery requires a task-scoped role and worktree."
     )
 
 
@@ -1137,12 +1137,15 @@ def _run_command_streaming(
     *,
     command: list[str],
     context: dict[str, object],
+    cwd: str | None,
     timeout_seconds: float | None,
     cancel_event: threading.Event | None = None,
     on_event: Callable[[dict[str, object]], None] | None = None,
 ) -> str:
+    run_cwd = str(cwd or "").strip() or None
     proc = subprocess.Popen(
         command,
+        cwd=run_cwd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -1410,6 +1413,7 @@ def execute_task_automation(
         try:
             proc = subprocess.run(
                 command,
+                cwd=str(task_workdir or "").strip() or None,
                 input=json.dumps(context),
                 text=True,
                 capture_output=True,
@@ -1433,7 +1437,7 @@ def execute_task_automation(
                 repo_root_after=repo_root_after,
             ):
                 raise RuntimeError(
-                    "Executor modified the repository root outside the task worktree. "
+                    "[EXECUTOR_WORKTREE_ROOT_MUTATION] Executor modified the repository root outside the task worktree. "
                     "Task automation must only edit files inside the assigned task worktree and task branch."
                 )
         parsed_outcome = _attach_git_evidence_usage(
@@ -1654,6 +1658,7 @@ def execute_task_automation_stream(
             stdout = _run_command_streaming(
                 command=command,
                 context=context,
+                cwd=str(task_workdir or "").strip() or None,
                 timeout_seconds=run_timeout_seconds,
                 cancel_event=cancel_event,
                 on_event=on_event,
@@ -1685,7 +1690,7 @@ def execute_task_automation_stream(
                 repo_root_after=repo_root_after,
             ):
                 raise RuntimeError(
-                    "Executor modified the repository root outside the task worktree. "
+                    "[EXECUTOR_WORKTREE_ROOT_MUTATION] Executor modified the repository root outside the task worktree. "
                     "Task automation must only edit files inside the assigned task worktree and task branch."
                 )
         parsed_outcome = _attach_git_evidence_usage(

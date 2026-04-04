@@ -1,12 +1,20 @@
 import React from 'react'
-import { ProjectKnowledgeGraphPage } from '../projects/ProjectKnowledgeGraphPage'
-import { ProjectTaskFlowPage } from '../projects/ProjectTaskFlowPage'
 import { ProjectsPanel } from '../projects/ProjectsPanel'
 import { SpecificationsPanel } from '../specifications/SpecificationsPanel'
 import { NotesPanel } from '../notes/NotesPanel'
 import { QuickAddDrawer } from '../tasks/QuickAddDrawer'
 import { TasksPanel } from '../tasks/TasksPanel'
 import { AdminPanel, GlobalSearchResultsPanel, ProfilePanel, SearchPanel, WorkspacePanel } from '../auxPanels'
+
+const LazyProjectKnowledgeGraphPage = React.lazy(async () => {
+  const module = await import('../projects/ProjectKnowledgeGraphPage')
+  return { default: module.ProjectKnowledgeGraphPage }
+})
+
+const LazyProjectTaskFlowPage = React.lazy(async () => {
+  const module = await import('../projects/ProjectTaskFlowPage')
+  return { default: module.ProjectTaskFlowPage }
+})
 
 export function AppPrimaryPanels({ state }: { state: any }) {
   const currentWorkspace = (state.bootstrap.data?.workspaces ?? []).find((item: any) => item.id === state.workspaceId)
@@ -15,6 +23,9 @@ export function AppPrimaryPanels({ state }: { state: any }) {
   const currentWorkspaceRole = (state.bootstrap.data?.memberships ?? []).find((item: any) => item.workspace_id === state.workspaceId)?.role
     ?? (state.bootstrap.data?.memberships ?? [])[0]?.role
     ?? ''
+  const doctorStatus = state.workspaceDoctorQuery?.data ?? null
+  const doctorIncidentOpen = Number(doctorStatus?.checks?.recent_executor_worktree_open_incident_count ?? 0)
+  const suppressTasksIncidentSummary = Number.isFinite(doctorIncidentOpen) && doctorIncidentOpen > 0
   return (
     <>
       <QuickAddDrawer
@@ -102,6 +113,9 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             state.setQuickTaskType(taskType === 'scheduled_instruction' ? 'scheduled_instruction' : 'manual')
             state.setShowQuickAdd(true)
           }}
+          doctorStatus={doctorStatus}
+          onOpenDoctorIncident={state.openWorkspaceDoctorIncident}
+          suppressDoctorIncidentSummary={suppressTasksIncidentSummary}
         />
       )}
 
@@ -249,30 +263,34 @@ export function AppPrimaryPanels({ state }: { state: any }) {
       )}
 
       {state.tab === 'knowledge-graph' && (
-        <ProjectKnowledgeGraphPage
-          userId={state.userId}
-          selectedProjectId={state.selectedProjectId}
-          selectedProjectName={state.selectedProject?.name || ''}
-          selectedProjectChatIndexMode={state.selectedProject?.chat_index_mode}
-          selectedProjectChatAttachmentIngestionMode={state.selectedProject?.chat_attachment_ingestion_mode}
-          overviewQuery={state.projectGraphOverview}
-          contextPackQuery={state.projectGraphContextPack}
-          subgraphQuery={state.projectGraphSubgraph}
-          eventStormingOverviewQuery={state.projectEventStormingOverview}
-          eventStormingSubgraphQuery={state.projectEventStormingSubgraph}
-          onCreateTaskFromSummary={state.createTaskFromGraphSummary}
-          onCreateNoteFromSummary={state.createNoteFromGraphSummary}
-          onLinkFocusTaskToSpecification={state.linkFocusTaskToSpecification}
-        />
+        <React.Suspense fallback={<section className="card"><div className="notice">Loading knowledge graph view...</div></section>}>
+          <LazyProjectKnowledgeGraphPage
+            userId={state.userId}
+            selectedProjectId={state.selectedProjectId}
+            selectedProjectName={state.selectedProject?.name || ''}
+            selectedProjectChatIndexMode={state.selectedProject?.chat_index_mode}
+            selectedProjectChatAttachmentIngestionMode={state.selectedProject?.chat_attachment_ingestion_mode}
+            overviewQuery={state.projectGraphOverview}
+            contextPackQuery={state.projectGraphContextPack}
+            subgraphQuery={state.projectGraphSubgraph}
+            eventStormingOverviewQuery={state.projectEventStormingOverview}
+            eventStormingSubgraphQuery={state.projectEventStormingSubgraph}
+            onCreateTaskFromSummary={state.createTaskFromGraphSummary}
+            onCreateNoteFromSummary={state.createNoteFromGraphSummary}
+            onLinkFocusTaskToSpecification={state.linkFocusTaskToSpecification}
+          />
+        </React.Suspense>
       )}
 
       {state.tab === 'task-flow' && (
-        <ProjectTaskFlowPage
-          userId={state.userId}
-          selectedProjectId={state.selectedProjectId}
-          selectedProjectName={state.selectedProject?.name || ''}
-          taskDependencyGraphQuery={state.projectTaskDependencyGraph}
-        />
+        <React.Suspense fallback={<section className="card"><div className="notice">Loading task flow view...</div></section>}>
+          <LazyProjectTaskFlowPage
+            userId={state.userId}
+            selectedProjectId={state.selectedProjectId}
+            selectedProjectName={state.selectedProject?.name || ''}
+            taskDependencyGraphQuery={state.projectTaskDependencyGraph}
+          />
+        </React.Suspense>
       )}
 
       {state.tab === 'specifications' && (

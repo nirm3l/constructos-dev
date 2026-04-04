@@ -104,6 +104,8 @@ export function AppNotices({ state }: { state: any }) {
   const status = String(license?.status || '').toLowerCase()
   const doctorStatus = state.workspaceDoctorQuery?.data ?? null
   const doctorRuntimeHealth = doctorStatus?.runtime_health ?? null
+  const doctorIncidentTotal = _toFiniteNumber(doctorStatus?.checks?.recent_executor_worktree_incident_count) ?? 0
+  const doctorIncidentOpen = _toFiniteNumber(doctorStatus?.checks?.recent_executor_worktree_open_incident_count) ?? 0
   const doctorCurrentScore = _toFiniteNumber(doctorRuntimeHealth?.health_score)
   const doctorRecentRuns = Array.isArray(doctorStatus?.recent_runs) ? doctorStatus.recent_runs : []
   const doctorPreviousSnapshot = doctorRecentRuns
@@ -163,12 +165,27 @@ export function AppNotices({ state }: { state: any }) {
     return null
   }, [runtimeHealthStatus])
   const showDoctorTimeline = Boolean(runtimeHealthNotice || doctorLastFailure || doctorLastRecovery)
+  const doctorIncidentNotice = React.useMemo(() => {
+    const total = Math.max(0, Math.round(doctorIncidentTotal))
+    const open = Math.max(0, Math.round(doctorIncidentOpen))
+    if (open <= 0) return null
+    return {
+      tone: 'error' as const,
+      message: `Executor worktree incidents are open: ${open} open of ${total} total.`,
+    }
+  }, [doctorIncidentOpen, doctorIncidentTotal])
+  const effectiveRuntimeHealthNotice = doctorIncidentNotice ? null : runtimeHealthNotice
+  const showDoctorTimelineEffective = Boolean(effectiveRuntimeHealthNotice || doctorLastFailure || doctorLastRecovery)
   const canActivate = ['trial', 'grace', 'expired', 'unlicensed'].includes(status)
   const activateLicenseMutation = state.activateLicenseMutation
   const executeDoctorQuickActionMutation = state.executeDoctorQuickActionMutation
   const replayRecoveryPending = Boolean(
     executeDoctorQuickActionMutation?.isPending
     && String(executeDoctorQuickActionMutation?.variables || '') === 'recovery-sequence'
+  )
+  const executorDiagnosticsPending = Boolean(
+    executeDoctorQuickActionMutation?.isPending
+    && String(executeDoctorQuickActionMutation?.variables || '') === 'executor-worktree-guard-diagnostics'
   )
   const seatUsage = activateLicenseMutation?.data?.seat_usage
 
@@ -252,6 +269,23 @@ export function AppNotices({ state }: { state: any }) {
       })
     }
   }, [doctorCurrentScore, executeDoctorQuickActionMutation])
+  const runExecutorDiagnosticsWithTelemetry = React.useCallback(async () => {
+    if (!executeDoctorQuickActionMutation?.mutateAsync) return
+    try {
+      const response = await executeDoctorQuickActionMutation.mutateAsync('executor-worktree-guard-diagnostics')
+      const healthLabel = String(response?.status?.runtime_health?.overall_status || 'unknown').trim().toLowerCase() || 'unknown'
+      setRecoveryOutcomeToast({
+        tone: response?.ok === false ? 'error' : 'success',
+        message: `Executor diagnostics completed: ${healthLabel}.`,
+      })
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Executor diagnostics failed.'
+      setRecoveryOutcomeToast({
+        tone: 'error',
+        message: `Executor diagnostics failed: ${message}`,
+      })
+    }
+  }, [executeDoctorQuickActionMutation])
 
   return (
     <>
@@ -331,19 +365,43 @@ export function AppNotices({ state }: { state: any }) {
           <span>{licenseNotice.message}</span>
         </div>
       )}
-      {runtimeHealthNotice ? (
-        <div className={`notice ${runtimeHealthNotice.tone === 'error' ? 'notice-error' : ''}`.trim()} role={runtimeHealthNotice.tone === 'error' ? 'alert' : 'status'}>
+      {effectiveRuntimeHealthNotice ? (
+        <div className={`notice ${effectiveRuntimeHealthNotice.tone === 'error' ? 'notice-error' : ''}`.trim()} role={effectiveRuntimeHealthNotice.tone === 'error' ? 'alert' : 'status'}>
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <span>{runtimeHealthNotice.message}</span>
+            <span>{effectiveRuntimeHealthNotice.message}</span>
             {typeof state.openWorkspaceDoctorIncident === 'function' ? (
               <button type="button" className="status-chip" onClick={() => state.openWorkspaceDoctorIncident()}>
-                {runtimeHealthNotice.cta}
+                {effectiveRuntimeHealthNotice.cta}
               </button>
             ) : null}
           </div>
         </div>
       ) : null}
-      {showDoctorTimeline ? (
+      {doctorIncidentNotice ? (
+        <div className={`notice ${doctorIncidentNotice.tone === 'error' ? 'notice-error' : ''}`.trim()} role="alert">
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span>{doctorIncidentNotice.message}</span>
+            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="status-chip"
+                disabled={!executeDoctorQuickActionMutation || executorDiagnosticsPending}
+                onClick={() => {
+                  void runExecutorDiagnosticsWithTelemetry()
+                }}
+              >
+                {executorDiagnosticsPending ? 'Running diagnostics...' : 'Run executor diagnostics'}
+              </button>
+              {typeof state.openWorkspaceDoctorIncident === 'function' ? (
+                <button type="button" className="status-chip" onClick={() => state.openWorkspaceDoctorIncident()}>
+                  Open Doctor incidents
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {showDoctorTimelineEffective ? (
         <div className="notice" role="status">
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <strong>Doctor Incident Timeline</strong>

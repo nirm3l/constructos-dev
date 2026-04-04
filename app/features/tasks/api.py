@@ -46,6 +46,7 @@ from shared.core import (
 from shared.eventing import rebuild_state
 from shared.in_memory_stream_broker import InMemoryStreamBroker
 from shared.models import CommandExecution, SessionLocal
+from shared.automation_errors import classify_automation_error
 from .application import TaskApplicationService
 from .read_models import TaskListQuery, list_tasks_read_model
 
@@ -707,6 +708,7 @@ def run_automation_stream(
                 if "value" in error_holder:
                     failed_at = to_iso_utc(datetime.now(timezone.utc))
                     error_text = str(error_holder["value"])
+                    error_details = classify_automation_error(error_text)
                     with SessionLocal() as local_db:
                         app_service = TaskApplicationService(local_db, user)
                         app_service.mark_automation_failed(
@@ -728,6 +730,9 @@ def run_automation_stream(
                                         "automation_state": "failed",
                                         "summary": "Automation runner failed.",
                                         "comment": error_text,
+                                        "error_code": error_details.get("code"),
+                                        "error_title": error_details.get("title"),
+                                        "recommended_doctor_action_id": error_details.get("recommended_doctor_action_id"),
                                     },
                                     ensure_ascii=True,
                                 )
@@ -738,6 +743,9 @@ def run_automation_stream(
                         "automation_state": "failed",
                         "summary": "Automation runner failed.",
                         "comment": error_text,
+                        "error_code": error_details.get("code"),
+                        "error_title": error_details.get("title"),
+                        "recommended_doctor_action_id": error_details.get("recommended_doctor_action_id"),
                     }
                     _publish_stream_event(task_id, {"type": "final", "response": response})
                     _finish_stream_run(task_id)

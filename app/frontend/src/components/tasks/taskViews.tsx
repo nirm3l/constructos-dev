@@ -45,9 +45,9 @@ function formatScheduleState(state: Task['schedule_state'] | null | undefined): 
 
 function formatAutomationState(state: string | null | undefined): string {
   const raw = String(state ?? '').trim()
-  if (!raw || raw.toLowerCase() === 'idle') return 'Idle'
-  if (raw === 'completed') return 'Execution Completed'
-  return `Execution ${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
+  if (!raw || raw.toLowerCase() === 'idle') return 'Automation Idle'
+  if (raw === 'completed') return 'Automation Completed'
+  return `Automation ${raw.charAt(0).toUpperCase()}${raw.slice(1)}`
 }
 
 function toExecutionChipClassState(state: string | null | undefined): string {
@@ -68,6 +68,38 @@ function resolveEffectiveExecutionState(task: Task): string {
 function isCompletedTaskStatus(status: string | null | undefined): boolean {
   const raw = String(status ?? '').trim().toLowerCase()
   return raw === 'done' || raw === 'completed'
+}
+
+function resolveExecutionAttention(
+  workflowStatus: string | null | undefined,
+  executionState: string | null | undefined,
+): { label: string; hint: string; tone: 'warning' | 'failing' } | null {
+  const workflowDone = isCompletedTaskStatus(workflowStatus)
+  const execution = String(executionState ?? '').trim().toLowerCase() || 'idle'
+  if (execution === 'failed') {
+    return {
+      label: 'Execution incident',
+      hint: workflowDone
+        ? 'Automation failed even though workflow is completed. Recheck run evidence and rerun automation if needed.'
+        : 'Automation failed for an active workflow task. Open task insights and run Doctor fix guidance.',
+      tone: 'failing',
+    }
+  }
+  if (workflowDone && (execution === 'queued' || execution === 'running')) {
+    return {
+      label: 'Execution still active',
+      hint: 'Workflow is completed, but automation is still queued/running. Verify if completion was premature.',
+      tone: 'warning',
+    }
+  }
+  if (!workflowDone && execution === 'completed') {
+    return {
+      label: 'Workflow not closed',
+      hint: 'Automation is completed, but workflow status is not Done/Completed.',
+      tone: 'warning',
+    }
+  }
+  return null
 }
 
 const BOTTOM_TAB_ITEMS: Array<{ value: Tab; label: string; shortLabel: string; iconPath: string }> = [
@@ -188,9 +220,10 @@ export function TaskListItem({
   const scheduleRepeat = formatRecurringRuleCompact(task.recurring_rule)
   const scheduleState = formatScheduleState(task.schedule_state)
   const effectiveExecutionState = resolveEffectiveExecutionState(task)
-  const hasVisibleAutomationState = effectiveExecutionState !== 'idle'
   const executionStateLabel = formatAutomationState(effectiveExecutionState)
   const executionStateClass = toExecutionChipClassState(effectiveExecutionState)
+  const executionAttention = resolveExecutionAttention(task.status, effectiveExecutionState)
+  const dueDateLabel = task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'
   const primaryAction = task.archived
     ? {
         label: 'Restore task',
@@ -296,7 +329,7 @@ export function TaskListItem({
         <div className="task-meta-compact">
           <div className="task-meta-left">
             <span className="meta">
-              {task.status} | {task.due_date ? new Date(task.due_date).toLocaleString() : 'No due date'}
+              Workflow: {task.status} | Due: {dueDateLabel}
               {showProject && <> | Project: {projectName || task.project_id}</>}
             </span>
             {assigneeLabel && (
@@ -307,13 +340,34 @@ export function TaskListItem({
             )}
           </div>
           <div className="task-meta-right">
-            {!isScheduled && hasVisibleAutomationState && (
+            {!isScheduled && (
+              <ChipTooltip label={`Workflow status: ${task.status}`}>
+                <span className="task-schedule-chip">
+                  Workflow {task.status}
+                </span>
+              </ChipTooltip>
+            )}
+            {!isScheduled && (
               <ChipTooltip label={executionStateLabel}>
                 <span className={`task-schedule-chip task-schedule-state task-schedule-state-${executionStateClass}`}>
                   {executionStateLabel}
                 </span>
               </ChipTooltip>
             )}
+            {executionAttention ? (
+              <ChipTooltip label={executionAttention.hint}>
+                <span
+                  className="task-schedule-chip"
+                  style={
+                    executionAttention.tone === 'failing'
+                      ? { background: 'rgba(239, 68, 68, 0.14)', borderColor: 'rgba(239, 68, 68, 0.35)', color: '#7f1d1d' }
+                      : { background: 'rgba(245, 158, 11, 0.16)', borderColor: 'rgba(245, 158, 11, 0.35)', color: '#7c2d12' }
+                  }
+                >
+                  {executionAttention.label}
+                </span>
+              </ChipTooltip>
+            ) : null}
             <div className="task-badges">
               {linkedNoteCount > 0 && (
                 <ChipTooltip label={`${linkedNoteCount} linked note${linkedNoteCount === 1 ? '' : 's'}`}>
