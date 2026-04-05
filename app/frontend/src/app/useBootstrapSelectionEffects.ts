@@ -1,5 +1,6 @@
 import React from 'react'
 import { normalizeAgentExecutionModel } from '../utils/agentExecution'
+import { normalizeTheme } from '../theme'
 
 function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | 'xhigh' {
   const normalized = String(value || '').trim().toLowerCase()
@@ -11,7 +12,7 @@ function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | '
 export function useBootstrapSelectionEffects(c: any) {
   React.useEffect(() => {
     const fromBackend = c.bootstrap.data?.current_user?.theme
-    if (fromBackend === 'dark' || fromBackend === 'light') c.setTheme(fromBackend)
+    c.setTheme(normalizeTheme(fromBackend))
   }, [c.bootstrap.data?.current_user?.theme, c.setTheme])
 
   React.useEffect(() => {

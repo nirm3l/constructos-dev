@@ -10,6 +10,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from .observability import incr, set_value
 from .settings import DATABASE_URL
+from .theme import DEFAULT_THEME
 
 
 class Base(DeclarativeBase):
@@ -39,7 +40,7 @@ class User(Base, TimeMixin):
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=True)
     password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    theme: Mapped[str] = mapped_column(String(16), default="light")
+    theme: Mapped[str] = mapped_column(String(16), default=DEFAULT_THEME)
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     agent_chat_model: Mapped[str] = mapped_column(String(128), default="")

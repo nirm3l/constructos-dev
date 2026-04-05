@@ -34,6 +34,7 @@ from shared.settings import (
     agent_default_model_for_provider,
     agent_default_reasoning_effort_for_provider,
 )
+from shared.theme import DEFAULT_THEME, normalize_theme
 from shared.vector_store import normalize_embedding_model, project_embedding_index_snapshot, vector_store_enabled
 
 
@@ -430,7 +431,7 @@ def bootstrap_payload_read_model(db: Session, user: User) -> dict[str, Any]:
             "username": user.username,
             "full_name": user.full_name,
             "user_type": user.user_type,
-            "theme": user.theme,
+            "theme": normalize_theme(user.theme, default=DEFAULT_THEME),
             "timezone": user.timezone,
             "agent_chat_model": current_agent_chat_model,
             "agent_chat_reasoning_effort": current_agent_chat_reasoning_effort,

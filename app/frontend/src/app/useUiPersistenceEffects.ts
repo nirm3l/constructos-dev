@@ -1,5 +1,6 @@
 import React from 'react'
 import { parseUrlTab } from '../utils/ui'
+import { getThemeBrand, getThemeMode, normalizeTheme } from '../theme'
 
 export function useUiPersistenceEffects(c: any) {
   const applyingHistoryRef = React.useRef(false)
@@ -114,7 +115,10 @@ export function useUiPersistenceEffects(c: any) {
   }, [c.tab, c.setShowNotificationsPanel])
 
   React.useEffect(() => {
-    document.documentElement.setAttribute('data-theme', c.theme)
+    const normalizedTheme = normalizeTheme(c.theme)
+    document.documentElement.setAttribute('data-theme', getThemeMode(normalizedTheme))
+    document.documentElement.setAttribute('data-theme-brand', getThemeBrand(normalizedTheme))
+    document.documentElement.setAttribute('data-theme-key', normalizedTheme)
   }, [c.theme])
 
   React.useLayoutEffect(() => {

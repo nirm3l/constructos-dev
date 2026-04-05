@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from shared.core import User, UserPreferencesPatch, WorkspaceMember
+from shared.theme import DEFAULT_THEME, normalize_theme
 
 from .application import UserApplicationService
 
@@ -89,7 +90,7 @@ class UserOperationGateway:
         )
         return {
             "id": resolved.target.id,
-            "theme": str(resolved.target.theme or "light"),
+            "theme": normalize_theme(resolved.target.theme, default=DEFAULT_THEME),
             "timezone": str(resolved.target.timezone or "UTC"),
             "notifications_enabled": bool(resolved.target.notifications_enabled),
             "agent_chat_model": str(resolved.target.agent_chat_model or ""),

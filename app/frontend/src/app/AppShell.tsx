@@ -79,6 +79,7 @@ import {
   toUserDateTime
 } from '../utils/ui'
 import type { Tab } from '../utils/ui'
+import { type ThemeKey } from '../theme'
 import '../styles.css'
 
 const queryClient = new QueryClient()
@@ -195,7 +196,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     return parseStoredTab(localStorage.getItem('ui_tab'))
   })
   const [workspaceDoctorOpenRequestId, setWorkspaceDoctorOpenRequestId] = React.useState(0)
-  const [theme, setTheme] = React.useState<'light' | 'dark'>('light')
+  const [theme, setTheme] = React.useState<ThemeKey>('symphony-light')
   const [speechLang, setSpeechLang] = React.useState<string>(resolveInitialSpeechLang)
   const [agentChatModel, setAgentChatModel] = React.useState('')
   const [agentChatReasoningEffort, setAgentChatReasoningEffort] = React.useState<'low' | 'medium' | 'high' | 'xhigh'>('medium')

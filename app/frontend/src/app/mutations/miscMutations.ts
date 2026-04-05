@@ -11,6 +11,7 @@ import {
   stopAgentChatStream,
 } from '../../api'
 import type { ChatMcpServer, ChatReasoningEffort } from '../../types'
+import type { ThemeKey } from '../../theme'
 
 const ENTITY_ID_SOURCE = '[0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{4,}){0,4}'
 const ENTITY_ID_PATTERN = /([0-9a-fA-F]{8,}(?:-[0-9a-fA-F]{4,}){0,4})/
@@ -327,7 +328,7 @@ export function useMiscMutations(c: any) {
   })
 
   const themeMutation = useMutation({
-    mutationFn: (nextTheme: 'light' | 'dark') => patchMyPreferences(c.userId, { theme: nextTheme }),
+    mutationFn: (nextTheme: ThemeKey) => patchMyPreferences(c.userId, { theme: nextTheme }),
     onSuccess: async () => {
       c.setUiError(null)
       await c.qc.invalidateQueries({ queryKey: ['bootstrap'] })

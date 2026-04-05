@@ -44,12 +44,13 @@ TASK_UPDATE_TOOL_DESCRIPTION = (
 )
 
 THEME_TOGGLE_TOOL_DESCRIPTION = (
-    "Toggle current app-user theme between light and dark. "
+    "Toggle current app-user theme between light and night inside the active brand family. "
     "Use this only when the user explicitly asks to toggle (not set) theme."
 )
 
 THEME_SET_TOOL_DESCRIPTION = (
-    "Set current app-user theme to light or dark for the current app user profile. "
+    "Set current app-user theme for the current app user profile. "
+    "Allowed values: constructos-light, constructos-night, symphony-light, symphony-night. "
     "Use this for explicit set requests and report the resulting theme from the tool output."
 )
 

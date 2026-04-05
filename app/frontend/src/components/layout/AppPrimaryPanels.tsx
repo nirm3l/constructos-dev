@@ -484,8 +484,7 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             onChangeSpeechLang={state.setSpeechLang}
             onSaveChatExecutionPreferences={state.saveChatExecutionPreferences}
             saveChatExecutionPreferencesPending={state.saveChatExecutionPreferencesPending}
-            onToggleTheme={() => {
-              const next = state.theme === 'light' ? 'dark' : 'light'
+            onChangeTheme={(next) => {
               state.setTheme(next)
               state.themeMutation.mutate(next)
             }}

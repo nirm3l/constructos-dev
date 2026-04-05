@@ -1,10 +1,12 @@
+import type { ThemeKey } from './theme'
+
 export type User = {
   id: string
   username: string
   full_name: string
   user_type: 'human' | 'agent'
   timezone: string
-  theme: 'light' | 'dark'
+  theme: ThemeKey
   agent_chat_model?: string
   agent_chat_reasoning_effort?: ChatReasoningEffort | string
   onboarding_quick_tour_completed?: boolean
@@ -17,7 +19,7 @@ export type AuthUser = {
   full_name: string
   user_type: 'human' | 'agent'
   timezone: string
-  theme: 'light' | 'dark'
+  theme: ThemeKey
   agent_chat_model?: string
   agent_chat_reasoning_effort?: ChatReasoningEffort | string
   onboarding_quick_tour_completed?: boolean

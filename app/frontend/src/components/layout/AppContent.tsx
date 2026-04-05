@@ -4,6 +4,7 @@ import { AppNotices } from './AppNotices'
 import { AppPrimaryPanels } from './AppPrimaryPanels'
 import { AppOverlays } from './AppOverlays'
 import { OnboardingTour } from './OnboardingTour'
+import { toggleTheme } from '../../theme'
 
 export function AppContent({ state }: { state: any }) {
   const tourControlsRef = React.useRef<{ startQuick: () => void; startAdvanced: () => void } | null>(null)
@@ -93,7 +94,7 @@ export function AppContent({ state }: { state: any }) {
         setTab={state.setTab}
         theme={state.theme}
         onToggleTheme={() => {
-          const nextTheme = state.theme === 'light' ? 'dark' : 'light'
+          const nextTheme = toggleTheme(state.theme)
           state.setTheme(nextTheme)
           state.themeMutation.mutate(nextTheme)
         }}

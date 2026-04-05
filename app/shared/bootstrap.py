@@ -74,6 +74,7 @@ from .settings import (
     SEED_CONSTRUCTOS_INTERNAL_ENABLED,
     logger,
 )
+from .theme import THEME_CONSTRUCTOS_NIGHT, THEME_SYMPHONY_LIGHT
 
 _SEED_WORKSPACE_SKILLS_DIR = Path(__file__).resolve().parent / "workspace_skill_seeds"
 _SEED_FRONTMATTER_FIELD_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$")
@@ -436,7 +437,7 @@ def ensure_system_users(db: Session):
                     password_changed_at=None,
                     is_active=True,
                     timezone="UTC",
-                    theme="dark",
+                    theme=THEME_CONSTRUCTOS_NIGHT,
                 )
             )
             continue
@@ -1405,7 +1406,7 @@ def bootstrap_data():
                         password_changed_at=datetime.now(timezone.utc),
                         is_active=True,
                         timezone="Europe/Sarajevo",
-                        theme="light",
+                        theme=THEME_SYMPHONY_LIGHT,
                         agent_chat_model="",
                         agent_chat_reasoning_effort="medium",
                         onboarding_quick_tour_completed=False,

@@ -12,6 +12,7 @@ from shared.auth import generate_session_token, hash_session_token, verify_passw
 from shared.core import AuthSession, User, UserPreferencesPatch, WorkspaceMember, get_command_id, get_current_user, get_db
 from shared.settings import BOOTSTRAP_PASSWORD, BOOTSTRAP_USERNAME, DEFAULT_USER_ID
 from shared.settings import AUTH_COOKIE_SECURE, AUTH_SESSION_COOKIE_NAME, AUTH_SESSION_TTL_HOURS
+from shared.theme import DEFAULT_THEME, normalize_theme
 
 from features.agents.provider_auth import resolve_provider_effective_auth_source
 from features.agents.workspace_runtime import list_workspace_runtime_targets, upsert_workspace_runtime_target
@@ -143,7 +144,7 @@ def _serialize_auth_user(db: Session, user: User) -> dict:
         "full_name": user.full_name,
         "user_type": user.user_type,
         "timezone": user.timezone,
-        "theme": user.theme,
+        "theme": normalize_theme(user.theme, default=DEFAULT_THEME),
         "agent_chat_model": str(user.agent_chat_model or ""),
         "agent_chat_reasoning_effort": str(user.agent_chat_reasoning_effort or "medium"),
         "onboarding_quick_tour_completed": bool(user.onboarding_quick_tour_completed),

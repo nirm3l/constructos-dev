@@ -42,6 +42,7 @@ from features.task_groups.read_models import TaskGroupListQuery, list_task_group
 from shared.chat_indexing import CHAT_INDEX_MODE_KG_AND_VECTOR
 from shared.classification_cache import ClassificationCache, build_classification_cache_key
 from shared.command_ids import derive_child_command_id
+from shared.theme import DEFAULT_THEME, VALID_THEMES, normalize_theme, toggle_theme
 from shared.core import (
     BulkAction,
     CommentCreate,
@@ -2696,8 +2697,8 @@ class AgentTaskService:
                 explicit_target_user_id=user_id,
                 implicit_target_user_id=implicit_target_user_id,
             )
-        current_theme = str(current.get("theme") or "light").strip().lower()
-        next_theme = "light" if current_theme == "dark" else "dark"
+        current_theme = normalize_theme(current.get("theme"), default=DEFAULT_THEME)
+        next_theme = toggle_theme(current_theme)
         effective_command_id = (
             self._fallback_command_id(
                 prefix="mcp-theme-toggle",
@@ -2730,9 +2731,10 @@ class AgentTaskService:
         user_id: str | None = None,
     ) -> dict:
         self._require_token(auth_token)
-        normalized = str(theme or "").strip().lower()
-        if normalized not in {"light", "dark"}:
-            raise HTTPException(status_code=422, detail="theme must be one of: light, dark")
+        normalized = normalize_theme(theme, default="")
+        if normalized not in VALID_THEMES:
+            allowed = ", ".join(sorted(VALID_THEMES))
+            raise HTTPException(status_code=422, detail=f"theme must be one of: {allowed}")
         actor_user_id = self._resolve_mcp_actor_user_id()
         implicit_target_user_id = self._resolve_preference_target_user_id(user_id)
         # Theme set is naturally idempotent by target value, so we avoid relying on

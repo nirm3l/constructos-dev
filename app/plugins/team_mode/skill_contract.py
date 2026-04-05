@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from shared.models import Project, ProjectMember, ProjectRule, User as UserModel, WorkspaceMember
 from shared.project_repository import ensure_project_repository_initialized
+from shared.theme import THEME_CONSTRUCTOS_NIGHT
 
 TEAM_MODE_SKILL_KEY = "team_mode"
 TEAM_MODE_WORKSPACE_ROLE = "Admin"
@@ -69,7 +70,7 @@ def ensure_team_mode_workspace_agent(
             must_change_password=False,
             password_changed_at=None,
             is_active=True,
-            theme="dark",
+            theme=THEME_CONSTRUCTOS_NIGHT,
             timezone="UTC",
             notifications_enabled=True,
             agent_chat_model="",

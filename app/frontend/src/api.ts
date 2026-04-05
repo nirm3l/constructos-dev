@@ -83,6 +83,7 @@ import type {
   TaskComment,
   TasksPage,
 } from './types'
+import type { ThemeKey } from './theme'
 
 function formatApiError(raw: string, status: number): string {
   const fallback = `Request failed (${status})`
@@ -1690,13 +1691,13 @@ export const attachWorkspaceSkillToProject = (
 export const patchMyPreferences = (
   userId: string,
   payload: {
-    theme?: 'light' | 'dark'
+    theme?: ThemeKey
     timezone?: string
     notifications_enabled?: boolean
     agent_chat_model?: string | null
-  agent_chat_reasoning_effort?: ChatReasoningEffort | string | null
-  onboarding_quick_tour_completed?: boolean
-  onboarding_advanced_tour_completed?: boolean
+    agent_chat_reasoning_effort?: ChatReasoningEffort | string | null
+    onboarding_quick_tour_completed?: boolean
+    onboarding_advanced_tour_completed?: boolean
   }
 ) => api<{
   id: string

@@ -6,6 +6,8 @@ import * as Select from '@radix-ui/react-select'
 import * as Tooltip from '@radix-ui/react-tooltip'
 import type { BootstrapPayload, LicenseStatus, Notification } from '../../types'
 import type { Tab } from '../../utils/ui'
+import type { ThemeKey } from '../../theme'
+import { getThemeMode } from '../../theme'
 import { Icon } from '../shared/uiHelpers'
 import { MarkdownView } from '../../markdown/MarkdownView'
 
@@ -16,7 +18,7 @@ type AppHeaderProps = {
   license?: LicenseStatus | null
   tab: Tab
   setTab: (tab: Tab) => void
-  theme: 'light' | 'dark'
+  theme: ThemeKey
   onToggleTheme: () => void
   searchQ: string
   setSearchQ: (value: string) => void
@@ -161,8 +163,8 @@ export function AppHeader({
 }: AppHeaderProps) {
   const brandSubTop = 'From spec to ship,'
   const brandSubBottom = 'with context under control...'
-  const isDarkTheme = theme === 'dark'
-  const themeToggleTooltip = isDarkTheme ? 'Switch to light mode' : 'Switch to dark mode'
+  const isDarkTheme = getThemeMode(theme) === 'dark'
+  const themeToggleTooltip = isDarkTheme ? 'Switch to light mode' : 'Switch to night mode'
   const licenseStatus = String(license?.status || '').trim().toLowerCase()
   const licensePlanCode = String(license?.plan_code || '').trim().toLowerCase()
   const betaSubscription = licenseStatus === 'beta' || licensePlanCode.includes('beta')

@@ -134,6 +134,7 @@ from .models import (
     WorkspaceMember,
 )
 from .settings import DEFAULT_STATUSES, SNAPSHOT_EVERY
+from .theme import DEFAULT_THEME, normalize_theme
 from .typed_notifications import (
     DEFAULT_NOTIFICATION_SEVERITY,
     DEFAULT_NOTIFICATION_TYPE,
@@ -1079,7 +1080,7 @@ def apply_user_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
             "must_change_password": bool(p.get("must_change_password", True)),
             "password_changed_at": p.get("password_changed_at"),
             "is_active": bool(p.get("is_active", True)),
-            "theme": str(p.get("theme") or "light"),
+            "theme": normalize_theme(p.get("theme"), default=DEFAULT_THEME),
             "timezone": str(p.get("timezone") or "UTC"),
             "notifications_enabled": bool(p.get("notifications_enabled", True)),
             "agent_chat_model": str(p.get("agent_chat_model") or ""),
@@ -1092,7 +1093,7 @@ def apply_user_event(state: dict[str, Any], event: EventEnvelope) -> dict[str, A
 
     if event.event_type == USER_EVENT_PREFERENCES_UPDATED:
         if "theme" in p and p.get("theme") is not None:
-            s["theme"] = str(p.get("theme") or s.get("theme") or "light")
+            s["theme"] = normalize_theme(p.get("theme"), default=str(s.get("theme") or DEFAULT_THEME))
         if "timezone" in p and p.get("timezone") is not None:
             s["timezone"] = str(p.get("timezone") or s.get("timezone") or "UTC")
         if "notifications_enabled" in p and p.get("notifications_enabled") is not None:
@@ -2006,7 +2007,7 @@ def project_event(db: Session, ev: EventEnvelope):
         changed_at = p.get("password_changed_at")
         user.password_changed_at = datetime.fromisoformat(changed_at) if changed_at else None
         user.is_active = bool(p.get("is_active", True))
-        user.theme = str(p.get("theme") or user.theme or "light")
+        user.theme = normalize_theme(p.get("theme"), default=str(user.theme or DEFAULT_THEME))
         user.timezone = str(p.get("timezone") or user.timezone or "UTC")
         user.notifications_enabled = bool(p.get("notifications_enabled", True))
         user.agent_chat_model = str(p.get("agent_chat_model") or user.agent_chat_model or "")
@@ -2077,8 +2078,8 @@ def project_event(db: Session, ev: EventEnvelope):
     elif ev.event_type == USER_EVENT_PREFERENCES_UPDATED:
         user = db.get(User, ev.aggregate_id)
         if user:
-            if p.get("theme") in {"light", "dark"}:
-                user.theme = p["theme"]
+            if p.get("theme") is not None:
+                user.theme = normalize_theme(p.get("theme"), default=str(user.theme or DEFAULT_THEME))
             if p.get("timezone"):
                 user.timezone = p["timezone"]
             if "notifications_enabled" in p and p.get("notifications_enabled") is not None:

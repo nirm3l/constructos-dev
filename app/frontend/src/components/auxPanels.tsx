@@ -5,7 +5,6 @@ import * as Checkbox from '@radix-ui/react-checkbox'
 import * as Collapsible from '@radix-ui/react-collapsible'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Select from '@radix-ui/react-select'
-import * as Switch from '@radix-ui/react-switch'
 import * as Tabs from '@radix-ui/react-tabs'
 import * as Tooltip from '@radix-ui/react-tooltip'
 import type {
@@ -39,11 +38,14 @@ import { MarkdownView } from '../markdown/MarkdownView'
 import { PopularTagFilters } from './shared/PopularTagFilters'
 import { Icon, MarkdownModeToggle, MarkdownSplitPane } from './shared/uiHelpers'
 import { TaskListItem } from './tasks/taskViews'
+import { THEME_KEYS, THEME_LABELS, type ThemeKey, getThemeBrand, getThemeMode, toggleTheme } from '../theme'
 
 const VOICE_LANG_OPTIONS = [
   { value: 'bs-BA', label: 'Bosnian (bs-BA)' },
   { value: 'en-US', label: 'English (en-US)' },
 ]
+
+const THEME_OPTIONS = THEME_KEYS.map((value) => ({ value, label: THEME_LABELS[value] }))
 
 const CODEX_CHAT_REASONING_OPTIONS: Array<{ value: ChatReasoningEffort; label: string }> = [
   { value: 'low', label: 'Low' },
@@ -2059,7 +2061,7 @@ export function ProfilePanel({
   licenseLoading,
   licenseError,
   onLogout,
-  onToggleTheme,
+  onChangeTheme,
   onChangeSpeechLang,
   onSaveChatExecutionPreferences,
   saveChatExecutionPreferencesPending,
@@ -2085,7 +2087,7 @@ export function ProfilePanel({
   feedbackSubmitting,
 }: {
   userUsername: string
-  theme: 'light' | 'dark'
+  theme: ThemeKey
   speechLang: string
   agentChatModel: string
   agentChatReasoningEffort: ChatReasoningEffort | string
@@ -2106,7 +2108,7 @@ export function ProfilePanel({
   licenseLoading: boolean
   licenseError: string | null
   onLogout: () => void
-  onToggleTheme: () => void
+  onChangeTheme: (nextTheme: ThemeKey) => void
   onChangeSpeechLang: (value: string) => void
   onSaveChatExecutionPreferences: (payload: {
     agent_chat_model: string | null
@@ -2140,7 +2142,9 @@ export function ProfilePanel({
   }) => Promise<unknown>
   feedbackSubmitting: boolean
 }) {
-  const nextTheme = theme === 'light' ? 'dark' : 'light'
+  const nextTheme = toggleTheme(theme)
+  const themeMode = getThemeMode(theme)
+  const themeBrand = getThemeBrand(theme)
   const licenseStatus = String(license?.status || '').trim().toLowerCase() || 'unknown'
   const licenseStatusLabel = licenseStatus.charAt(0).toUpperCase() + licenseStatus.slice(1)
   const formatDateTime = (value: string | null): string => {
@@ -2334,7 +2338,7 @@ export function ProfilePanel({
       `Backend version: ${backendVersion || 'n/a'}`,
       `Backend build: ${backendBuild || 'n/a'}`,
       `Deployed UTC: ${deployedAtUtc || 'unknown'}`,
-      `Theme: ${theme}`,
+      `Theme: ${THEME_LABELS[theme]}`,
       `Voice language: ${selectedVoiceLabel}`,
       `Chat execution provider: ${activeExecutionProviderLabel}`,
       `Chat execution model: ${activeExecutionModelLabel}`,
@@ -2810,13 +2814,11 @@ export function ProfilePanel({
     [feedbackDescriptionInput, feedbackTitleInput, feedbackTypeInput, resetFeedbackForm, submitFeedback]
   )
 
-  const handleThemeCheckedChange = React.useCallback(
-    (checked: boolean) => {
-      const nextTheme = checked ? 'dark' : 'light'
-      if (nextTheme !== theme) onToggleTheme()
-    },
-    [onToggleTheme, theme]
-  )
+  const handleThemeChange = React.useCallback((nextValue: string) => {
+    const nextTheme = THEME_KEYS.find((value) => value === nextValue)
+    if (!nextTheme || nextTheme === theme) return
+    onChangeTheme(nextTheme)
+  }, [onChangeTheme, theme])
 
   const copyInstallationId = React.useCallback(async () => {
     const value = String(license?.installation_id || '').trim()
@@ -3081,34 +3083,40 @@ export function ProfilePanel({
                   <span className="status-chip">Theme</span>
                 </div>
                 <div className="profile-theme-row">
-                  <label className="profile-switch-label" htmlFor="profile-theme-switch">Dark mode</label>
+                  <label className="profile-switch-label" htmlFor="profile-theme-select">Theme</label>
                   <div className="profile-theme-controls">
-                    <Tooltip.Root>
-                      <Tooltip.Trigger asChild>
-                        <Switch.Root
-                          id="profile-theme-switch"
-                          className="profile-theme-switch"
-                          checked={theme === 'dark'}
-                          onCheckedChange={handleThemeCheckedChange}
-                          aria-label={`Switch to ${nextTheme} mode`}
-                        >
-                          <Switch.Thumb className="profile-theme-switch-thumb" />
-                        </Switch.Root>
-                      </Tooltip.Trigger>
-                      <Tooltip.Portal>
-                        <Tooltip.Content className="header-tooltip-content" sideOffset={6}>
-                          Toggle between light and dark themes
-                          <Tooltip.Arrow className="header-tooltip-arrow" />
-                        </Tooltip.Content>
-                      </Tooltip.Portal>
-                    </Tooltip.Root>
-                    <button className="button-secondary profile-action-button" type="button" onClick={onToggleTheme}>
+                    <Select.Root value={theme} onValueChange={handleThemeChange}>
+                      <Select.Trigger
+                        id="profile-theme-select"
+                        className="quickadd-project-trigger taskdrawer-select-trigger profile-select-trigger"
+                        aria-label="Theme selection"
+                      >
+                        <Select.Value />
+                        <Select.Icon asChild>
+                          <span className="quickadd-project-trigger-icon" aria-hidden="true">
+                            <Icon path="M6 9l6 6 6-6" />
+                          </span>
+                        </Select.Icon>
+                      </Select.Trigger>
+                      <Select.Portal>
+                        <Select.Content className="quickadd-project-content" position="popper" sideOffset={6}>
+                          <Select.Viewport className="quickadd-project-viewport">
+                            {THEME_OPTIONS.map((option) => (
+                              <Select.Item key={option.value} value={option.value} className="quickadd-project-item">
+                                <Select.ItemText>{option.label}</Select.ItemText>
+                              </Select.Item>
+                            ))}
+                          </Select.Viewport>
+                        </Select.Content>
+                      </Select.Portal>
+                    </Select.Root>
+                    <button className="button-secondary profile-action-button" type="button" onClick={() => onChangeTheme(nextTheme)}>
                       <Icon path="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79" />
-                      <span>{`Switch to ${nextTheme}`}</span>
+                      <span>{`Switch to ${themeMode === 'dark' ? 'light' : 'night'}`}</span>
                     </button>
                   </div>
                 </div>
-                <p className="meta">Current mode: {theme}.</p>
+                <p className="meta">Current: {THEME_LABELS[theme]} ({themeBrand}, {themeMode}).</p>
               </section>
 
               <section className="profile-pane-card" aria-label="Voice language" id="profile-voice-language" ref={voiceFactRef}>

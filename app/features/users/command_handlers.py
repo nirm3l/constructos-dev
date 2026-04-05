@@ -12,6 +12,7 @@ from features.agents.execution_provider import encode_execution_model, parse_exe
 from shared.auth import generate_temporary_password, hash_password, verify_password
 from shared.core import AggregateEventRepository, User, UserPreferencesPatch, WorkspaceMember, allocate_id, coerce_originator_id
 from shared.settings import BOOTSTRAP_WORKSPACE_ID, agent_default_reasoning_effort_for_provider
+from shared.theme import DEFAULT_THEME, normalize_theme
 
 from .domain import (
     UserAggregate,
@@ -76,6 +77,10 @@ def _normalize_reasoning_effort(raw: object) -> str:
         allowed = ", ".join(sorted(ALLOWED_REASONING_EFFORTS))
         raise HTTPException(status_code=422, detail=f"agent_chat_reasoning_effort must be one of: {allowed}")
     return canonical
+
+
+def _normalize_theme(raw: object) -> str:
+    return normalize_theme(raw, default=DEFAULT_THEME)
 
 
 def _require_workspace_admin(db: Session, workspace_id: str, user_id: str) -> WorkspaceMember:
@@ -146,7 +151,7 @@ class PatchUserPreferencesHandler:
         data = self.payload.model_dump(exclude_unset=True)
         event_payload: dict[str, object] = {}
         if "theme" in data:
-            event_payload["theme"] = data.get("theme")
+            event_payload["theme"] = _normalize_theme(data.get("theme"))
         if "timezone" in data:
             event_payload["timezone"] = data.get("timezone")
         if "notifications_enabled" in data:
@@ -182,7 +187,7 @@ class PatchUserPreferencesHandler:
             raise HTTPException(status_code=404, detail="User not found")
         return {
             "id": user.id,
-            "theme": str(user.theme or "light"),
+            "theme": _normalize_theme(user.theme),
             "timezone": str(user.timezone or "UTC"),
             "notifications_enabled": bool(user.notifications_enabled),
             "agent_chat_model": str(user.agent_chat_model or ""),
@@ -264,7 +269,7 @@ class CreateWorkspaceUserHandler:
             password_changed_at=None,
             is_active=True,
             timezone="UTC",
-            theme="light",
+            theme=DEFAULT_THEME,
             notifications_enabled=True,
             agent_chat_model="",
             agent_chat_reasoning_effort="medium",
