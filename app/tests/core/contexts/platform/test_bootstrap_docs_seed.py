@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib
 import os
 from pathlib import Path
-import sys
 
 
 def _repo_docs_root() -> Path:
@@ -21,10 +20,11 @@ def _bootstrap_runtime(tmp_path: Path, *, internal_seed_enabled: bool) -> object
     os.environ.pop("DB_PATH", None)
     os.environ["EVENTSTORE_URI"] = ""
     os.environ["SEED_CONSTRUCTOS_INTERNAL_ENABLED"] = "true" if internal_seed_enabled else "false"
+    import shared.settings as shared_settings
+    import shared.bootstrap as shared_bootstrap
 
-    for module_name in list(sys.modules):
-        if module_name == "main" or module_name.startswith("shared."):
-            sys.modules.pop(module_name, None)
+    shared_settings.SEED_CONSTRUCTOS_INTERNAL_ENABLED = bool(internal_seed_enabled)
+    shared_bootstrap.SEED_CONSTRUCTOS_INTERNAL_ENABLED = bool(internal_seed_enabled)
 
     import main
 

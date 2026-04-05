@@ -275,7 +275,18 @@ def activate_license(
         raise HTTPException(status_code=403, detail="Only workspace owners can activate a license.")
     try:
         result = activate_with_code_once(payload.activation_code)
-    except LicenseActivationError as exc:
+    except Exception as exc:
+        # Test/runtime module reloads can produce a distinct LicenseActivationError
+        # class object with the same contract; handle both robustly.
+        if not (
+            isinstance(exc, LicenseActivationError)
+            or (
+                str(exc.__class__.__name__ or "").strip() == "LicenseActivationError"
+                and hasattr(exc, "status_code")
+                and hasattr(exc, "detail")
+            )
+        ):
+            raise
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     return {"ok": True, **result}
 

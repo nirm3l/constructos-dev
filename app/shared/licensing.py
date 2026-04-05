@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 
 from sqlalchemy import select
@@ -17,6 +18,11 @@ def _normalize_installation_id(value: str | None) -> str | None:
 
 
 def configured_license_installation_id() -> str | None:
+    # Runtime env takes precedence over in-memory module state so tests and
+    # process-level overrides stay deterministic across module reloads.
+    runtime_value = _normalize_installation_id(os.getenv("LICENSE_INSTALLATION_ID"))
+    if runtime_value:
+        return runtime_value
     return _normalize_installation_id(settings.LICENSE_INSTALLATION_ID)
 
 
