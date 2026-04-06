@@ -44,10 +44,6 @@ It contains:
 - `neo4j`: knowledge graph projection store
 - `ollama`: embedding and GraphRAG support model runtime
 - `docker-socket-proxy`: constrained Docker access for automation
-- `marketing-site`: separate public marketing container
-
-
-It contains:
 
 
 ```mermaid
@@ -61,11 +57,6 @@ flowchart LR
     N4[(Neo4j)]
     OLL[Ollama]
     DSP[docker-socket-proxy]
-    MKT[marketing-site]
-  end
-
-    LCPDB[(SQLite)]
-    BAK[backup worker]
   end
 
   UI --> API
@@ -78,9 +69,6 @@ flowchart LR
   MCP --> N4
   MCP --> OLL
   API --> DSP
-  MKT -. public site .-> LCP
-  LCP --> LCPDB
-  BAK --> LCPDB
 ```
 
 ## Main Application Startup Model

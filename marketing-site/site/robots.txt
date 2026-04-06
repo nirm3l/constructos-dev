@@ -1,5 +1,0 @@
-User-agent: *
-Allow: /
-
-Sitemap: https://constructos.dev/sitemap.xml
-Host: constructos.dev

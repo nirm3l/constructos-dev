@@ -190,16 +190,6 @@ services:
       - ALL
     restart: unless-stopped
 
-  marketing-site:
-    image: "${MARKETING_SITE_IMAGE:-task-management-marketing-site:local}"
-    build: ./marketing-site
-    container_name: marketing-site
-    ports:
-      - "${MARKETING_PORT:-8082}:80"
-    security_opt:
-      - no-new-privileges:true
-    restart: unless-stopped
-
 volumes:
   postgres-data:
     name: task-management_postgres-data

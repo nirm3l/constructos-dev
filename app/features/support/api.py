@@ -15,14 +15,14 @@ FEEDBACK_TYPES = {"general", "feature_request", "question", "other"}
 
 class WaitlistJoinProxyRequest(BaseModel):
     email: str = Field(min_length=5, max_length=320)
-    source: str | None = Field(default="marketing-site", max_length=64)
+    source: str | None = Field(default="constructos-site", max_length=64)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ContactRequestProxyRequest(BaseModel):
     request_type: str = Field(min_length=3, max_length=32)
     email: str = Field(min_length=5, max_length=320)
-    source: str | None = Field(default="marketing-site", max_length=64)
+    source: str | None = Field(default="constructos-site", max_length=64)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -203,5 +203,4 @@ Repository and docs:
 - `app/features/*` - vertical slices (tasks, projects, specs, notes, rules, agents...).
 - `app/shared/*` - eventing, projections, models, settings, bootstrap, graph.
 - `app/frontend/*` - SPA and UI state management.
-- `marketing-site/*` - static marketing website served by dedicated Nginx container.
 - `scripts/*` - deploy, reset, and helper scripts.
