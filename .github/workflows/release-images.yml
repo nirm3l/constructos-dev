@@ -20,7 +20,7 @@ jobs:
           - image_suffix: mcp-tools
     env:
       IMAGE_PREFIX: constructos
-      IMAGE_SOURCE_REPO: nirm3l/constructos
+      IMAGE_SOURCE_REPO: nirm3l/constructos-dev
     steps:
       - name: Checkout
         uses: actions/checkout@v4

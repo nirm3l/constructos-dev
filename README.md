@@ -1,8 +1,8 @@
-# m4tr1x Task Management Platform
+# Constructos Task Management Platform
 
 Active documentation for the project, based on the current codebase snapshot (2026-02-18).
 
-m4tr1x is a task/project platform that combines:
+Constructos is a task/project platform that combines:
 - `CQRS + Event Sourcing` for the write path and auditability.
 - SQL read models for fast UI queries and filtering.
 - `Neo4j` knowledge graph for relation-aware context and GraphRAG flows.
@@ -188,7 +188,7 @@ pipx install --force "https://github.com/nirm3l/constructos/releases/download/co
 ```
 
 Repository and docs:
-- `https://github.com/nirm3l/m4tr1x`
+- `https://github.com/nirm3l/constructos-dev`
 - `tools/cos/README.md`
 
 ## Technology Stack

@@ -204,14 +204,6 @@ The main app supports three context-retrieval layers:
 
 `app/shared/knowledge_graph.py` combines graph and vector retrieval into GraphRAG-style context packs when enabled.
 
-## Licensing Boundary
-
-
-The rule is simple:
-
-- reads stay online
-- blocked writes return HTTP `402`
-
 ## Architecture Summary
 
 The easiest way to think about the main application is:

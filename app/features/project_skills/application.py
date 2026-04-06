@@ -301,7 +301,7 @@ def _fetch_skill_document(source_url: str) -> dict[str, Any]:
             source_url,
             timeout=20.0,
             follow_redirects=True,
-            headers={"User-Agent": "m4tr1x-skill-import/1.0"},
+            headers={"User-Agent": "constructos-skill-import/1.0"},
         )
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Skill source fetch failed: {exc}") from exc

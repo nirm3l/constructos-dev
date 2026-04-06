@@ -144,12 +144,6 @@ The SQL schema under `app/shared/models.py` carries most of the operational stat
 - `ChatAttachment`
 - `ChatMessageResourceLink`
 
-### App-Side Licensing State
-
-- `LicenseInstallation`
-- `LicenseEntitlement`
-- `LicenseValidationLog`
-
 ## Work Item Model In Practice
 
 `Task` is the single richest operational record in the system.

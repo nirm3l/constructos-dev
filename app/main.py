@@ -79,7 +79,7 @@ async def lifespan(_app: FastAPI):
     close_knowledge_graph_driver()
 
 
-app = FastAPI(title="m4tr1x (CQRS + Event Sourcing + Vertical Slice)", lifespan=lifespan)
+app = FastAPI(title="Constructos (CQRS + Event Sourcing + Vertical Slice)", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
