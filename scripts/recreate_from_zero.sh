@@ -189,7 +189,7 @@ for i in {1..60}; do
   sleep 2
 done
 
-echo "[6/7] Running Doctor recovery sequence and validating runtime health..."
+echo "[6/7] Running Doctor wiring + contract audit and validating runtime health..."
 DOCTOR_RECOVERY_ENABLED="${DOCTOR_RECOVERY_ENABLED:-true}"
 if [[ "$DOCTOR_RECOVERY_ENABLED" == "true" ]]; then
   doctor_username="${DOCTOR_RECOVERY_USERNAME:-$(resolve_compose_env_value "BOOTSTRAP_USERNAME" || true)}"
@@ -230,15 +230,64 @@ if [[ "$DOCTOR_RECOVERY_ENABLED" == "true" ]]; then
 
   rm -f /tmp/doctor-login.json
 
-  recovery_status="$(curl -sS -o /tmp/doctor-recovery.json -w "%{http_code}" -b "$cookie_jar" \
-    -X POST "http://localhost:1102/api/workspaces/${workspace_id}/doctor/actions/recovery-sequence" || true)"
-  if [[ "$recovery_status" != "200" ]]; then
-    echo "Doctor recovery quick action failed (HTTP ${recovery_status})."
-    cat /tmp/doctor-recovery.json || true
-    rm -f /tmp/doctor-recovery.json
-    exit 1
+  wiring_status="$(curl -sS -o /tmp/doctor-wiring.json -w "%{http_code}" -b "$cookie_jar" \
+    -X POST "http://localhost:1102/api/workspaces/${workspace_id}/doctor/actions/doctor-plugin-wiring" || true)"
+  if [[ "$wiring_status" != "200" ]]; then
+    echo "Doctor plugin wiring quick action failed (HTTP ${wiring_status}); retrying with direct seed."
+    cat /tmp/doctor-wiring.json || true
+    seed_status="$(curl -sS -o /tmp/doctor-seed.json -w "%{http_code}" -b "$cookie_jar" \
+      -X POST "http://localhost:1102/api/workspaces/${workspace_id}/doctor/seed" || true)"
+    if [[ "$seed_status" != "200" ]]; then
+      echo "Doctor seed fallback failed (HTTP ${seed_status})."
+      cat /tmp/doctor-seed.json || true
+      rm -f /tmp/doctor-wiring.json /tmp/doctor-seed.json
+      exit 1
+    fi
+    rm -f /tmp/doctor-seed.json
   fi
-  rm -f /tmp/doctor-recovery.json
+  rm -f /tmp/doctor-wiring.json
+
+  audit_action_status="$(curl -sS -o /tmp/doctor-audit-action.json -w "%{http_code}" -b "$cookie_jar" \
+    -X POST "http://localhost:1102/api/workspaces/${workspace_id}/doctor/actions/runtime-contract-audit" || true)"
+  if [[ "$audit_action_status" != "200" ]]; then
+    echo "Doctor runtime-contract-audit quick action failed (HTTP ${audit_action_status}); retrying with direct audit then quick action."
+    cat /tmp/doctor-audit-action.json || true
+    audit_status="$(curl -sS -o /tmp/doctor-audit.json -w "%{http_code}" -b "$cookie_jar" \
+      -X POST "http://localhost:1102/api/workspaces/${workspace_id}/doctor/audit" || true)"
+    if [[ "$audit_status" != "200" ]]; then
+      echo "Doctor audit fallback failed (HTTP ${audit_status})."
+      cat /tmp/doctor-audit.json || true
+      rm -f /tmp/doctor-audit-action.json /tmp/doctor-audit.json
+      exit 1
+    fi
+    audit_action_status="$(curl -sS -o /tmp/doctor-audit-action-retry.json -w "%{http_code}" -b "$cookie_jar" \
+      -X POST "http://localhost:1102/api/workspaces/${workspace_id}/doctor/actions/runtime-contract-audit" || true)"
+    if [[ "$audit_action_status" != "200" ]]; then
+      echo "Doctor runtime-contract-audit retry failed (HTTP ${audit_action_status})."
+      cat /tmp/doctor-audit-action-retry.json || true
+      rm -f /tmp/doctor-audit-action.json /tmp/doctor-audit.json /tmp/doctor-audit-action-retry.json
+      exit 1
+    fi
+    rm -f /tmp/doctor-audit-action-retry.json /tmp/doctor-audit.json
+  fi
+  rm -f /tmp/doctor-audit-action.json
+
+  warm_status="$(curl -sS -o /tmp/doctor-warm.json -w "%{http_code}" -b "$cookie_jar" \
+    -X POST "http://localhost:1102/api/workspaces/${workspace_id}/doctor/actions/warm-bootstrap-caches" || true)"
+  if [[ "$warm_status" != "200" ]]; then
+    echo "Doctor warm-bootstrap-caches quick action failed (HTTP ${warm_status}); retrying with direct bootstrap read."
+    cat /tmp/doctor-warm.json || true
+    bootstrap_status="$(curl -sS -o /tmp/doctor-bootstrap.json -w "%{http_code}" -b "$cookie_jar" \
+      "http://localhost:1102/api/bootstrap" || true)"
+    if [[ "$bootstrap_status" != "200" ]]; then
+      echo "Bootstrap warm fallback failed (HTTP ${bootstrap_status})."
+      cat /tmp/doctor-bootstrap.json || true
+      rm -f /tmp/doctor-warm.json /tmp/doctor-bootstrap.json
+      exit 1
+    fi
+    rm -f /tmp/doctor-bootstrap.json
+  fi
+  rm -f /tmp/doctor-warm.json
 
   doctor_payload="$(curl -sS -b "$cookie_jar" "http://localhost:1102/api/workspaces/${workspace_id}/doctor")"
   if ! grep -q '"overall_status":"healthy"' <<<"$doctor_payload"; then

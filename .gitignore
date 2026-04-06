@@ -38,3 +38,5 @@ license_control_plane/frontend/vite.config.d.ts
 desktop/node_modules/
 desktop/release/
 desktop/dist/
+
+AGENTS.md

@@ -1,5 +1,5 @@
 import React from 'react'
-import { parseCommaTags, parseProjectStatusesText, stableJson, toLocalDateTimeInput } from '../utils/ui'
+import { parseCommaTags, parseProjectStatusesText, projectStatusesToText, stableJson, toLocalDateTimeInput } from '../utils/ui'
 import {
   deriveInstruction,
   extractEnabledScheduleTrigger,
@@ -43,6 +43,13 @@ function normalizeChatAttachmentIngestionModeForDirty(value: unknown): 'OFF' | '
   if (mode === 'OFF') return 'OFF'
   if (mode === 'FULL_TEXT') return 'FULL_TEXT'
   return 'METADATA_ONLY'
+}
+
+function normalizeChatIndexModeForDirty(value: unknown): 'OFF' | 'VECTOR_ONLY' | 'KG_AND_VECTOR' {
+  const mode = String(value || '').trim().toUpperCase()
+  if (mode === 'VECTOR_ONLY') return 'VECTOR_ONLY'
+  if (mode === 'KG_AND_VECTOR') return 'KG_AND_VECTOR'
+  return 'OFF'
 }
 
 function normalizeExternalRefsForDirtyCheck(input: unknown): Array<{ url: string; title?: string; source?: string }> {
@@ -121,7 +128,8 @@ export function useEditorGuards(c: any) {
         new Set(
           (c.projectMembers ?? [])
             .filter((pm: any) => pm.project_id === c.selectedProjectId)
-            .map((pm: any) => pm.user_id)
+            .map((pm: any) => String(pm.user_id || '').trim())
+            .filter(Boolean)
         )
       ).sort(),
     [c.projectMembers, c.selectedProjectId]
@@ -136,7 +144,7 @@ export function useEditorGuards(c: any) {
       c.editProjectName.trim() !== (c.selectedProject.name ?? '').trim() ||
       c.editProjectDescription !== (c.selectedProject.description ?? '') ||
       stableJson(parseProjectStatusesText(c.editProjectCustomStatusesText)) !==
-        stableJson(c.selectedProject.custom_statuses ?? []) ||
+        stableJson(parseProjectStatusesText(projectStatusesToText(c.selectedProject.custom_statuses))) ||
       Boolean(c.editProjectEmbeddingEnabled) !== Boolean(c.selectedProject.embedding_enabled) ||
       String(c.editProjectEmbeddingModel || '').trim() !== String(c.selectedProject.embedding_model || '').trim() ||
       Boolean(c.editProjectVectorIndexDistillEnabled) !== Boolean(c.selectedProject.vector_index_distill_enabled) ||
@@ -144,8 +152,8 @@ export function useEditorGuards(c: any) {
         String(c.selectedProject.context_pack_evidence_top_k ?? '').trim() ||
       String(c.editProjectAutomationMaxParallelTasksText || '').trim() !==
         String(c.selectedProject.automation_max_parallel_tasks ?? 4).trim() ||
-      String(c.editProjectChatIndexMode || 'OFF').trim().toUpperCase() !==
-        String(c.selectedProject.chat_index_mode || 'OFF').trim().toUpperCase() ||
+      normalizeChatIndexModeForDirty(c.editProjectChatIndexMode || 'OFF') !==
+        normalizeChatIndexModeForDirty(c.selectedProject.chat_index_mode || 'OFF') ||
       normalizeChatAttachmentIngestionModeForDirty(c.editProjectChatAttachmentIngestionMode || 'METADATA_ONLY') !==
         normalizeChatAttachmentIngestionModeForDirty(c.selectedProject.chat_attachment_ingestion_mode || 'METADATA_ONLY') ||
       Boolean(c.editProjectEventStormingEnabled) !== Boolean(c.selectedProject.event_storming_enabled ?? true) ||
