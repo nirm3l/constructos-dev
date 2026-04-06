@@ -5395,20 +5395,6 @@ textarea:disabled {
   gap: 8px;
 }
 
-.profile-license {
-  display: grid;
-  gap: 8px;
-  border-top: 1px solid color-mix(in srgb, var(--line), var(--brand) 14%);
-  padding-top: 12px;
-}
-
-.profile-license-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
 .profile-section-toggle {
   margin: 0;
   padding: 0;
@@ -5440,11 +5426,6 @@ textarea:disabled {
 
 .profile-section-toggle[aria-expanded="true"] .profile-section-toggle-icon {
   transform: rotate(90deg);
-}
-
-.profile-license-head h3 {
-  margin: 0;
-  font-size: 14px;
 }
 
 .profile-runtime-facts {
@@ -5507,10 +5488,6 @@ textarea:disabled {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  font-size: 12px;
-}
-
-.profile-license-facts .profile-fact dd code {
   font-size: 12px;
 }
 
@@ -8625,48 +8602,6 @@ textarea:disabled {
   justify-content: space-between;
   gap: 10px;
   box-shadow: 0 12px 28px rgba(10, 20, 10, 0.2);
-}
-
-.notice-license-activate {
-  margin-top: 8px;
-  display: grid;
-  gap: 8px;
-}
-
-.license-activate-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.license-installation-id {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.license-activate-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-}
-
-.license-activate-error {
-  margin: 0;
-  color: #b22222;
-}
-
-.license-activate-meta {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-@media (max-width: 760px) {
-  .license-activate-form {
-    grid-template-columns: 1fr;
-  }
 }
 
 .skeleton {

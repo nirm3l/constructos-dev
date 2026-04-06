@@ -297,7 +297,7 @@ function advancedTourSteps(
       element: '[data-tour-id="header-settings-menu"]',
       popover: {
         title: 'Workspace Settings',
-        description: 'Use Settings for shared connections, runtime configuration, user administration, skills, licensing, and Doctor.',
+        description: 'Use Settings for shared connections, runtime configuration, user administration, skills, and Doctor.',
         side: 'bottom',
         align: 'end',
       },

@@ -51,7 +51,6 @@ This script:
 
 ## Uninstall / Stop
 
-Stop app services without touching protected control-plane services:
 
 ```bash
 docker compose -p constructos-app -f docker-compose.yml down

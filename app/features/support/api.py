@@ -5,11 +5,9 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 
-from shared.core import User, get_current_user, get_db
-from shared.licensing import resolve_license_installation_id
-from shared.settings import LICENSE_SERVER_TOKEN, LICENSE_SERVER_URL
+from shared.core import User, get_current_user
+from shared.settings import SUPPORT_API_TOKEN, SUPPORT_API_URL, SUPPORT_INSTANCE_ID
 
 router = APIRouter()
 FEEDBACK_TYPES = {"general", "feature_request", "question", "other"}
@@ -36,15 +34,15 @@ class FeedbackSubmitRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-def _control_plane_url(path: str) -> str:
-    base = str(LICENSE_SERVER_URL or "").strip().rstrip("/")
+def _support_api_url(path: str) -> str:
+    base = str(SUPPORT_API_URL or "").strip().rstrip("/")
     return f"{base}{path}"
 
 
 def _forward_headers(request: Request) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
-    if LICENSE_SERVER_TOKEN:
-        headers["Authorization"] = f"Bearer {LICENSE_SERVER_TOKEN}"
+    if SUPPORT_API_TOKEN:
+        headers["Authorization"] = f"Bearer {SUPPORT_API_TOKEN}"
 
     forwarded = str(request.headers.get("x-forwarded-for") or "").strip()
     if forwarded:
@@ -59,8 +57,8 @@ def _forward_headers(request: Request) -> dict[str, str]:
     return headers
 
 
-def _control_plane_error_detail(response: httpx.Response) -> str:
-    fallback = f"Control-plane request failed ({response.status_code})"
+def _support_api_error_detail(response: httpx.Response) -> str:
+    fallback = f"Support API request failed ({response.status_code})"
     try:
         payload = response.json()
     except Exception:
@@ -74,23 +72,23 @@ def _control_plane_error_detail(response: httpx.Response) -> str:
     return text or fallback
 
 
-def _post_to_control_plane(path: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:
+def _post_to_support_api(path: str, payload: dict[str, Any], request: Request) -> dict[str, Any]:
     try:
         with httpx.Client(timeout=8.0) as client:
             response = client.post(
-                _control_plane_url(path),
+                _support_api_url(path),
                 headers=_forward_headers(request),
                 json=payload,
             )
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Control-plane request failed: {exc}") from exc
+        raise HTTPException(status_code=503, detail=f"Support API request failed: {exc}") from exc
 
     if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=_control_plane_error_detail(response))
+        raise HTTPException(status_code=response.status_code, detail=_support_api_error_detail(response))
 
     body = response.json()
     if not isinstance(body, dict):
-        raise HTTPException(status_code=502, detail="Control-plane response must be a JSON object")
+        raise HTTPException(status_code=502, detail="Support API response must be a JSON object")
     return body
 
 
@@ -102,8 +100,8 @@ def _normalize_feedback_type(value: str | None) -> str:
     return normalized
 
 
-def _feedback_identity_email(*, username: str | None, user_id: str | None, installation_id: str) -> str:
-    raw = str(username or "").strip() or str(user_id or "").strip() or str(installation_id or "").strip() or "feedback"
+def _feedback_identity_email(*, username: str | None, user_id: str | None, instance_id: str) -> str:
+    raw = str(username or "").strip() or str(user_id or "").strip() or str(instance_id or "").strip() or "feedback"
     safe = "".join(ch if ch.isalnum() or ch in {".", "-", "_"} else "-" for ch in raw.lower()).strip(".-_")
     if not safe:
         safe = "feedback"
@@ -112,7 +110,7 @@ def _feedback_identity_email(*, username: str | None, user_id: str | None, insta
 
 @router.post("/api/public/waitlist")
 def proxy_waitlist_join(payload: WaitlistJoinProxyRequest, request: Request) -> dict[str, Any]:
-    return _post_to_control_plane(
+    return _post_to_support_api(
         "/v1/public/waitlist",
         {
             "email": payload.email,
@@ -125,7 +123,7 @@ def proxy_waitlist_join(payload: WaitlistJoinProxyRequest, request: Request) -> 
 
 @router.post("/api/public/contact-requests")
 def proxy_contact_request(payload: ContactRequestProxyRequest, request: Request) -> dict[str, Any]:
-    return _post_to_control_plane(
+    return _post_to_support_api(
         "/v1/public/contact-requests",
         {
             "request_type": payload.request_type,
@@ -141,10 +139,8 @@ def proxy_contact_request(payload: ContactRequestProxyRequest, request: Request)
 def submit_feedback(
     payload: FeedbackSubmitRequest,
     request: Request,
-    db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    installation_id = resolve_license_installation_id(db)
     feedback_type = _normalize_feedback_type(payload.feedback_type)
     context = dict(payload.context or {})
     metadata = dict(payload.metadata or {})
@@ -155,7 +151,7 @@ def submit_feedback(
     normalized_description = str(payload.description or "").strip()
 
     primary_payload = {
-        "installation_id": installation_id,
+        "instance_id": SUPPORT_INSTANCE_ID,
         "workspace_id": str(context.get("workspace_id") or "").strip() or None,
         "source": "task-app-ui",
         "title": normalized_title,
@@ -166,14 +162,14 @@ def submit_feedback(
         "metadata": metadata,
     }
     try:
-        control_plane_response = _post_to_control_plane("/v1/support/feedback", primary_payload, request)
+        support_response = _post_to_support_api("/v1/support/feedback", primary_payload, request)
     except HTTPException as exc:
         if exc.status_code != 404:
             raise
         fallback_metadata = dict(metadata)
         fallback_metadata["submission_kind"] = "feedback"
         fallback_metadata["feedback_type"] = feedback_type
-        fallback_metadata["installation_id"] = installation_id
+        fallback_metadata["instance_id"] = SUPPORT_INSTANCE_ID
         fallback_metadata["workspace_id"] = primary_payload["workspace_id"]
         fallback_metadata["reporter_user_id"] = reporter_user_id
         fallback_metadata["reporter_username"] = reporter_username
@@ -184,36 +180,36 @@ def submit_feedback(
             "email": _feedback_identity_email(
                 username=reporter_username,
                 user_id=reporter_user_id,
-                installation_id=installation_id,
+                instance_id=SUPPORT_INSTANCE_ID,
             ),
             "source": "task-app-ui",
             "metadata": fallback_metadata,
         }
         try:
-            control_plane_response = _post_to_control_plane("/v1/public/contact-requests", fallback_payload, request)
+            support_response = _post_to_support_api("/v1/public/contact-requests", fallback_payload, request)
         except HTTPException as fallback_exc:
-            # Compatibility fallback for control-plane versions that don't allow request_type=feedback yet.
+            # Compatibility fallback for support API versions that don't allow request_type=feedback yet.
             if fallback_exc.status_code != 400:
                 raise
             fallback_payload["request_type"] = "onboarding"
-            control_plane_response = _post_to_control_plane("/v1/public/contact-requests", fallback_payload, request)
+            support_response = _post_to_support_api("/v1/public/contact-requests", fallback_payload, request)
         contact_request = (
-            control_plane_response.get("contact_request")
-            if isinstance(control_plane_response.get("contact_request"), dict)
+            support_response.get("contact_request")
+            if isinstance(support_response.get("contact_request"), dict)
             else {}
         )
         return {
-            "ok": bool(control_plane_response.get("ok")),
-            "created": bool(control_plane_response.get("created")),
+            "ok": bool(support_response.get("ok")),
+            "created": bool(support_response.get("created")),
             "feedback": contact_request,
         }
     feedback_record = (
-        control_plane_response.get("feedback")
-        if isinstance(control_plane_response.get("feedback"), dict)
+        support_response.get("feedback")
+        if isinstance(support_response.get("feedback"), dict)
         else {}
     )
     return {
-        "ok": bool(control_plane_response.get("ok")),
-        "created": bool(control_plane_response.get("created")),
+        "ok": bool(support_response.get("ok")),
+        "created": bool(support_response.get("created")),
         "feedback": feedback_record,
     }

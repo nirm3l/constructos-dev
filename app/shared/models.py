@@ -538,45 +538,6 @@ class TeamModeExecutionSession(Base, TimeMixin):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
-class LicenseInstallation(Base, TimeMixin):
-    __tablename__ = "license_installations"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    installation_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
-    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), nullable=True, index=True)
-    status: Mapped[str] = mapped_column(String(24), default="trial")
-    plan_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
-
-
-class LicenseEntitlement(Base, TimeMixin):
-    __tablename__ = "license_entitlements"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    installation_id: Mapped[int] = mapped_column(ForeignKey("license_installations.id"), index=True)
-    source: Mapped[str] = mapped_column(String(32), default="local")
-    status: Mapped[str] = mapped_column(String(24), default="trial")
-    plan_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    raw_payload_json: Mapped[str] = mapped_column(Text, default="{}")
-
-
-class LicenseValidationLog(Base):
-    __tablename__ = "license_validation_logs"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    installation_id: Mapped[int] = mapped_column(ForeignKey("license_installations.id"), index=True)
-    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
-    result: Mapped[str] = mapped_column(String(24), index=True)
-    reason: Mapped[str] = mapped_column(String(256), default="")
-    details_json: Mapped[str] = mapped_column(Text, default="{}")
-
-
 class SupportBugReportOutbox(Base, TimeMixin):
     __tablename__ = "support_bug_report_outbox"
 

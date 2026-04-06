@@ -477,9 +477,6 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             claudeAuthLoading={Boolean(state.claudeAuthStatus?.isLoading || state.claudeAuthStatus?.isFetching)}
             canManageCodexAuth={state.canManageUsers}
             canManageClaudeAuth={state.canManageUsers}
-            license={state.licenseStatus?.data?.license ?? null}
-            licenseLoading={Boolean(state.licenseStatus?.isLoading)}
-            licenseError={state.licenseStatus?.isError ? 'Unable to load license status.' : null}
             onLogout={state.logout}
             onChangeSpeechLang={state.setSpeechLang}
             onSaveChatExecutionPreferences={state.saveChatExecutionPreferences}
@@ -625,9 +622,6 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             claudeAuthLoading={Boolean(state.claudeAuthStatus?.isLoading || state.claudeAuthStatus?.isFetching)}
             canManageCodexAuth={state.canManageUsers}
             canManageClaudeAuth={state.canManageUsers}
-            license={state.licenseStatus?.data?.license ?? null}
-            licenseLoading={Boolean(state.licenseStatus?.isLoading)}
-            licenseError={state.licenseStatus?.isError ? 'Unable to load license status.' : null}
             onStartCodexDeviceAuth={state.startCodexDeviceAuth}
             startCodexDeviceAuthPending={state.startCodexDeviceAuthPending}
             onCancelCodexDeviceAuth={state.cancelCodexDeviceAuth}

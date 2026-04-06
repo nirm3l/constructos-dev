@@ -12,9 +12,6 @@ import type {
   BootstrapPayload,
   FeedbackCreateRequest,
   FeedbackCreateResponse,
-  LicenseActivationResponse,
-  LicenseAutoUpdateResponse,
-  LicenseStatusResponse,
   AgentChatResponse,
   ChatMessageRecord,
   ChatMcpServer,
@@ -164,17 +161,6 @@ export const getArchitectureExport = (userId: string) =>
   api<ArchitectureExportPayload>('/api/debug/architecture-export', userId)
 export const getPluginDescriptors = (userId: string) =>
   api<PluginDescriptorsPayload>('/api/debug/plugin-descriptors', userId)
-export const getLicenseStatus = (userId: string) => api<LicenseStatusResponse>('/api/license/status', userId)
-export const activateLicense = (userId: string, payload: { activation_code: string }) =>
-  api<LicenseActivationResponse>('/api/license/activate', userId, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  })
-export const triggerLicenseAutoUpdate = (userId: string) =>
-  api<LicenseAutoUpdateResponse>('/api/license/auto-update', userId, {
-    method: 'POST',
-  })
-
 export const submitFeedback = (userId: string, payload: FeedbackCreateRequest) =>
   api<FeedbackCreateResponse>('/api/support/feedback', userId, {
     method: 'POST',

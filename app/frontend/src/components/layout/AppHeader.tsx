@@ -4,7 +4,7 @@ import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
 import * as Select from '@radix-ui/react-select'
 import * as Tooltip from '@radix-ui/react-tooltip'
-import type { BootstrapPayload, LicenseStatus, Notification } from '../../types'
+import type { BootstrapPayload, Notification } from '../../types'
 import type { Tab } from '../../utils/ui'
 import type { ThemeKey } from '../../theme'
 import { getThemeMode } from '../../theme'
@@ -15,7 +15,6 @@ const CONSTRUCTOS_USER_GUIDE_PROJECT_ID = '20000000-0000-0000-0000-000000000002'
 
 type AppHeaderProps = {
   bootstrapData: BootstrapPayload
-  license?: LicenseStatus | null
   tab: Tab
   setTab: (tab: Tab) => void
   theme: ThemeKey
@@ -134,7 +133,6 @@ function HeaderTooltip({
 
 export function AppHeader({
   bootstrapData,
-  license,
   tab,
   setTab,
   theme,
@@ -165,9 +163,6 @@ export function AppHeader({
   const brandSubBottom = 'with context under control...'
   const isDarkTheme = getThemeMode(theme) === 'dark'
   const themeToggleTooltip = isDarkTheme ? 'Switch to light mode' : 'Switch to night mode'
-  const licenseStatus = String(license?.status || '').trim().toLowerCase()
-  const licensePlanCode = String(license?.plan_code || '').trim().toLowerCase()
-  const betaSubscription = licenseStatus === 'beta' || licensePlanCode.includes('beta')
   const graphPagesActive = tab === 'knowledge-graph' || tab === 'task-flow'
   const normalizedDoctorRuntimeStatus = String(doctorRuntimeStatus || '').trim().toLowerCase()
   const doctorHasAlert = normalizedDoctorRuntimeStatus === 'warning' || normalizedDoctorRuntimeStatus === 'failing'
@@ -528,11 +523,6 @@ export function AppHeader({
                   </DropdownMenu.Content>
                 </DropdownMenu.Portal>
               </DropdownMenu.Root>
-              {betaSubscription ? (
-                <HeaderTooltip content="You are using a beta subscription and features may evolve.">
-                  <span className="top-beta-compact" aria-label="Beta subscription">BETA</span>
-                </HeaderTooltip>
-              ) : null}
             </div>
           </div>
         </div>

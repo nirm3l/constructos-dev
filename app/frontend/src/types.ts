@@ -434,46 +434,6 @@ export type Notification = {
   source_event?: string | null
 }
 
-export type LicenseStatus = {
-  installation_id: string
-  status: 'active' | 'trial' | 'grace' | 'expired' | 'unlicensed' | string
-  plan_code: string | null
-  enforcement_enabled: boolean
-  write_access: boolean
-  trial_ends_at: string | null
-  grace_ends_at: string | null
-  last_validated_at: string | null
-  token_expires_at: string | null
-  metadata: Record<string, unknown>
-  notifications?: Notification[]
-}
-
-export type LicenseStatusResponse = {
-  ok: boolean
-  license: LicenseStatus
-}
-
-export type LicenseAutoUpdateResponse = {
-  ok: boolean
-  queued: boolean
-  running: boolean
-  run_id: string | null
-  started_at: string | null
-  log_path: string | null
-}
-
-export type LicenseActivationSeatUsage = {
-  active_installations: number
-  max_installations: number
-  customer_ref: string
-}
-
-export type LicenseActivationResponse = {
-  ok: boolean
-  license: LicenseStatus
-  seat_usage: LicenseActivationSeatUsage | null
-}
-
 export type FeedbackKind = 'general' | 'feature_request' | 'question' | 'other'
 
 export type FeedbackCreateRequest = {

@@ -15,7 +15,6 @@ It is organized as a single reading path, with each document containing:
 2. `01-architecture.md`
 3. `02-domain-and-bounded-contexts.md`
 4. `03-agent-runtime-and-automation.md`
-5. `04-frontend-control-plane-and-ops.md`
 6. `05-testing-and-quality.md`
 7. `06-omc-patterns-and-adoption.md`
 8. `10-orchestration-hardening-plan.md`
@@ -47,7 +46,6 @@ flowchart TD
 | Runtime topology, CQRS/ES boundaries | `01-architecture.md` | CQRS/event-sourcing architecture policy |
 | Domain aggregates, contexts, data model | `02-domain-and-bounded-contexts.md` | CQRS + Team Mode + Starters policy |
 | Team Mode, setup orchestration, automation execution | `03-agent-runtime-and-automation.md` | Team Mode v2 + project setup orchestration policy |
-| UI surfaces, control-plane boundary, deploy safety | `04-frontend-control-plane-and-ops.md` | Team Mode + testing policy |
 | Test structure and enforcement | `05-testing-and-quality.md` | testing and quality policy |
 | OMC-inspired adoption roadmap | `06-omc-patterns-and-adoption.md` | orchestration pattern adoption policy |
 | Prompt-agnostic orchestration hardening execution plan | `10-orchestration-hardening-plan.md` | runtime determinism and orchestration quality policy |
@@ -57,15 +55,12 @@ flowchart TD
 ## Non-Negotiable Boundaries
 
 - App stack Compose project name: `constructos-app`.
-- Control-plane stack Compose project name: `constructos-cp`.
-- `license-control-plane` and `license-control-plane-backup` are protected services.
 - Do not run broad/unscoped Compose teardown commands that might affect both stacks.
 
 ## Fast Agent Start Checklist
 
 - Load the target project context (`project rules`, `skills`, `plugin config`, `setup profile`) before changes.
 - Confirm Team Mode and delivery workflow constraints before mutating workflow logic.
-- Verify whether task scope is app stack only or touches control-plane surfaces.
 - Treat policy sections as normative; treat implementation sections as current operational shape.
 
 ## Notes On Appendix

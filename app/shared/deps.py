@@ -14,7 +14,7 @@ from .auth import hash_session_token
 from .contracts import ConcurrencyConflictError
 from .models import AuthSession, ProjectMember, SessionLocal, User, WorkspaceMember
 from .observability import incr
-from .settings import AUTH_SESSION_COOKIE_NAME, LICENSE_ENFORCEMENT_ENABLED
+from .settings import AUTH_SESSION_COOKIE_NAME
 
 try:
     from eventsourcing.utils import retry as eventsourcing_retry
@@ -28,56 +28,6 @@ except Exception:  # pragma: no cover
 
 _T = TypeVar("_T")
 logger = logging.getLogger(__name__)
-LICENSE_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-LICENSE_WRITE_EXEMPT_PATHS = (
-    "/api/auth/login",
-    "/api/auth/logout",
-    "/api/auth/change-password",
-    "/api/license/status",
-    "/api/license/activate",
-    "/api/public",
-)
-
-
-def _normalize_api_path(path: str) -> str:
-    value = str(path or "").strip() or "/"
-    if value != "/" and value.endswith("/"):
-        value = value[:-1]
-    return value
-
-
-def _path_matches_prefix(path: str, prefix: str) -> bool:
-    return path == prefix or path.startswith(f"{prefix}/")
-
-
-def request_targets_write_path(request: Request) -> bool:
-    method = str(getattr(request, "method", "")).upper()
-    if method not in LICENSE_WRITE_METHODS:
-        return False
-    path = _normalize_api_path(request.url.path)
-    if not path.startswith("/api/"):
-        return False
-    for prefix in LICENSE_WRITE_EXEMPT_PATHS:
-        if _path_matches_prefix(path, prefix):
-            return False
-    return True
-
-
-def is_license_write_allowed(request: Request) -> tuple[bool, dict[str, object] | None]:
-    if not LICENSE_ENFORCEMENT_ENABLED:
-        return True, None
-    if not request_targets_write_path(request):
-        return True, None
-    # Unauthenticated requests should continue and be handled by auth dependencies.
-    if not request.cookies.get(AUTH_SESSION_COOKIE_NAME):
-        return True, None
-    from features.licensing.read_models import license_status_read_model
-
-    with SessionLocal() as db:
-        payload = license_status_read_model(db)
-    return bool(payload.get("write_access")), payload
-
-
 def get_db():
     db = SessionLocal()
     try:

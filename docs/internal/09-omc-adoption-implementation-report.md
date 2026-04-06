@@ -156,5 +156,4 @@ Pending (operational only):
 ## 7. Notes and Constraints Applied
 
 - No heuristic fallback was introduced for ambiguous workflow classification decisions.
-- Control-plane safety constraints were respected (no control-plane stack destructive operations performed as part of implementation).
 - No auto-deploy was executed from implementation flow.

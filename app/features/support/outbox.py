@@ -13,8 +13,8 @@ from sqlalchemy.orm import Session
 
 from shared.models import SessionLocal, SupportBugReportOutbox
 from shared.settings import (
-    LICENSE_SERVER_TOKEN,
-    LICENSE_SERVER_URL,
+    SUPPORT_API_TOKEN,
+    SUPPORT_API_URL,
     SUPPORT_BUG_REPORT_OUTBOX_BATCH_SIZE,
     SUPPORT_BUG_REPORT_OUTBOX_ENABLED,
     SUPPORT_BUG_REPORT_OUTBOX_INITIAL_BACKOFF_SECONDS,
@@ -29,10 +29,10 @@ _retry_worker_thread: threading.Thread | None = None
 _RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 
-class ControlPlaneSubmitError(RuntimeError):
+class SupportApiSubmitError(RuntimeError):
     def __init__(self, detail: str, *, status_code: int | None = None):
         super().__init__(detail)
-        self.detail = str(detail or "Control-plane request failed")
+        self.detail = str(detail or "Support API request failed")
         self.status_code = int(status_code) if status_code is not None else None
 
 
@@ -105,23 +105,23 @@ def enqueue_bug_report(
     return record, True
 
 
-def _control_plane_url(path: str) -> str:
-    base = str(LICENSE_SERVER_URL or "").strip().rstrip("/")
+def _support_api_url(path: str) -> str:
+    base = str(SUPPORT_API_URL or "").strip().rstrip("/")
     return f"{base}{path}"
 
 
-def _control_plane_headers() -> dict[str, str]:
+def _support_api_headers() -> dict[str, str]:
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "task-app-support-outbox/1.0",
     }
-    if LICENSE_SERVER_TOKEN:
-        headers["Authorization"] = f"Bearer {LICENSE_SERVER_TOKEN}"
+    if SUPPORT_API_TOKEN:
+        headers["Authorization"] = f"Bearer {SUPPORT_API_TOKEN}"
     return headers
 
 
-def _control_plane_error_detail(response: httpx.Response) -> str:
-    fallback = f"Control-plane request failed ({response.status_code})"
+def _support_api_error_detail(response: httpx.Response) -> str:
+    fallback = f"Support API request failed ({response.status_code})"
     try:
         payload = response.json()
     except Exception:
@@ -139,22 +139,22 @@ def _submit_bug_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         with httpx.Client(timeout=8.0) as client:
             response = client.post(
-                _control_plane_url("/v1/support/bug-reports"),
-                headers=_control_plane_headers(),
+                _support_api_url("/v1/support/bug-reports"),
+                headers=_support_api_headers(),
                 json=payload,
             )
     except Exception as exc:
-        raise ControlPlaneSubmitError(f"Control-plane request failed: {exc}") from exc
+        raise SupportApiSubmitError(f"Support API request failed: {exc}") from exc
 
     if response.status_code >= 400:
-        raise ControlPlaneSubmitError(
-            _control_plane_error_detail(response),
+        raise SupportApiSubmitError(
+            _support_api_error_detail(response),
             status_code=response.status_code,
         )
 
     body = response.json()
     if not isinstance(body, dict):
-        raise ControlPlaneSubmitError("Control-plane response must be a JSON object", status_code=502)
+        raise SupportApiSubmitError("Support API response must be a JSON object", status_code=502)
     return body
 
 
@@ -175,7 +175,7 @@ def _mark_failure(
     if not retryable:
         next_attempt_count = max(next_attempt_count, SUPPORT_BUG_REPORT_OUTBOX_MAX_ATTEMPTS)
     record.attempt_count = next_attempt_count
-    record.last_error = str(error_detail or "Control-plane request failed")[:2000]
+    record.last_error = str(error_detail or "Support API request failed")[:2000]
 
     if next_attempt_count >= SUPPORT_BUG_REPORT_OUTBOX_MAX_ATTEMPTS:
         record.next_attempt_at = now
@@ -214,7 +214,7 @@ def sync_bug_report_outbox_once(*, batch_size: int | None = None) -> int:
                 row.last_error = None
                 db.commit()
                 processed += 1
-            except ControlPlaneSubmitError as exc:
+            except SupportApiSubmitError as exc:
                 db.rollback()
                 _mark_failure(
                     row,

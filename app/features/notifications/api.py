@@ -19,7 +19,6 @@ from shared.core import (
 from shared.models import SessionLocal
 from shared.observability import incr
 from shared.realtime import realtime_hub
-from features.licensing.read_models import license_status_read_model
 from features.agents.provider_auth import get_provider_auth_status
 
 from .application import NotificationApplicationService
@@ -41,20 +40,6 @@ def _load_user_state_cursor(db: Session, user_id: str) -> str:
     if updated_at is None:
         return ""
     return updated_at.isoformat()
-
-
-def _load_license_state_cursor(db: Session) -> str:
-    payload = license_status_read_model(db)
-    stable = {
-        "installation_id": payload.get("installation_id"),
-        "status": payload.get("status"),
-        "plan_code": payload.get("plan_code"),
-        "write_access": bool(payload.get("write_access")),
-        "trial_ends_at": payload.get("trial_ends_at"),
-        "grace_ends_at": payload.get("grace_ends_at"),
-        "last_validated_at": payload.get("last_validated_at"),
-    }
-    return json.dumps(stable, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
 async def _wait_for_signal(subscription, timeout_seconds: float) -> None:
@@ -130,7 +115,6 @@ async def notifications_stream(
         if workspace_id and initial_activity_cursor == 0:
             initial_activity_cursor = latest_workspace_activity_id_read_model(db, workspace_id)
         initial_user_state_cursor = _load_user_state_cursor(db, user.id)
-        initial_license_state_cursor = _load_license_state_cursor(db)
     channels = {f"user:{user.id}"}
     if workspace_id:
         channels.add(f"workspace:{workspace_id}")
@@ -141,7 +125,6 @@ async def notifications_stream(
         notification_cursor = initial_notification_cursor
         activity_cursor = initial_activity_cursor
         user_state_cursor = initial_user_state_cursor
-        license_state_cursor = initial_license_state_cursor
         flush_now = True
         try:
             while True:
@@ -172,12 +155,11 @@ async def notifications_stream(
                             workspace_id,
                             activity_cursor,
                             limit=100,
-                        )
-                        if workspace_id
-                        else []
+                    )
+                    if workspace_id
+                    else []
                     )
                     refreshed_user_state_cursor = _load_user_state_cursor(db, user.id)
-                    refreshed_license_state_cursor = _load_license_state_cursor(db)
 
                 for n in items:
                     payload = serialize_notification(n)
@@ -193,11 +175,6 @@ async def notifications_stream(
                 if refreshed_user_state_cursor != user_state_cursor:
                     user_state_cursor = refreshed_user_state_cursor
                     yield "event: task_event\ndata: {}\n\n"
-                    emitted = True
-
-                if refreshed_license_state_cursor != license_state_cursor:
-                    license_state_cursor = refreshed_license_state_cursor
-                    yield "event: license_event\ndata: {}\n\n"
                     emitted = True
 
                 if not emitted:

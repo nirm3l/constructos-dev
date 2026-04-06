@@ -10,7 +10,6 @@
 
 - Vertical-slice organization is implemented under `app/features/<context>/`.
 - Core aggregate-centric contexts: projects, tasks, notes, specifications, rules, task groups, note groups.
-- Operational contexts include agents, doctor, project starters, project skills, licensing, and support.
 
 ## Known Drift / Transitional Risk
 
@@ -53,7 +52,6 @@ This pattern is strongest in work-item and project contexts.
 | `agents` | chat execution, MCP gateway, provider auth, runner, setup orchestration | `app/features/agents/*` |
 | `project_starters` | starter catalog and setup profile access | `app/features/project_starters/*` |
 | `project_skills` | workspace skill catalog and project skill attachment/import | `app/features/project_skills/*` |
-| `licensing` | app-side installation status, activation, enforcement, sync | `app/features/licensing/*` |
 | `doctor` | workspace diagnostics, fixture seeding, verification workflows | `app/features/doctor/*` |
 | `support` | waitlist, contact requests, in-product feedback | `app/features/support/*` |
 | `attachments` | upload, download, delete for attachment storage | `app/features/attachments/*` |
@@ -76,7 +74,6 @@ The main app route surface is broad, but it clusters into stable families:
 | `/api/notifications*` | `app/features/notifications/api.py` |
 | `/api/agents/*` and `/api/chat/*` | `app/features/agents/api.py`, `app/features/chat/api.py` |
 | `/api/project-starters*`, `/api/projects/{project_id}/setup-profile` | `app/features/project_starters/api.py` |
-| `/api/license/*` | `app/features/licensing/api.py` |
 | `/api/workspaces/{workspace_id}/doctor*` | `app/features/doctor/api.py` |
 | `/api/public/*`, `/api/support/*` | `app/features/support/api.py` |
 | `/api/attachments/*` | `app/features/attachments/api.py` |

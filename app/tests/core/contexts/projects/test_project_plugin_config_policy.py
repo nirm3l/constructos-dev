@@ -155,7 +155,7 @@ def test_compile_plugin_policy_docker_compose_snapshot_custom_runtime() -> None:
             "compose_project_name": "constructos-app",
             "workspace_root": "/workspace",
             "allowed_services": ["task-app", "mcp-tools"],
-            "protected_services": ["license-control-plane", "license-control-plane-backup"],
+            "protected_services": [],
             "runtime_deploy_health": {
                 "required": True,
                 "stack": "constructos-ws-default",
@@ -176,7 +176,7 @@ def test_compile_plugin_policy_docker_compose_snapshot_custom_runtime() -> None:
             "compose_project_name": "constructos-app",
             "workspace_root": "/workspace",
             "allowed_services": ["task-app", "mcp-tools"],
-            "protected_services": ["license-control-plane", "license-control-plane-backup"],
+            "protected_services": [],
         },
         "runtime_deploy_health": {
             "required": True,

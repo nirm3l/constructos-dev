@@ -22,7 +22,6 @@ Applies to the backend under:
 - `app/features/*`
 - `app/shared/*`
 
-It excludes the separate `license_control_plane` service.
 
 ## Core Principles
 1. Separate writes and reads (CQRS).
@@ -185,7 +184,6 @@ So, operationally:
 ## Frontend Reactivity Model
 Primary UI reactivity channel:
 - SSE endpoint: `/api/notifications/stream`
-  - Carries notification events, workspace activity refresh signals, license refresh signals, and auth refresh signals.
   - Uses commit-triggered realtime hub + timeout ping fallback for resilience.
 
 Other streaming channels:

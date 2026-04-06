@@ -270,17 +270,9 @@ DEFAULT_EMBEDDING_MODEL = os.getenv("DEFAULT_EMBEDDING_MODEL", "nomic-embed-text
 ALLOWED_EMBEDDING_MODELS = _parse_csv_list_env("ALLOWED_EMBEDDING_MODELS") or [DEFAULT_EMBEDDING_MODEL]
 OLLAMA_EMBED_GPU_ENABLED = _env_bool("OLLAMA_EMBED_GPU_ENABLED", True)
 
-LICENSE_ENFORCEMENT_ENABLED = _env_bool("LICENSE_ENFORCEMENT_ENABLED", True)
-LICENSE_INSTALLATION_ID = os.getenv("LICENSE_INSTALLATION_ID", "").strip()
-HOST_OPERATING_SYSTEM = os.getenv("HOST_OPERATING_SYSTEM", "").strip()
-# License server endpoint is intentionally fixed in runtime and not configurable
-# via customer-side environment variables.
-LICENSE_SERVER_URL = "https://licence.constructos.dev"
-LICENSE_SERVER_TOKEN = os.getenv("LICENSE_SERVER_TOKEN", "").strip()
-LICENSE_PUBLIC_KEY = os.getenv("LICENSE_PUBLIC_KEY", "").strip()
-LICENSE_HEARTBEAT_SECONDS = _env_int("LICENSE_HEARTBEAT_SECONDS", 900)
-LICENSE_GRACE_HOURS = _env_int("LICENSE_GRACE_HOURS", 72)
-LICENSE_TRIAL_DAYS = _env_int("LICENSE_TRIAL_DAYS", 7)
+SUPPORT_API_URL = os.getenv("SUPPORT_API_URL", "https://licence.constructos.dev").strip()
+SUPPORT_API_TOKEN = os.getenv("SUPPORT_API_TOKEN", "").strip()
+SUPPORT_INSTANCE_ID = os.getenv("SUPPORT_INSTANCE_ID", "open-source").strip() or "open-source"
 SUPPORT_BUG_REPORT_OUTBOX_ENABLED = _env_bool("SUPPORT_BUG_REPORT_OUTBOX_ENABLED", True)
 SUPPORT_BUG_REPORT_OUTBOX_POLL_SECONDS = _env_float("SUPPORT_BUG_REPORT_OUTBOX_POLL_SECONDS", 30.0)
 SUPPORT_BUG_REPORT_OUTBOX_BATCH_SIZE = max(1, _env_int("SUPPORT_BUG_REPORT_OUTBOX_BATCH_SIZE", 20))

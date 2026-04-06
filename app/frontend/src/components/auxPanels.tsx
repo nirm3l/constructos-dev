@@ -14,7 +14,6 @@ import type {
   ChatReasoningEffort,
   ClaudeAuthLoginMethod,
   CodexAuthLoginMethod,
-  LicenseStatus,
   Note,
   Specification,
   Task,
@@ -2057,9 +2056,6 @@ export function ProfilePanel({
   claudeAuthStatus,
   claudeAuthLoading,
   canManageClaudeAuth,
-  license,
-  licenseLoading,
-  licenseError,
   onLogout,
   onChangeTheme,
   onChangeSpeechLang,
@@ -2104,9 +2100,6 @@ export function ProfilePanel({
   claudeAuthStatus: AgentAuthStatus | null
   claudeAuthLoading: boolean
   canManageClaudeAuth: boolean
-  license: LicenseStatus | null | undefined
-  licenseLoading: boolean
-  licenseError: string | null
   onLogout: () => void
   onChangeTheme: (nextTheme: ThemeKey) => void
   onChangeSpeechLang: (value: string) => void
@@ -2145,8 +2138,6 @@ export function ProfilePanel({
   const nextTheme = toggleTheme(theme)
   const themeMode = getThemeMode(theme)
   const themeBrand = getThemeBrand(theme)
-  const licenseStatus = String(license?.status || '').trim().toLowerCase() || 'unknown'
-  const licenseStatusLabel = licenseStatus.charAt(0).toUpperCase() + licenseStatus.slice(1)
   const formatDateTime = (value: string | null): string => {
     if (!value) return 'n/a'
     const parsed = new Date(value)
@@ -2161,19 +2152,6 @@ export function ProfilePanel({
       .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
       .join(' ')
   }
-  const licenseMetadata = (license?.metadata && typeof license.metadata === 'object'
-    ? (license.metadata as Record<string, unknown>)
-    : {}) as Record<string, unknown>
-  const subscriptionStatus = String(licenseMetadata.subscription_status ?? '').trim().toLowerCase()
-  const subscriptionValidUntil = String(licenseMetadata.subscription_valid_until ?? '').trim() || null
-  const publicBetaEnabled = licenseMetadata.public_beta === true
-  const publicBetaFreeUntil = String(licenseMetadata.public_beta_free_until ?? '').trim() || null
-  const entitlementSource = publicBetaEnabled
-    ? `Public beta until ${formatDateTime(publicBetaFreeUntil)}`
-    : subscriptionStatus
-      ? `Subscription (${formatLabel(subscriptionStatus)})`
-      : 'Trial fallback'
-  const showTrialWindow = licenseStatus === 'trial' || licenseStatus === 'grace'
   const [profileTab, setProfileTab] = React.useState<'preferences' | 'security' | 'feedback'>('preferences')
   const [currentPasswordInput, setCurrentPasswordInput] = React.useState('')
   const [newPasswordInput, setNewPasswordInput] = React.useState('')
@@ -2183,7 +2161,6 @@ export function ProfilePanel({
   const [feedbackDescriptionInput, setFeedbackDescriptionInput] = React.useState('')
   const [feedbackTypeInput, setFeedbackTypeInput] = React.useState<'general' | 'feature_request' | 'question' | 'other'>('general')
   const [feedbackResult, setFeedbackResult] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
-  const [installationCopyState, setInstallationCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
   const [runtimeCopyState, setRuntimeCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
   const voiceFactRef = React.useRef<HTMLDivElement | null>(null)
   const voiceSelectTriggerRef = React.useRef<HTMLButtonElement | null>(null)
@@ -2820,22 +2797,6 @@ export function ProfilePanel({
     onChangeTheme(nextTheme)
   }, [onChangeTheme, theme])
 
-  const copyInstallationId = React.useCallback(async () => {
-    const value = String(license?.installation_id || '').trim()
-    if (!value) return
-    if (typeof navigator === 'undefined' || !navigator.clipboard) {
-      setInstallationCopyState('error')
-      return
-    }
-    try {
-      await navigator.clipboard.writeText(value)
-      setInstallationCopyState('copied')
-      window.setTimeout(() => setInstallationCopyState('idle'), 1400)
-    } catch {
-      setInstallationCopyState('error')
-      window.setTimeout(() => setInstallationCopyState('idle'), 1800)
-    }
-  }, [license?.installation_id])
 
   const copyRuntimeSnapshot = React.useCallback(async () => {
     if (typeof navigator === 'undefined' || !navigator.clipboard) {
@@ -3530,9 +3491,6 @@ export function WorkspacePanel({
   claudeAuthStatus,
   claudeAuthLoading,
   canManageClaudeAuth,
-  license,
-  licenseLoading,
-  licenseError,
   onStartCodexDeviceAuth,
   startCodexDeviceAuthPending,
   onCancelCodexDeviceAuth,
@@ -3589,9 +3547,6 @@ export function WorkspacePanel({
   claudeAuthStatus: AgentAuthStatus | null
   claudeAuthLoading: boolean
   canManageClaudeAuth: boolean
-  license: LicenseStatus | null | undefined
-  licenseLoading: boolean
-  licenseError: string | null
   onStartCodexDeviceAuth: (loginMethod: CodexAuthLoginMethod) => Promise<unknown>
   startCodexDeviceAuthPending: boolean
   onCancelCodexDeviceAuth: () => Promise<unknown>
@@ -3623,23 +3578,7 @@ export function WorkspacePanel({
       .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
       .join(' ')
   }
-  const licenseStatus = String(license?.status || '').trim().toLowerCase() || 'unknown'
-  const licenseStatusLabel = licenseStatus.charAt(0).toUpperCase() + licenseStatus.slice(1)
-  const licenseMetadata = (license?.metadata && typeof license.metadata === 'object'
-    ? (license.metadata as Record<string, unknown>)
-    : {}) as Record<string, unknown>
-  const subscriptionStatus = String(licenseMetadata.subscription_status ?? '').trim().toLowerCase()
-  const subscriptionValidUntil = String(licenseMetadata.subscription_valid_until ?? '').trim() || null
-  const publicBetaEnabled = licenseMetadata.public_beta === true
-  const publicBetaFreeUntil = String(licenseMetadata.public_beta_free_until ?? '').trim() || null
-  const entitlementSource = publicBetaEnabled
-    ? `Public beta until ${formatDateTime(publicBetaFreeUntil)}`
-    : subscriptionStatus
-      ? `Subscription (${formatLabel(subscriptionStatus)})`
-      : 'Trial fallback'
-  const showTrialWindow = licenseStatus === 'trial' || licenseStatus === 'grace'
-  const [workspaceTab, setWorkspaceTab] = React.useState<'connections' | 'runtime' | 'doctor' | 'users' | 'skills' | 'license'>('connections')
-  const [installationCopyState, setInstallationCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
+  const [workspaceTab, setWorkspaceTab] = React.useState<'connections' | 'runtime' | 'doctor' | 'users' | 'skills'>('connections')
   const [runtimeCopyState, setRuntimeCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
   const codexAuthFactRef = React.useRef<HTMLDivElement | null>(null)
   const codexAuthPrimaryButtonRef = React.useRef<HTMLButtonElement | null>(null)
@@ -3747,22 +3686,6 @@ export function WorkspacePanel({
     { label: 'Sign-in', value: claudeAuthLoginMethodLabel },
   ]
   const hasWorkspaceAdminTabs = canManageUsers
-  const copyInstallationId = React.useCallback(async () => {
-    const value = String(license?.installation_id || '').trim()
-    if (!value) return
-    if (typeof navigator === 'undefined' || !navigator.clipboard) {
-      setInstallationCopyState('error')
-      return
-    }
-    try {
-      await navigator.clipboard.writeText(value)
-      setInstallationCopyState('copied')
-      window.setTimeout(() => setInstallationCopyState('idle'), 1400)
-    } catch {
-      setInstallationCopyState('error')
-      window.setTimeout(() => setInstallationCopyState('idle'), 1800)
-    }
-  }, [license?.installation_id])
   const copyRuntimeSnapshot = React.useCallback(async () => {
     if (typeof navigator === 'undefined' || !navigator.clipboard) {
       setRuntimeCopyState('error')
@@ -4047,7 +3970,6 @@ export function WorkspacePanel({
           </div>
           <div className="profile-head-chips">
             <span className="status-chip">{workspaceRole || 'Member'}</span>
-            <span className="status-chip">{licenseStatusLabel}</span>
             <span className="status-chip">{canManageCodexAuth || canManageClaudeAuth ? 'Admin access' : 'Read-only'}</span>
           </div>
         </div>
@@ -4062,7 +3984,6 @@ export function WorkspacePanel({
               || nextValue === 'doctor'
               || nextValue === 'users'
               || nextValue === 'skills'
-              || nextValue === 'license'
             ) {
               setWorkspaceTab(nextValue)
             }
@@ -4105,12 +4026,6 @@ export function WorkspacePanel({
                 <span className="status-chip admin-tab-count">{workspaceSkillsCount}</span>
               </Tabs.Trigger>
             ) : null}
-            <Tabs.Trigger className="profile-tab-trigger" value="license">
-              <span className="profile-tab-trigger-icon" aria-hidden="true">
-                <Icon path="M9 12l2 2 4-4M12 3l7 4v5c0 5-3.5 8.5-7 9.5-3.5-1-7-4.5-7-9.5V7l7-4z" />
-              </span>
-              <span>License</span>
-            </Tabs.Trigger>
           </Tabs.List>
 
           <Tabs.Content className="profile-tab-content" value="connections">
@@ -4144,7 +4059,7 @@ export function WorkspacePanel({
                   </div>
                 </dl>
                 <p className="meta">
-                  Shared bot connections, runtime metadata, workspace users, skills catalog, and license details live here.
+                  Shared bot connections, runtime metadata, workspace users, and skills catalog live here.
                 </p>
               </section>
 
@@ -4477,139 +4392,6 @@ export function WorkspacePanel({
             </Tabs.Content>
           ) : null}
 
-          <Tabs.Content className="profile-tab-content" value="license">
-            <section className="profile-pane-card profile-license" aria-label="Workspace license">
-              <div className="profile-pane-head">
-                <h3>
-                  <span className="profile-pane-head-icon" aria-hidden="true">
-                    <Icon path="M9 12l2 2 4-4M12 3l7 4v5c0 5-3.5 8.5-7 9.5-3.5-1-7-4.5-7-9.5V7l7-4z" />
-                  </span>
-                  <span>License</span>
-                </h3>
-                <span className="status-chip">{licenseStatusLabel}</span>
-              </div>
-              {licenseLoading ? (
-                <p className="meta">Loading license status...</p>
-              ) : licenseError ? (
-                <div className="notice notice-error">{licenseError}</div>
-              ) : !license ? (
-                <p className="meta">License status is unavailable.</p>
-              ) : (
-                <Accordion.Root className="profile-accordion profile-license-accordion" type="multiple" defaultValue={['entitlement', 'lifecycle', 'installation']}>
-                  <Accordion.Item className="profile-accordion-item" value="entitlement">
-                    <Accordion.Header className="profile-accordion-header">
-                      <Accordion.Trigger className="profile-accordion-trigger">
-                        <span className="profile-accordion-head">
-                          <span className="profile-accordion-title">Entitlement</span>
-                          <span className="profile-accordion-meta">{entitlementSource}</span>
-                        </span>
-                        <span className="profile-accordion-chevron" aria-hidden="true">
-                          <Icon path="M6 9l6 6 6-6" />
-                        </span>
-                      </Accordion.Trigger>
-                    </Accordion.Header>
-                    <Accordion.Content className="profile-accordion-content">
-                      <dl className="profile-facts profile-license-facts">
-                        <div className="profile-fact">
-                          <dt>Entitlement status</dt>
-                          <dd>{formatLabel(license.status)}</dd>
-                        </div>
-                        <div className="profile-fact">
-                          <dt>Subscription status</dt>
-                          <dd>{formatLabel(subscriptionStatus)}</dd>
-                        </div>
-                        <div className="profile-fact">
-                          <dt>Entitlement source</dt>
-                          <dd>{entitlementSource}</dd>
-                        </div>
-                        <div className="profile-fact">
-                          <dt>Plan</dt>
-                          <dd>{license.plan_code || 'n/a'}</dd>
-                        </div>
-                      </dl>
-                    </Accordion.Content>
-                  </Accordion.Item>
-
-                  <Accordion.Item className="profile-accordion-item" value="lifecycle">
-                    <Accordion.Header className="profile-accordion-header">
-                      <Accordion.Trigger className="profile-accordion-trigger">
-                        <span className="profile-accordion-head">
-                          <span className="profile-accordion-title">Lifecycle dates</span>
-                          <span className="profile-accordion-meta">Subscription, trial, and grace windows</span>
-                        </span>
-                        <span className="profile-accordion-chevron" aria-hidden="true">
-                          <Icon path="M6 9l6 6 6-6" />
-                        </span>
-                      </Accordion.Trigger>
-                    </Accordion.Header>
-                    <Accordion.Content className="profile-accordion-content">
-                      <dl className="profile-facts profile-license-facts">
-                        <div className="profile-fact">
-                          <dt>Subscription valid until</dt>
-                          <dd>{formatDateTime(subscriptionValidUntil)}</dd>
-                        </div>
-                        <div className="profile-fact">
-                          <dt>Public beta free until</dt>
-                          <dd>{formatDateTime(publicBetaFreeUntil)}</dd>
-                        </div>
-                        {showTrialWindow ? (
-                          <div className="profile-fact">
-                            <dt>Trial ends</dt>
-                            <dd>{formatDateTime(license.trial_ends_at)}</dd>
-                          </div>
-                        ) : null}
-                        {showTrialWindow ? (
-                          <div className="profile-fact">
-                            <dt>Grace ends</dt>
-                            <dd>{formatDateTime(license.grace_ends_at)}</dd>
-                          </div>
-                        ) : null}
-                      </dl>
-                    </Accordion.Content>
-                  </Accordion.Item>
-
-                  <Accordion.Item className="profile-accordion-item" value="installation">
-                    <Accordion.Header className="profile-accordion-header">
-                      <Accordion.Trigger className="profile-accordion-trigger">
-                        <span className="profile-accordion-head">
-                          <span className="profile-accordion-title">Installation details</span>
-                          <span className="profile-accordion-meta">Local installation and license identity</span>
-                        </span>
-                        <span className="profile-accordion-chevron" aria-hidden="true">
-                          <Icon path="M6 9l6 6 6-6" />
-                        </span>
-                      </Accordion.Trigger>
-                    </Accordion.Header>
-                    <Accordion.Content className="profile-accordion-content">
-                      <dl className="profile-facts profile-license-facts">
-                        <div className="profile-fact">
-                          <dt>Installation ID</dt>
-                          <dd>
-                            <code>{license.installation_id || 'n/a'}</code>
-                          </dd>
-                        </div>
-                      </dl>
-                      <div className="row wrap profile-actions">
-                        <button
-                          type="button"
-                          className="button-secondary profile-action-button"
-                          onClick={() => {
-                            void copyInstallationId()
-                          }}
-                          disabled={!String(license.installation_id || '').trim()}
-                        >
-                          <Icon path="M9 9h11v11H9zM4 4h11v2H6v9H4z" />
-                          <span>Copy installation ID</span>
-                        </button>
-                        {installationCopyState === 'copied' ? <span className="status-chip">Copied</span> : null}
-                        {installationCopyState === 'error' ? <span className="status-chip">Copy failed</span> : null}
-                      </div>
-                    </Accordion.Content>
-                  </Accordion.Item>
-                </Accordion.Root>
-              )}
-            </section>
-          </Tabs.Content>
         </Tabs.Root>
 
         <Dialog.Root open={codexAuthDialogOpen} onOpenChange={setCodexAuthDialogOpen}>

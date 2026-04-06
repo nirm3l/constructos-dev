@@ -34,6 +34,7 @@ from .workspace_runtime import (
 _TIMEOUT_UNSET = object()
 _DEFAULT_AGENT_HOME_ROOT = "/tmp/agent-home"
 _TASK_AUTOMATION_SESSION_PREFIX = "task-automation:"
+_APP_SOURCE_ROOT = str(Path(__file__).resolve().parents[2])
 AGENT_CODEX_COMMAND = AGENT_EXECUTION_COMMAND
 
 
@@ -76,6 +77,26 @@ def _executor_command() -> str:
 def _resolve_run_timeout_seconds(override: object = _TIMEOUT_UNSET) -> tuple[float | int | None, float | None]:
     raw_timeout = AGENT_EXECUTOR_TIMEOUT_SECONDS if override is _TIMEOUT_UNSET else override
     return raw_timeout, _effective_timeout_seconds(raw_timeout)
+
+
+def _prepend_pythonpath_entry(existing: str | None, entry: str) -> str:
+    normalized_entry = str(entry or "").strip()
+    if not normalized_entry:
+        return str(existing or "").strip()
+    existing_value = str(existing or "").strip()
+    if not existing_value:
+        return normalized_entry
+    parts = [segment.strip() for segment in existing_value.split(os.pathsep) if segment.strip()]
+    if normalized_entry in parts:
+        return existing_value
+    return f"{normalized_entry}{os.pathsep}{existing_value}"
+
+
+def _ensure_executor_pythonpath() -> None:
+    os.environ["PYTHONPATH"] = _prepend_pythonpath_entry(
+        os.environ.get("PYTHONPATH"),
+        _APP_SOURCE_ROOT,
+    )
 
 
 def _coerce_bool(value: object) -> bool | None:
@@ -1142,6 +1163,7 @@ def _run_command_streaming(
     cancel_event: threading.Event | None = None,
     on_event: Callable[[dict[str, object]], None] | None = None,
 ) -> str:
+    _ensure_executor_pythonpath()
     run_cwd = str(cwd or "").strip() or None
     proc = subprocess.Popen(
         command,
@@ -1263,6 +1285,7 @@ def execute_task_automation(
     prompt_instruction_segments: dict[str, int] | None = None,
     timeout_seconds: float | int | None | object = _TIMEOUT_UNSET,
 ) -> AutomationOutcome:
+    _ensure_executor_pythonpath()
     should_complete = bool(task_completion_requested)
     if str(task_id or "").strip() and should_complete and not _is_completed_status(status) and allow_mutations:
         return AutomationOutcome(
@@ -1502,6 +1525,7 @@ def execute_task_automation_stream(
     stream_plain_text: bool = False,
     cancel_event: threading.Event | None = None,
 ) -> AutomationOutcome:
+    _ensure_executor_pythonpath()
     should_complete = bool(task_completion_requested)
     if str(task_id or "").strip() and should_complete and not _is_completed_status(status) and allow_mutations:
         return AutomationOutcome(

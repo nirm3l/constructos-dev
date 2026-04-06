@@ -49,9 +49,6 @@ graph LR
 - Real-time notifications over SSE (`notification`, `task_event`, `ping`) with commit-driven push wakeups.
 - Knowledge graph endpoints and MCP tools for dependency-aware context.
 - Command idempotency via `X-Command-Id` and `command_executions`.
-- Licensing status endpoint and write-lock enforcement (`HTTP 402` on mutations when license is expired and enforcement is enabled).
-- Activation-code licensing flow with control-plane seat limits (for example up to 3 devices per customer).
-- Per-customer deployment tokens for control-plane access (`LICENSE_SERVER_TOKEN` scoped per customer).
 
 ## Quick Start
 1. Start the stack:
@@ -82,51 +79,6 @@ DEPLOY_TARGET=macos-m4 ./scripts/deploy.sh
 # pull private images from GHCR (no local build on client host)
 DEPLOY_SOURCE=ghcr IMAGE_TAG=v0.1.227 ./scripts/deploy.sh
 ```
-`deploy.sh` deploys app services only (no local `license-control-plane`).
-Deploy local control-plane separately:
-```bash
-./scripts/deploy-control-plane.sh up
-```
-This also starts `license-control-plane-backup`, which creates SQLite backups every hour.
-Default backup retention is 7 days in host directory `./data/license-control-plane-backups`
-(configurable via `LCP_BACKUP_HOST_DIR`).
-When available, legacy backups from Docker volume `task-management_license-control-plane-backups`
-are automatically migrated into this host directory on `up`/`restart`.
-
-Optional backup tuning:
-```bash
-export LCP_BACKUP_HOST_DIR="$PWD/data/license-control-plane-backups"
-export LCP_BACKUP_RUN_AS="$(id -u):$(id -g)"
-export LCP_BACKUP_INTERVAL_SECONDS='3600'
-export LCP_BACKUP_RETENTION_HOURS='168'
-./scripts/deploy-control-plane.sh restart
-```
-
-Restore latest backup:
-```bash
-docker compose -p constructos-cp -f docker-compose.license-control-plane.yml down
-docker run --rm \
-  -v "$(pwd)/data/license-control-plane-backups:/backups:ro" \
-  -v task-management_license-control-plane-data:/data \
-  alpine:3.20 \
-  sh -lc 'cp "$(ls -1t /backups/license-control-plane-*.sqlite3 | head -n 1)" /data/license-control-plane.db'
-./scripts/deploy-control-plane.sh up
-```
-
-Optional control-plane email test setup (Resend):
-```bash
-export LCP_EMAIL_RESEND_API_KEY='re_xxx'
-export LCP_EMAIL_FROM='ConstructOS Onboarding <onboarding@constructos.dev>'
-export LCP_EMAIL_REPLY_TO='support@constructos.dev'
-export LCP_CUSTOMER_REF_SECRET='replace-with-long-random-secret'
-export LCP_ONBOARDING_IMAGE_TAG='main'
-export LCP_ONBOARDING_INSTALL_SCRIPT_URL='https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh'
-export LCP_ONBOARDING_SUPPORT_EMAIL='support@constructos.dev'
-./scripts/deploy-control-plane.sh restart
-```
-Then open control-plane UI and use:
-- **Onboarding Package** for one-step email -> customer_ref/token/activation generation + branded onboarding mail
-- **Email Delivery Test** for generic smoke tests
 
 Client deployment assets are maintained in a separate repository:
 `https://github.com/nirm3l/constructos`
@@ -135,9 +87,6 @@ Client one-liner installer:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh | ACTIVATION_CODE=ACT-XXXX-XXXX-XXXX-XXXX-XXXX IMAGE_TAG=main INSTALL_COS=true AUTO_DEPLOY=1 bash
 ```
-For signed entitlement enforcement, configure:
-- `LCP_SIGNING_PRIVATE_KEY_PEM` on control-plane
-- matching `LICENSE_PUBLIC_KEY` on app services
 
 Optional encrypted runtime bundle (PoC only, not strong IP protection):
 ```bash
@@ -153,9 +102,6 @@ docker build \
 Runtime env for decrypt-on-start:
 - `APP_ENCRYPTED_BUNDLE_ENABLED=true`
 - `APP_BUNDLE_TOKEN_SEGMENT_INDEX=2` (0-based token segment; for `a.b.c`, this uses `c`)
-- `LICENSE_SERVER_TOKEN=<token-containing-bundle-secret-segment>`
-- Control-plane token generator can embed the same secret segment when `LCP_CLIENT_TOKEN_BUNDLE_PASSWORD` is set.
-  `docker-compose.license-control-plane.yml` maps this from `APP_BUNDLE_PASSWORD` by default, so one `.env` value can drive both build-time encryption and issued token format.
 
 The image can still be reverse-engineered by a host operator. Treat this as obfuscation, not a security boundary.
 
@@ -166,9 +112,6 @@ curl -sS http://localhost:1102/api/health
 3. Open app and APIs:
 - App/API: `http://localhost:1102`
 - Version: `http://localhost:1102/api/version`
-- License status: `http://localhost:1102/api/license/status`
-- Optional local control-plane admin UI: `http://localhost:8092`
-- Optional local control-plane health: `http://localhost:8092/api/health`
 - MCP endpoint (docker): `http://localhost:8091/mcp`
 - KurrentDB UI (event browser): `http://localhost:2113/web/index.html`
 - KurrentDB all-events feed (JSON): `http://localhost:2113/streams/%24all/head/backward/50?embed=body`
@@ -261,5 +204,4 @@ Repository and docs:
 - `app/shared/*` - eventing, projections, models, settings, bootstrap, graph.
 - `app/frontend/*` - SPA and UI state management.
 - `marketing-site/*` - static marketing website served by dedicated Nginx container.
-- `license_control_plane/*` - standalone licensing control-plane service (register/heartbeat/admin subscription update + activation code issuance + seat limits).
 - `scripts/*` - deploy, reset, and helper scripts.

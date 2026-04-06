@@ -2,51 +2,6 @@ import React from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import { Icon } from '../shared/uiHelpers'
 
-type LicenseNoticeState = {
-  message: string
-  isError: boolean
-} | null
-
-function _errorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    const message = String(error.message || '').trim()
-    if (message) return message
-  }
-  return 'License activation failed.'
-}
-
-function _daysRemaining(isoDate: string | null): number | null {
-  if (!isoDate) return null
-  const date = new Date(isoDate)
-  if (Number.isNaN(date.getTime())) return null
-  const diffMs = date.getTime() - Date.now()
-  return Math.max(0, Math.ceil(diffMs / (24 * 60 * 60 * 1000)))
-}
-
-function _buildLicenseNotice(license: any): LicenseNoticeState {
-  if (!license || typeof license !== 'object') return null
-  const status = String(license.status || '').toLowerCase()
-  if (!status || status === 'active') return null
-
-  if (status === 'trial') {
-    const days = _daysRemaining(license.trial_ends_at ?? null)
-    const suffix = days === null ? '' : ` ${days} day${days === 1 ? '' : 's'} left.`
-    return { message: `Trial mode.${suffix}`.trim(), isError: false }
-  }
-
-  if (status === 'grace') {
-    const days = _daysRemaining(license.grace_ends_at ?? null)
-    const suffix = days === null ? '' : ` ${days} day${days === 1 ? '' : 's'} left before write lock.`
-    return { message: `Grace mode.${suffix}`.trim(), isError: false }
-  }
-
-  if (status === 'expired' || status === 'unlicensed') {
-    return { message: 'License is expired. The application is currently in read-only mode.', isError: true }
-  }
-
-  return { message: `License status: ${status}.`, isError: false }
-}
-
 function _normalizeDoctorActionStatus(value: unknown): 'passed' | 'warning' | 'failed' {
   const normalized = String(value || '').trim().toLowerCase()
   if (normalized === 'passed') return 'passed'
@@ -84,34 +39,28 @@ function _isRecentDoctorEvent(value: unknown, withinHours = 24): boolean {
   return ageMs <= withinHours * 60 * 60 * 1000
 }
 
-function _buildSparklinePath(points: number[]): string {
-  if (!Array.isArray(points) || points.length <= 0) return ''
-  if (points.length === 1) return 'M 0 18 L 34 18'
-  const max = Math.max(...points)
-  const min = Math.min(...points)
-  const range = Math.max(1, max - min)
-  const width = 34
-  const height = 18
-  return points
-    .map((value, index) => {
-      const x = Math.round((index / Math.max(1, points.length - 1)) * width * 100) / 100
-      const normalized = (value - min) / range
-      const y = Math.round((height - normalized * height) * 100) / 100
-      return `${index === 0 ? 'M' : 'L'} ${x} ${y}`
-    })
-    .join(' ')
+function _buildTrendLabel(points: number[], scoreDelta: number | null): string {
+  if (scoreDelta !== null) {
+    if (scoreDelta >= 1) return 'Improving'
+    if (scoreDelta <= -1) return 'Declining'
+    return 'Stable'
+  }
+  if (!Array.isArray(points) || points.length < 2) return 'Unknown'
+  const first = points[0] ?? 0
+  const last = points[points.length - 1] ?? first
+  const drift = last - first
+  if (drift >= 1) return 'Improving'
+  if (drift <= -1) return 'Declining'
+  return 'Stable'
 }
 
 export function AppNotices({ state }: { state: any }) {
-  const [activationCode, setActivationCode] = React.useState('')
   const [incidentModalOpen, setIncidentModalOpen] = React.useState(false)
   const [incidentModalRecoveryFeedback, setIncidentModalRecoveryFeedback] = React.useState<string | null>(null)
   const [recoveryOutcomeToast, setRecoveryOutcomeToast] = React.useState<{
     tone: 'success' | 'error'
     message: string
   } | null>(null)
-  const license = state.licenseStatus?.data?.license
-  const status = String(license?.status || '').toLowerCase()
   const doctorStatus = state.workspaceDoctorQuery?.data ?? null
   const doctorRuntimeHealth = doctorStatus?.runtime_health ?? null
   const doctorIncidentTotal = _toFiniteNumber(doctorStatus?.checks?.recent_executor_worktree_incident_count) ?? 0
@@ -144,7 +93,7 @@ export function AppNotices({ state }: { state: any }) {
   if (doctorCurrentScore !== null && doctorTrendScores.length === 0) {
     doctorTrendScores.push(doctorCurrentScore)
   }
-  const doctorTrendPath = _buildSparklinePath(doctorTrendScores)
+  const doctorTrendLabel = _buildTrendLabel(doctorTrendScores, doctorScoreDelta)
   const doctorRecentActions = Array.isArray(doctorStatus?.recent_actions) ? doctorStatus.recent_actions : []
   const doctorLastFailure = doctorRecentActions.find((item: any) => _normalizeDoctorActionStatus(item?.status) === 'failed') ?? null
   const doctorLastRecovery = doctorRecentActions.find((item: any) => (
@@ -153,10 +102,6 @@ export function AppNotices({ state }: { state: any }) {
   )) ?? null
   const runtimeHealthStatus = String(state.workspaceDoctorQuery?.data?.runtime_health?.overall_status || '').trim().toLowerCase()
   const previousRuntimeHealthStatusRef = React.useRef<string>('')
-  const licenseNotice = React.useMemo(
-    () => _buildLicenseNotice(state.licenseStatus?.data?.license),
-    [state.licenseStatus?.data?.license]
-  )
   const runtimeHealthNotice = React.useMemo(() => {
     if (runtimeHealthStatus === 'failing') {
       return {
@@ -194,24 +139,13 @@ export function AppNotices({ state }: { state: any }) {
   )
   const effectiveRuntimeHealthNotice = doctorIncidentNotice ? null : runtimeHealthNotice
   const hasRecentDoctorFailure = _isRecentDoctorEvent(doctorLastFailure?.at, 24)
-  const hasRecentDoctorRecovery = _isRecentDoctorEvent(doctorLastRecovery?.at, 24)
   const showDoctorTimelineEffective = Boolean(
     effectiveRuntimeHealthNotice
     || doctorIncidentNotice
     || replayRecoveryPending
     || executorDiagnosticsPending
     || hasRecentDoctorFailure
-    || hasRecentDoctorRecovery
   )
-  const canActivate = ['trial', 'grace', 'expired', 'unlicensed'].includes(status)
-  const activateLicenseMutation = state.activateLicenseMutation
-  const seatUsage = activateLicenseMutation?.data?.seat_usage
-
-  React.useEffect(() => {
-    if (activateLicenseMutation?.isSuccess) {
-      setActivationCode('')
-    }
-  }, [activateLicenseMutation?.isSuccess])
   React.useEffect(() => {
     if (!recoveryOutcomeToast) return
     const timer = window.setTimeout(() => setRecoveryOutcomeToast(null), 9000)
@@ -243,15 +177,6 @@ export function AppNotices({ state }: { state: any }) {
     }
   }, [runtimeHealthStatus, state.workspaceId])
 
-  const submitActivation = React.useCallback(
-    (event: React.FormEvent<HTMLFormElement>) => {
-      event.preventDefault()
-      const code = String(activationCode || '').trim()
-      if (!code) return
-      activateLicenseMutation?.mutate(code)
-    },
-    [activationCode, activateLicenseMutation]
-  )
   const runRecoverySequenceWithTelemetry = React.useCallback(async () => {
     if (!executeDoctorQuickActionMutation?.mutateAsync) return
     const startedAt = (typeof performance !== 'undefined' && typeof performance.now === 'function')
@@ -378,11 +303,6 @@ export function AppNotices({ state }: { state: any }) {
           </button>
         </div>
       )}
-      {licenseNotice && (
-        <div className={`notice ${licenseNotice.isError ? 'notice-error' : ''}`.trim()} role={licenseNotice.isError ? 'alert' : 'status'}>
-          <span>{licenseNotice.message}</span>
-        </div>
-      )}
       {effectiveRuntimeHealthNotice ? (
         <div className={`notice ${effectiveRuntimeHealthNotice.tone === 'error' ? 'notice-error' : ''}`.trim()} role={effectiveRuntimeHealthNotice.tone === 'error' ? 'alert' : 'status'}>
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -440,14 +360,7 @@ export function AppNotices({ state }: { state: any }) {
                   {doctorScoreDelta !== null ? ` (${_formatScoreDelta(doctorScoreDelta)})` : ''}
                 </span>
               ) : null}
-              {doctorTrendPath ? (
-                <span className="status-chip" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                  <span>Trend</span>
-                  <svg viewBox="0 0 34 18" width="34" height="18" aria-hidden="true">
-                    <path d={doctorTrendPath} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                  </svg>
-                </span>
-              ) : null}
+              <span className="status-chip">Trend: {doctorTrendLabel}</span>
               <button
                 type="button"
                 className="status-chip"
@@ -467,37 +380,6 @@ export function AppNotices({ state }: { state: any }) {
           </div>
         </div>
       ) : null}
-      {canActivate && (
-        <div className="notice notice-license-activate" role="status">
-          <div className="license-activate-header">
-            <span>Activate subscription with code</span>
-            {license?.installation_id && (
-              <span className="license-installation-id">
-                Installation ID: <code>{String(license.installation_id)}</code>
-              </span>
-            )}
-          </div>
-          <form className="license-activate-form" onSubmit={submitActivation}>
-            <input
-              value={activationCode}
-              onChange={(event) => setActivationCode(event.target.value)}
-              placeholder="Enter activation code"
-              autoComplete="off"
-            />
-            <button type="submit" disabled={Boolean(activateLicenseMutation?.isPending) || !String(activationCode || '').trim()}>
-              {activateLicenseMutation?.isPending ? 'Activating...' : 'Activate'}
-            </button>
-          </form>
-          {activateLicenseMutation?.isError && (
-            <p className="license-activate-error">{_errorMessage(activateLicenseMutation.error)}</p>
-          )}
-          {activateLicenseMutation?.isSuccess && seatUsage && (
-            <p className="license-activate-meta">
-              Seats in use: {seatUsage.active_installations}/{seatUsage.max_installations} ({seatUsage.customer_ref})
-            </p>
-          )}
-        </div>
-      )}
     </>
   )
 }

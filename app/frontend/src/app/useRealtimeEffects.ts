@@ -481,11 +481,6 @@ export function useRealtimeEffects(c: any) {
       scheduleRealtimeRefresh()
     }
 
-    const onLicenseEvent = () => {
-      qc.invalidateQueries({ queryKey: ['license-status', userId] })
-      qc.invalidateQueries({ queryKey: ['notifications', userId] })
-    }
-
     const onAuthEvent = (evt: MessageEvent) => {
       try {
         const payload = JSON.parse(evt.data) as {
@@ -511,13 +506,11 @@ export function useRealtimeEffects(c: any) {
 
     es.addEventListener('notification', onNotification as EventListener)
     es.addEventListener('task_event', onTaskEvent as EventListener)
-    es.addEventListener('license_event', onLicenseEvent as EventListener)
     es.addEventListener('auth_event', onAuthEvent as EventListener)
 
     return () => {
       es.removeEventListener('notification', onNotification as EventListener)
       es.removeEventListener('task_event', onTaskEvent as EventListener)
-      es.removeEventListener('license_event', onLicenseEvent as EventListener)
       es.removeEventListener('auth_event', onAuthEvent as EventListener)
       es.close()
     }

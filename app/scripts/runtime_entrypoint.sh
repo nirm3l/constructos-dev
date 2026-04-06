@@ -18,15 +18,15 @@ resolve_bundle_passphrase() {
     return 0
   fi
 
-  local license_token="${LICENSE_SERVER_TOKEN:-}"
-  if [ -z "${license_token}" ]; then
-    echo "Encrypted bundle mode requires LICENSE_SERVER_TOKEN." >&2
+  local bundle_password="${APP_BUNDLE_PASSWORD:-}"
+  if [ -z "${bundle_password}" ]; then
+    echo "Encrypted bundle mode requires APP_BUNDLE_PASSWORD." >&2
     return 1
   fi
 
   local segment_index="${APP_BUNDLE_TOKEN_SEGMENT_INDEX:-}"
   if [ -z "${segment_index}" ]; then
-    printf '%s' "${license_token}"
+    printf '%s' "${bundle_password}"
     return 0
   fi
 
@@ -42,7 +42,7 @@ resolve_bundle_passphrase() {
 
   local segments=()
   local old_ifs="${IFS}"
-  IFS="${delimiter}" read -r -a segments <<< "${license_token}"
+  IFS="${delimiter}" read -r -a segments <<< "${bundle_password}"
   IFS="${old_ifs}"
 
   local idx="${segment_index}"

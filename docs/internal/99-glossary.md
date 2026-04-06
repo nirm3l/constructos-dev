@@ -15,8 +15,6 @@
 ## Operational Terms
 
 - `constructos-app`: fixed Compose project name for app stack runtime.
-- `constructos-cp`: fixed Compose project name for control-plane runtime.
-- `Protected services`: `license-control-plane` and `license-control-plane-backup`.
 - `Local docs seed`: seeding internal docs from repository `docs/internal/*.md` when local deploy env flag is enabled.
 
 ## Agent Execution Terms

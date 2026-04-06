@@ -28,7 +28,6 @@ from features.tasks.domain import EVENT_UPDATED as TASK_EVENT_UPDATED
 from features.task_groups.domain import EVENT_CREATED as TASK_GROUP_EVENT_CREATED
 from features.note_groups.domain import EVENT_CREATED as NOTE_GROUP_EVENT_CREATED
 from .auth import generate_temporary_password, hash_password, verify_password
-from .licensing import resolve_license_installation_id
 from . import models as shared_models
 from .models import (
     ContextSessionState,
@@ -36,7 +35,6 @@ from .models import (
     EventStormingAnalysisRun,
     Note,
     NoteGroup,
-    LicenseInstallation,
     Project,
     ProjectMember,
     ProjectRule,
@@ -64,7 +62,6 @@ from .settings import (
     DEFAULT_USER_ID,
     DEFAULT_STATUSES,
     LEGACY_BOOTSTRAP_PASSWORD,
-    LICENSE_TRIAL_DAYS,
     VECTOR_INDEX_DISTILL_ENABLED,
     CODEX_SYSTEM_FULL_NAME,
     CODEX_SYSTEM_USER_ID,
@@ -932,41 +929,6 @@ def ensure_task_watcher_table_constraints(db: Session):
     db.commit()
 
 
-def ensure_license_installation(db: Session):
-    installation_id = resolve_license_installation_id(db)
-    installation = db.execute(
-        select(LicenseInstallation).where(LicenseInstallation.installation_id == installation_id)
-    ).scalar_one_or_none()
-    now = datetime.now(timezone.utc)
-    trial_days = max(1, int(LICENSE_TRIAL_DAYS))
-    if installation is None:
-        db.add(
-            LicenseInstallation(
-                installation_id=installation_id,
-                workspace_id=None,
-                status="trial",
-                plan_code="trial",
-                activated_at=now,
-                trial_ends_at=now + timedelta(days=trial_days),
-                metadata_json='{"source":"bootstrap-local"}',
-            )
-        )
-        db.commit()
-        return
-    changed = False
-    if installation.workspace_id is None and db.get(Workspace, BOOTSTRAP_WORKSPACE_ID) is not None:
-        installation.workspace_id = BOOTSTRAP_WORKSPACE_ID
-        changed = True
-    if installation.activated_at is None:
-        installation.activated_at = now
-        changed = True
-    if installation.trial_ends_at is None:
-        installation.trial_ends_at = now + timedelta(days=trial_days)
-        changed = True
-    if changed:
-        db.commit()
-
-
 def _seed_docs_root_candidates() -> tuple[Path, ...]:
     candidates: list[Path] = []
     explicit_seed_docs_dir = str(os.getenv("SEED_DOCS_DIR", "")).strip()
@@ -1451,7 +1413,6 @@ def bootstrap_data():
                     agent_member.role = "Admin"
             db.commit()
 
-        ensure_license_installation(db)
         ensure_user_password_defaults(db)
         ensure_non_human_workspace_admin_roles(db)
         workspace_ids = db.execute(select(Workspace.id).where(Workspace.is_deleted == False)).scalars().all()

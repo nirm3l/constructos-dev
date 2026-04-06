@@ -209,7 +209,6 @@ _READ_ONLY_MCP_METHODS = frozenset(
         "list_projects",
     }
 )
-_LICENSE_WRITE_BLOCKED_MESSAGE = "License expired. Write access is disabled until subscription is reactivated."
 _COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
 _COMMIT_SHA_EXPLICIT_RE = re.compile(
     r"(?i)(?:\b(?:commit|sha|changeset|hash)\s*[:=#]?\s*|/commit/)([0-9a-f]{7,40})\b"
@@ -316,7 +315,7 @@ def _docker_compose_default_config(*, port: int | None = None) -> dict[str, Any]
         "compose_project_name": "constructos-ws-default",
         "workspace_root": "/workspace",
         "allowed_services": [],
-        "protected_services": ["license-control-plane", "license-control-plane-backup"],
+        "protected_services": [],
         "runtime_deploy_health": {
             "required": False,
             "stack": "constructos-ws-default",
@@ -1105,22 +1104,10 @@ class AgentTaskService:
             return False
         return method_name not in _READ_ONLY_MCP_METHODS
 
-    def _enforce_license_write_access(self) -> None:
-        from features.licensing.read_models import license_status_read_model
-
-        with SessionLocal() as db:
-            payload = license_status_read_model(db)
-        if bool(payload.get("write_access")):
-            return
-        raise HTTPException(status_code=402, detail=_LICENSE_WRITE_BLOCKED_MESSAGE)
-
     def _require_token(self, auth_token: str | None):
         if self._require_mcp_token and MCP_AUTH_TOKEN:
             if not auth_token or not hmac.compare_digest(auth_token, MCP_AUTH_TOKEN):
                 raise HTTPException(status_code=401, detail="Invalid MCP token")
-
-        if self._is_write_operation_call(self._calling_method_name()):
-            self._enforce_license_write_access()
 
     def _assert_workspace_allowed(self, workspace_id: str):
         if self._allowed_workspace_ids and workspace_id not in self._allowed_workspace_ids:

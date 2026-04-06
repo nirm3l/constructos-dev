@@ -89,7 +89,6 @@ export function AppContent({ state }: { state: any }) {
     <div className="page">
       <AppHeader
         bootstrapData={state.bootstrap.data}
-        license={state.licenseStatus?.data?.license ?? null}
         tab={state.tab}
         setTab={state.setTab}
         theme={state.theme}

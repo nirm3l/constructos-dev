@@ -1,7 +1,6 @@
 import React from 'react'
 import { QueryClient, QueryClientProvider, useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  activateLicense,
   authChangePassword,
   deactivateAdminUser,
   authLogin,
@@ -19,10 +18,8 @@ import {
   getCodexAuthStatus,
   getOpenCodeAuthStatus,
   getPluginDescriptors,
-  getLicenseStatus,
   getWorkspaceDoctorStatus,
   resetWorkspaceDoctor,
-  triggerLicenseAutoUpdate,
   linkTaskToSpecification,
   listAdminUsers,
   patchMyPreferences,
@@ -424,12 +421,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     staleTime: 60_000,
     refetchOnWindowFocus: false,
   })
-  const licenseStatus = useQuery({
-    queryKey: ['license-status', userId],
-    queryFn: () => getLicenseStatus(userId),
-    enabled: Boolean(bootstrap.data),
-    retry: 1,
-  })
   const codexAuthStatus = useQuery({
     queryKey: ['codex-auth-status', userId],
     queryFn: () => getCodexAuthStatus(userId),
@@ -453,21 +444,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     retry: 1,
     refetchOnWindowFocus: false,
     refetchInterval: false,
-  })
-  const activateLicenseMutation = useMutation({
-    mutationFn: (activationCode: string) =>
-      activateLicense(userId, {
-        activation_code: activationCode,
-      }),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ['license-status', userId] })
-      setUiError(null)
-      setUiInfo('License activated successfully.')
-      setTimeout(() => setUiInfo(null), 2500)
-    },
-    onError: (error: unknown) => {
-      setUiError(toErrorMessage(error, 'License activation failed'))
-    },
   })
   const submitFeedbackMutation = useMutation({
     mutationFn: (payload: {
@@ -935,183 +911,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       return String(b?.id || '').localeCompare(String(a?.id || ''))
     })
   }, [notifications.data])
-
-  const autoUpdateEventSourceRef = React.useRef<EventSource | null>(null)
-  const autoUpdateRecoveryActiveRef = React.useRef(false)
-  const autoUpdateRecoveryTimerRef = React.useRef<number | null>(null)
-  const autoUpdateUiFlushTimerRef = React.useRef<number | null>(null)
-  const autoUpdateUiPendingMessageRef = React.useRef('')
-  const autoUpdateUiLastMessageRef = React.useRef('')
-  const closeAutoUpdateEventStream = React.useCallback(() => {
-    if (!autoUpdateEventSourceRef.current) return
-    autoUpdateEventSourceRef.current.close()
-    autoUpdateEventSourceRef.current = null
-  }, [])
-  const clearAutoUpdateRecoveryTimer = React.useCallback(() => {
-    if (autoUpdateRecoveryTimerRef.current == null) return
-    window.clearTimeout(autoUpdateRecoveryTimerRef.current)
-    autoUpdateRecoveryTimerRef.current = null
-  }, [])
-  const clearAutoUpdateUiFlushTimer = React.useCallback(() => {
-    if (autoUpdateUiFlushTimerRef.current == null) return
-    window.clearTimeout(autoUpdateUiFlushTimerRef.current)
-    autoUpdateUiFlushTimerRef.current = null
-  }, [])
-  const normalizeAutoUpdateUiMessage = React.useCallback((value: string) => {
-    const clean = String(value || '')
-      .replace(/\x1b\[[0-9;]*m/g, '')
-      .replace(/\s+/g, ' ')
-      .trim()
-    if (!clean) return ''
-    return clean.length > 220 ? `${clean.slice(0, 219).trimEnd()}…` : clean
-  }, [])
-  const pushAutoUpdateUiMessage = React.useCallback((rawMessage: string, immediate = false) => {
-    const message = normalizeAutoUpdateUiMessage(rawMessage)
-    if (!message) return
-    autoUpdateUiPendingMessageRef.current = message
-    const flush = () => {
-      const next = autoUpdateUiPendingMessageRef.current
-      autoUpdateUiFlushTimerRef.current = null
-      if (!next || next === autoUpdateUiLastMessageRef.current) return
-      autoUpdateUiLastMessageRef.current = next
-      setUiInfo(`Update: ${next}`)
-    }
-    if (immediate) {
-      clearAutoUpdateUiFlushTimer()
-      flush()
-      return
-    }
-    if (autoUpdateUiFlushTimerRef.current != null) return
-    autoUpdateUiFlushTimerRef.current = window.setTimeout(flush, 220)
-  }, [clearAutoUpdateUiFlushTimer, normalizeAutoUpdateUiMessage, setUiInfo])
-  const waitForAppReadyAndRefresh = React.useCallback((statusMessage: string) => {
-    if (autoUpdateRecoveryActiveRef.current) return
-    autoUpdateRecoveryActiveRef.current = true
-    clearAutoUpdateRecoveryTimer()
-    clearAutoUpdateUiFlushTimer()
-    closeAutoUpdateEventStream()
-    setUiError(null)
-    setUiInfo(statusMessage)
-    const startedAt = Date.now()
-    const timeoutMs = 120_000
-    const probeDelayMs = 1_500
-    const minWaitBeforeReloadMs = 8_000
-    let sawDowntime = false
-
-    const probe = async () => {
-      try {
-        const response = await fetch('/api/auth/me', {
-          method: 'GET',
-          credentials: 'include',
-          cache: 'no-store',
-        })
-        if (response.status >= 500) {
-          sawDowntime = true
-        }
-        const elapsedMs = Date.now() - startedAt
-        if (response.status < 500 && (sawDowntime || elapsedMs >= minWaitBeforeReloadMs)) {
-          window.location.reload()
-          return
-        }
-      } catch {
-        sawDowntime = true
-      }
-      if (Date.now() - startedAt >= timeoutMs) {
-        autoUpdateRecoveryActiveRef.current = false
-        setUiError('Update completed, but app is still unreachable. Please refresh manually.')
-        return
-      }
-      autoUpdateRecoveryTimerRef.current = window.setTimeout(() => {
-        void probe()
-      }, probeDelayMs)
-    }
-
-    void probe()
-  }, [clearAutoUpdateRecoveryTimer, clearAutoUpdateUiFlushTimer, closeAutoUpdateEventStream, setUiError, setUiInfo])
-  const parseAutoUpdateEvent = React.useCallback((event: MessageEvent) => {
-    try {
-      const payload = JSON.parse(String(event.data || '{}'))
-      return payload && typeof payload === 'object' ? payload as Record<string, unknown> : null
-    } catch {
-      return null
-    }
-  }, [])
-  const startAutoUpdateEventStream = React.useCallback((runId: string) => {
-    const normalizedRunId = String(runId || '').trim()
-    if (!normalizedRunId) return
-    closeAutoUpdateEventStream()
-    const streamUrl = `/api/license/auto-update/stream?run_id=${encodeURIComponent(normalizedRunId)}`
-    const source = new EventSource(streamUrl)
-    autoUpdateEventSourceRef.current = source
-
-    const onStatus = (event: MessageEvent) => {
-      const payload = parseAutoUpdateEvent(event)
-      const message = String(payload?.message || '').trim()
-      if (message) pushAutoUpdateUiMessage(message, true)
-    }
-    const onProgress = (event: MessageEvent) => {
-      const payload = parseAutoUpdateEvent(event)
-      const message = String(payload?.message || '').trim()
-      if (message) pushAutoUpdateUiMessage(message, false)
-    }
-    const onFinal = (event: MessageEvent) => {
-      const payload = parseAutoUpdateEvent(event)
-      const result = payload?.result && typeof payload.result === 'object'
-        ? (payload.result as Record<string, unknown>)
-        : null
-      const ok = Boolean(result?.ok)
-      const message = String(result?.message || '').trim()
-      if (ok) {
-        waitForAppReadyAndRefresh(message || 'Update dispatched. Waiting for app to become available...')
-        return
-      }
-      autoUpdateRecoveryActiveRef.current = false
-      clearAutoUpdateRecoveryTimer()
-      clearAutoUpdateUiFlushTimer()
-      closeAutoUpdateEventStream()
-      setUiError(message || 'Application update failed')
-    }
-    const onError = () => {
-      waitForAppReadyAndRefresh('Update in progress. Waiting for app restart...')
-    }
-
-    source.addEventListener('status', onStatus as EventListener)
-    source.addEventListener('progress', onProgress as EventListener)
-    source.addEventListener('final', onFinal as EventListener)
-    source.addEventListener('error', onError as EventListener)
-  }, [clearAutoUpdateRecoveryTimer, clearAutoUpdateUiFlushTimer, closeAutoUpdateEventStream, parseAutoUpdateEvent, pushAutoUpdateUiMessage, setUiError, waitForAppReadyAndRefresh])
-
-  const autoUpdateFromNotificationMutation = useMutation({
-    mutationFn: async (_notificationId: string) => {
-      return triggerLicenseAutoUpdate(userId)
-    },
-    onSuccess: (response) => {
-      autoUpdateRecoveryActiveRef.current = false
-      clearAutoUpdateRecoveryTimer()
-      clearAutoUpdateUiFlushTimer()
-      autoUpdateUiPendingMessageRef.current = ''
-      autoUpdateUiLastMessageRef.current = ''
-      setUiError(null)
-      const runId = String(response?.run_id || '').trim()
-      if (!runId) {
-        setUiError('Update run_id is missing from server response')
-        return
-      }
-      setUiInfo('Application auto-update started (task-app + mcp-tools).')
-      startAutoUpdateEventStream(runId)
-    },
-    onError: (err) => {
-      setUiError(err instanceof Error ? err.message : 'Application auto-update failed to start')
-    },
-  })
-
-  React.useEffect(() => {
-    return () => {
-      clearAutoUpdateRecoveryTimer()
-      clearAutoUpdateUiFlushTimer()
-      closeAutoUpdateEventStream()
-    }
-  }, [clearAutoUpdateRecoveryTimer, clearAutoUpdateUiFlushTimer, closeAutoUpdateEventStream])
 
   useRealtimeEffects({
     qc,
@@ -2143,12 +1942,14 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
   }, [markUnreadMutation])
 
   const handleNotificationAction = React.useCallback((notificationId: string, action: string) => {
+    void notificationId
     const normalizedAction = String(action || '').trim()
     if (!normalizedAction) return
     if (normalizedAction === 'auto_update_app_images') {
-      autoUpdateFromNotificationMutation.mutate(notificationId)
+      setUiInfo('Auto-update action is no longer available in the open-source edition.')
+      setTimeout(() => setUiInfo(null), 2500)
     }
-  }, [autoUpdateFromNotificationMutation])
+  }, [setUiInfo])
 
   const createTaskFromGraphSummary = React.useCallback(async (payload: { title: string; description: string }) => {
     if (!selectedProjectId) throw new Error('No project selected')
@@ -2282,8 +2083,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     <AppContent
       state={{
       bootstrap,
-      licenseStatus,
-      activateLicenseMutation,
       tab,
       setTab: setTabWithGuards,
       searchQ,

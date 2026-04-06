@@ -20,13 +20,6 @@ function buildState(overrides: Record<string, unknown> = {}): any {
   }
   return {
     workspaceId: 'workspace-1',
-    licenseStatus: {
-      data: {
-        license: {
-          status: 'active',
-        },
-      },
-    },
     workspaceDoctorQuery: {
       data: {
         checks: {
@@ -43,7 +36,6 @@ function buildState(overrides: Record<string, unknown> = {}): any {
     },
     executeDoctorQuickActionMutation,
     openWorkspaceDoctorIncident: vi.fn(),
-    activateLicenseMutation: null,
     uiError: null,
     uiInfo: null,
     setUiError: vi.fn(),

@@ -39,6 +39,16 @@ def build_client(tmp_path: Path):
     return client
 
 
+def test_prepend_pythonpath_entry_is_idempotent():
+    from features.agents import executor as executor_module
+
+    app_root = "/app"
+    assert executor_module._prepend_pythonpath_entry("", app_root) == app_root
+    assert executor_module._prepend_pythonpath_entry(None, app_root) == app_root
+    assert executor_module._prepend_pythonpath_entry("/usr/lib/python3.12", app_root) == f"/app{os.pathsep}/usr/lib/python3.12"
+    assert executor_module._prepend_pythonpath_entry(f"/app{os.pathsep}/usr/lib/python3.12", app_root) == f"/app{os.pathsep}/usr/lib/python3.12"
+
+
 def test_execute_task_automation_includes_project_description_in_context(tmp_path, monkeypatch):
     client = build_client(tmp_path)
     bootstrap = client.get("/api/bootstrap").json()

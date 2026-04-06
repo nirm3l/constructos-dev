@@ -347,7 +347,7 @@ const DOCKER_COMPOSE_STARTER_CONFIG: Record<string, unknown> = {
   compose_project_name: 'constructos-app',
   workspace_root: '/workspace',
   allowed_services: ['task-app', 'mcp-tools'],
-  protected_services: ['license-control-plane', 'license-control-plane-backup'],
+  protected_services: [],
   runtime_deploy_health: {
     required: false,
     stack: 'constructos-ws-default',

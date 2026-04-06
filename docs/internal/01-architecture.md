@@ -10,7 +10,6 @@
 ## Implementation Reality
 
 - Main product runtime is `constructos-app` (task-app, mcp-tools, postgres, kurrentdb, neo4j, ollama, docker-socket-proxy).
-- Licensing control plane is a separate stack `constructos-cp`.
 - `shared/bootstrap.py` seeds base workspace/project data and internal docs content from `docs/internal/`.
 
 ## Known Drift / Transitional Risk
@@ -29,11 +28,8 @@
 The repository contains two distinct backend systems plus two frontend surfaces:
 
 - Main product application in `app/`
-- Separate license control plane in `license_control_plane/`
 - Main React SPA in `app/frontend/`
-- Control-plane React SPA in `license_control_plane/frontend/`
 
-The main application is the core product. The control plane handles licensing, onboarding, seat limits, tokens, and installation administration.
 
 ## Runtime Topology
 
@@ -50,12 +46,9 @@ It contains:
 - `docker-socket-proxy`: constrained Docker access for automation
 - `marketing-site`: separate public marketing container
 
-The control-plane stack in `docker-compose.license-control-plane.yml` is named `constructos-cp`.
 
 It contains:
 
-- `license-control-plane`: FastAPI licensing/admin service
-- `license-control-plane-backup`: scheduled SQLite backup worker
 
 ```mermaid
 flowchart LR
@@ -71,8 +64,6 @@ flowchart LR
     MKT[marketing-site]
   end
 
-  subgraph ControlPlane[constructos-cp]
-    LCP[license-control-plane]
     LCPDB[(SQLite)]
     BAK[backup worker]
   end
@@ -90,7 +81,6 @@ flowchart LR
   MKT -. public site .-> LCP
   LCP --> LCPDB
   BAK --> LCPDB
-  API -. license sync and validation .-> LCP
 ```
 
 ## Main Application Startup Model
@@ -98,13 +88,11 @@ flowchart LR
 `app/main.py` defines the FastAPI lifespan and starts several background processes during startup:
 
 - bootstrap and schema/data safety setup
-- license startup check
 - persistent subscriptions for event replay
 - SQL projection worker
 - graph projection worker
 - vector projection worker
 - event-storming projection worker
-- license sync worker
 - system notifications worker
 - automation runner when `AGENT_RUNNER_ENABLED=true`
 
@@ -230,13 +218,11 @@ The main app supports three context-retrieval layers:
 
 ## Licensing Boundary
 
-Main app writes are guarded by license status through middleware in `app/main.py` and helpers in `app/shared/deps.py`.
 
 The rule is simple:
 
 - reads stay online
 - blocked writes return HTTP `402`
-- certain auth and license endpoints stay exempt so the system can recover from expired licensing state
 
 ## Architecture Summary
 

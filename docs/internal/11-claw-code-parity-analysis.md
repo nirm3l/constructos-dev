@@ -9,7 +9,6 @@ Scope: direct review of `/home/m4tr1x/claw-code-parity` to identify architecture
 - Do not import Claw's file-local session model, shim-heavy porting layer, or CLI-local assumptions as ConstructOS source of truth.
 - Prefer generated inventories and test-backed manifests over hand-maintained architecture reports whenever the source can be derived from code.
 - Keep structured LLM classification and safe-negative outcomes for ambiguous workflow decisions; do not introduce heuristic control-path fallbacks.
-- For reimplementation work, preserve ConstructOS strengths: CQRS/event sourcing, persisted workflow state, plugin policy enforcement, graph/vector context, and separate control-plane boundary.
 
 ## Executive Summary
 
@@ -61,7 +60,6 @@ The following recommendations from this analysis are implemented in ConstructOS:
    - `/api/bootstrap` includes `bootstrap_plan`
    - `bootstrap.config.architecture_inventory_summary` mirrors the same payload for compatibility
    - `bootstrap.config.bootstrap_plan` mirrors the same payload for compatibility
-5. Doctor operational control-plane hardening (high-visibility UX + recovery loop):
    - runtime health domains (`contracts`, `bootstrap`, `plugins`, `agent_runtime`)
    - health score and recommended actions
    - server-side quick actions (`runtime-contract-audit`, `warm-bootstrap-caches`, `recovery-sequence`, etc.)
@@ -457,7 +455,6 @@ Add a structured bootstrap plan/read model, for example:
 Model phases such as:
 
 - schema/bootstrap repairs
-- license startup check
 - persistent subscription ensure
 - read-model projection workers
 - graph/vector workers
