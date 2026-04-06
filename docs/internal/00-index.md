@@ -15,12 +15,8 @@ It is organized as a single reading path, with each document containing:
 2. `01-architecture.md`
 3. `02-domain-and-bounded-contexts.md`
 4. `03-agent-runtime-and-automation.md`
-6. `05-testing-and-quality.md`
-7. `06-omc-patterns-and-adoption.md`
-8. `10-orchestration-hardening-plan.md`
-9. `11-claw-code-parity-analysis.md`
-10. `12-architecture-export-contract.md`
-11. `99-glossary.md`
+5. `05-testing-and-quality.md`
+6. `99-glossary.md`
 
 Use `90-policy-appendix.md` when you need full legacy policy details.
 
@@ -29,13 +25,8 @@ flowchart TD
   A[Start] --> B[01 Architecture]
   B --> C[02 Domain]
   C --> D[03 Agent Runtime]
-  D --> E[04 Frontend and Ops]
-  E --> F[05 Testing and Quality]
-  F --> G[06 OMC Patterns and Adoption]
-  G --> J[10 Orchestration Hardening Plan]
-  J --> K[11 Claw Code Parity Analysis]
-  K --> L[12 Architecture Export Contract]
-  L --> H[99 Glossary]
+  D --> F[05 Testing and Quality]
+  F --> H[99 Glossary]
   D --> I[90 Policy Appendix when deep policy detail is needed]
 ```
 
@@ -47,10 +38,6 @@ flowchart TD
 | Domain aggregates, contexts, data model | `02-domain-and-bounded-contexts.md` | CQRS + Team Mode + Starters policy |
 | Team Mode, setup orchestration, automation execution | `03-agent-runtime-and-automation.md` | Team Mode v2 + project setup orchestration policy |
 | Test structure and enforcement | `05-testing-and-quality.md` | testing and quality policy |
-| OMC-inspired adoption roadmap | `06-omc-patterns-and-adoption.md` | orchestration pattern adoption policy |
-| Prompt-agnostic orchestration hardening execution plan | `10-orchestration-hardening-plan.md` | runtime determinism and orchestration quality policy |
-| Claw parity-inspired architecture inventory and reimplementation guidance | `11-claw-code-parity-analysis.md` | runtime inventory, audit, and registry adoption policy |
-| Generated architecture export and bootstrap mirror contract | `12-architecture-export-contract.md` | runtime contract and drift-diagnostics policy |
 
 ## Non-Negotiable Boundaries
 
