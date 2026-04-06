@@ -14,6 +14,7 @@ from sqlalchemy import func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from features.agents.model_registry import list_available_agent_models
+from features.agents.mcp_registry import list_available_mcp_servers
 from features.bootstrap.read_models import bootstrap_payload_read_model
 from .eventing import append_event, current_version, get_kurrent_client
 from features.projects.domain import EVENT_CREATED as PROJECT_EVENT_CREATED
@@ -2110,6 +2111,10 @@ def _warm_agent_model_registry_cache() -> None:
         list_available_agent_models(force_refresh=True, allow_runtime_discovery=True)
     except Exception as exc:  # pragma: no cover
         logger.warning("Agent model registry warmup failed during startup: %s", exc)
+    try:
+        list_available_mcp_servers(force_refresh=True, include_codex_cli=True)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Agent MCP registry warmup failed during startup: %s", exc)
 
 
 def bootstrap_payload(db: Session, user: User) -> dict[str, Any]:

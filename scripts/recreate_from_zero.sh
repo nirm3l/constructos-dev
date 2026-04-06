@@ -179,7 +179,7 @@ mkdir -p data
 mkdir -p data/workspace
 
 echo "[4/6] Running fresh deploy..."
-./scripts/deploy.sh
+DOCTOR_RECOVERY_AFTER_DEPLOY=false ./scripts/deploy.sh
 
 echo "[5/6] Waiting for API health..."
 for i in {1..60}; do

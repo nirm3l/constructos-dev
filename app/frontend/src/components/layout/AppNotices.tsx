@@ -74,6 +74,16 @@ function _formatScoreDelta(value: number | null): string {
   return String(value)
 }
 
+function _isRecentDoctorEvent(value: unknown, withinHours = 24): boolean {
+  const raw = String(value || '').trim()
+  if (!raw) return false
+  const parsed = new Date(raw)
+  if (Number.isNaN(parsed.getTime())) return false
+  const ageMs = Date.now() - parsed.getTime()
+  if (!Number.isFinite(ageMs) || ageMs < 0) return false
+  return ageMs <= withinHours * 60 * 60 * 1000
+}
+
 function _buildSparklinePath(points: number[]): string {
   if (!Array.isArray(points) || points.length <= 0) return ''
   if (points.length === 1) return 'M 0 18 L 34 18'
@@ -164,7 +174,6 @@ export function AppNotices({ state }: { state: any }) {
     }
     return null
   }, [runtimeHealthStatus])
-  const showDoctorTimeline = Boolean(runtimeHealthNotice || doctorLastFailure || doctorLastRecovery)
   const doctorIncidentNotice = React.useMemo(() => {
     const total = Math.max(0, Math.round(doctorIncidentTotal))
     const open = Math.max(0, Math.round(doctorIncidentOpen))
@@ -174,10 +183,6 @@ export function AppNotices({ state }: { state: any }) {
       message: `Executor worktree incidents are open: ${open} open of ${total} total.`,
     }
   }, [doctorIncidentOpen, doctorIncidentTotal])
-  const effectiveRuntimeHealthNotice = doctorIncidentNotice ? null : runtimeHealthNotice
-  const showDoctorTimelineEffective = Boolean(effectiveRuntimeHealthNotice || doctorLastFailure || doctorLastRecovery)
-  const canActivate = ['trial', 'grace', 'expired', 'unlicensed'].includes(status)
-  const activateLicenseMutation = state.activateLicenseMutation
   const executeDoctorQuickActionMutation = state.executeDoctorQuickActionMutation
   const replayRecoveryPending = Boolean(
     executeDoctorQuickActionMutation?.isPending
@@ -187,6 +192,19 @@ export function AppNotices({ state }: { state: any }) {
     executeDoctorQuickActionMutation?.isPending
     && String(executeDoctorQuickActionMutation?.variables || '') === 'executor-worktree-guard-diagnostics'
   )
+  const effectiveRuntimeHealthNotice = doctorIncidentNotice ? null : runtimeHealthNotice
+  const hasRecentDoctorFailure = _isRecentDoctorEvent(doctorLastFailure?.at, 24)
+  const hasRecentDoctorRecovery = _isRecentDoctorEvent(doctorLastRecovery?.at, 24)
+  const showDoctorTimelineEffective = Boolean(
+    effectiveRuntimeHealthNotice
+    || doctorIncidentNotice
+    || replayRecoveryPending
+    || executorDiagnosticsPending
+    || hasRecentDoctorFailure
+    || hasRecentDoctorRecovery
+  )
+  const canActivate = ['trial', 'grace', 'expired', 'unlicensed'].includes(status)
+  const activateLicenseMutation = state.activateLicenseMutation
   const seatUsage = activateLicenseMutation?.data?.seat_usage
 
   React.useEffect(() => {
@@ -402,7 +420,7 @@ export function AppNotices({ state }: { state: any }) {
         </div>
       ) : null}
       {showDoctorTimelineEffective ? (
-        <div className="notice" role="status">
+        <div className="notice notice-doctor-timeline" role="status">
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <strong>Doctor Incident Timeline</strong>
             <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
@@ -412,7 +430,7 @@ export function AppNotices({ state }: { state: any }) {
                 </span>
               ) : null}
               {doctorLastRecovery ? (
-                <span className="status-chip" style={{ background: 'rgba(16, 185, 129, 0.16)', borderColor: 'rgba(16, 185, 129, 0.35)', color: '#065f46' }}>
+                <span className="status-chip status-chip-recovery">
                   Last recovery {_formatDoctorEventTime(doctorLastRecovery?.at)}
                 </span>
               ) : null}
