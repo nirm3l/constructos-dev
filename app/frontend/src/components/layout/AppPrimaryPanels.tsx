@@ -503,8 +503,6 @@ export function AppPrimaryPanels({ state }: { state: any }) {
             submitClaudeDeviceAuthCodePending={state.submitClaudeDeviceAuthCodePending}
             onDeleteClaudeAuthOverride={state.deleteClaudeAuthOverride}
             deleteClaudeAuthOverridePending={state.deleteClaudeAuthOverridePending}
-            submitFeedback={state.submitFeedback}
-            feedbackSubmitting={state.submitFeedbackPending}
           />
           <WorkspacePanel
             workspaceName={String(currentWorkspace?.name || '').trim()}

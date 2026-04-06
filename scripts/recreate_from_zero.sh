@@ -190,7 +190,7 @@ for i in {1..60}; do
 done
 
 echo "[6/7] Running Doctor wiring + contract audit and validating runtime health..."
-DOCTOR_RECOVERY_ENABLED="${DOCTOR_RECOVERY_ENABLED:-true}"
+DOCTOR_RECOVERY_ENABLED="${DOCTOR_RECOVERY_ENABLED:-false}"
 if [[ "$DOCTOR_RECOVERY_ENABLED" == "true" ]]; then
   doctor_username="${DOCTOR_RECOVERY_USERNAME:-$(resolve_compose_env_value "BOOTSTRAP_USERNAME" || true)}"
   doctor_password="${DOCTOR_RECOVERY_PASSWORD:-$(resolve_compose_env_value "BOOTSTRAP_PASSWORD" || true)}"

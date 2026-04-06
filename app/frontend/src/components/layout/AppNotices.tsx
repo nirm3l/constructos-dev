@@ -95,12 +95,16 @@ export function AppNotices({ state }: { state: any }) {
   }
   const doctorTrendLabel = _buildTrendLabel(doctorTrendScores, doctorScoreDelta)
   const doctorRecentActions = Array.isArray(doctorStatus?.recent_actions) ? doctorStatus.recent_actions : []
+  const doctorState = String(doctorStatus?.doctor_state || '').trim().toLowerCase()
+  const doctorReady = doctorState === 'ready'
   const doctorLastFailure = doctorRecentActions.find((item: any) => _normalizeDoctorActionStatus(item?.status) === 'failed') ?? null
   const doctorLastRecovery = doctorRecentActions.find((item: any) => (
     String(item?.id || '').trim().toLowerCase() === 'recovery-sequence'
     && _normalizeDoctorActionStatus(item?.status) === 'passed'
   )) ?? null
-  const runtimeHealthStatus = String(state.workspaceDoctorQuery?.data?.runtime_health?.overall_status || '').trim().toLowerCase()
+  const runtimeHealthStatus = doctorReady
+    ? String(state.workspaceDoctorQuery?.data?.runtime_health?.overall_status || '').trim().toLowerCase()
+    : ''
   const previousRuntimeHealthStatusRef = React.useRef<string>('')
   const runtimeHealthNotice = React.useMemo(() => {
     if (runtimeHealthStatus === 'failing') {
@@ -166,7 +170,7 @@ export function AppNotices({ state }: { state: any }) {
     } catch {
       seen = false
     }
-    if (runtimeHealthStatus === 'failing' && previousStatus !== 'failing' && !seen) {
+    if (doctorReady && runtimeHealthStatus === 'failing' && previousStatus !== 'failing' && !seen) {
       setIncidentModalOpen(true)
       setIncidentModalRecoveryFeedback(null)
       try {
@@ -175,7 +179,7 @@ export function AppNotices({ state }: { state: any }) {
         // Ignore session storage failures; modal can re-open in restrictive browsers.
       }
     }
-  }, [runtimeHealthStatus, state.workspaceId])
+  }, [doctorReady, runtimeHealthStatus, state.workspaceId])
 
   const runRecoverySequenceWithTelemetry = React.useCallback(async () => {
     if (!executeDoctorQuickActionMutation?.mutateAsync) return

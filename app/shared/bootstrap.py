@@ -936,6 +936,8 @@ def _seed_docs_root_candidates() -> tuple[Path, ...]:
         candidates.append(Path(explicit_seed_docs_dir))
     candidates.append(Path("/opt/constructos/docs"))
     candidates.append(Path("/opt/constructos/repo/docs"))
+    # Container/runtime path: /app/shared/bootstrap.py -> parents[1] = /app.
+    candidates.append(Path(__file__).resolve().parents[1] / "docs")
     # Source checkout path: .../repo/app/shared/bootstrap.py -> parents[2] = repo root.
     candidates.append(Path(__file__).resolve().parents[2] / "docs")
     seen: set[str] = set()
@@ -1157,12 +1159,21 @@ def _extract_markdown_title(body: str, *, fallback: str) -> str:
     return fallback
 
 
-def _seed_constructos_project(db: Session) -> None:
-    docs_root = _resolve_seed_docs_root()
-    if docs_root is None:
-        logger.warning("ConstructOS docs seed skipped: no docs directory found in seed candidates.")
-        return
+def _constructos_fallback_note_body(*, title: str, file_name: str) -> str:
+    return (
+        f"# {title}\n\n"
+        "This deployment does not include bundled markdown guide files, so this note was generated from the "
+        "built-in fallback seed.\n\n"
+        "## Next steps\n\n"
+        "1. Open the public ConstructOS repository docs for full guidance.\n"
+        "2. If you need local seeded docs, provide a docs folder and set `SEED_DOCS_DIR` before startup.\n\n"
+        "## Reference\n\n"
+        f"- Seed source file: `{file_name}`\n"
+        "- Repository docs: https://github.com/nirm3l/constructos/tree/main/docs\n"
+    )
 
+
+def _seed_constructos_project(db: Session) -> None:
     _seed_project_header(
         db,
         project_id=CONSTRUCTOS_PROJECT_ID,
@@ -1263,12 +1274,14 @@ def _seed_constructos_project(db: Session) -> None:
             False,
         ),
     ]
+    docs_root = _resolve_seed_docs_root()
+    if docs_root is None:
+        logger.warning("ConstructOS docs files missing; creating fallback notes.")
 
     for note_id, note_group_id, fallback_title, file_name, tags, pinned in note_sources:
-        body = _read_seed_markdown(docs_root=docs_root, file_name=file_name)
+        body = _read_seed_markdown(docs_root=docs_root, file_name=file_name) if docs_root is not None else None
         if body is None:
-            logger.warning("ConstructOS docs seed skipped note=%s missing file=%s", note_id, file_name)
-            continue
+            body = _constructos_fallback_note_body(title=fallback_title, file_name=file_name)
         title = _extract_markdown_title(body, fallback=fallback_title)
         _seed_note_markdown(
             db,

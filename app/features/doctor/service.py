@@ -1835,9 +1835,13 @@ def _build_doctor_runtime_health_snapshot(
     contracts_error_count = len(audit.errors)
     contracts_warning_count = len(audit.warnings)
     descriptor_drift = _compute_descriptor_drift_diagnostics(inventory_counts=inventory_counts)
-    runtime_contract_audit_stale = (
-        runtime_contract_audit_age_hours is None
-        or float(runtime_contract_audit_age_hours) > float(DOCTOR_RUNTIME_CONTRACT_AUDIT_STALE_HOURS)
+    enforce_runtime_contract_audit = bool(supported and enabled)
+    runtime_contract_audit_stale = bool(
+        enforce_runtime_contract_audit
+        and (
+            runtime_contract_audit_age_hours is None
+            or float(runtime_contract_audit_age_hours) > float(DOCTOR_RUNTIME_CONTRACT_AUDIT_STALE_HOURS)
+        )
     )
     runtime_contract_audit_issue_codes: list[str] = []
     if runtime_contract_audit_stale:
@@ -1871,21 +1875,19 @@ def _build_doctor_runtime_health_snapshot(
     plugin_issues: list[str] = []
     if not supported:
         plugin_issues.append("doctor_plugin_not_supported")
-    if supported and not enabled:
-        plugin_issues.append("doctor_plugin_disabled")
-    if not seeded:
-        plugin_issues.append("doctor_fixture_not_seeded")
-    if seeded and not team_mode_enabled:
-        plugin_issues.append("team_mode_not_enabled")
-    if seeded and not git_delivery_enabled:
-        plugin_issues.append("git_delivery_not_enabled")
-    if seeded and str(last_run_status or "").strip().lower() in {"failed", "warning"}:
-        plugin_issues.append("last_doctor_run_unhealthy")
+    if supported and enabled:
+        if not seeded:
+            plugin_issues.append("doctor_fixture_not_seeded")
+        if seeded and not team_mode_enabled:
+            plugin_issues.append("team_mode_not_enabled")
+        if seeded and not git_delivery_enabled:
+            plugin_issues.append("git_delivery_not_enabled")
+        if seeded and str(last_run_status or "").strip().lower() in {"failed", "warning"}:
+            plugin_issues.append("last_doctor_run_unhealthy")
     plugin_status = "failing" if any(
         issue in plugin_issues
         for issue in {
             "doctor_plugin_not_supported",
-            "doctor_plugin_disabled",
             "team_mode_not_enabled",
             "git_delivery_not_enabled",
         }
@@ -2287,6 +2289,8 @@ def get_doctor_status(db: Session, *, workspace_id: str, user: User) -> dict[str
         if latest_runtime_contract_audit_at is not None
         else None
     )
+    has_doctor_history = bool(latest_runs) or bool(recent_actions_payload) or int(action_stats.get("total") or 0) > 0
+    doctor_state = "ready" if has_doctor_history else "not_run"
     latest_run = latest_runs[0] if latest_runs else None
     last_run_status = str(getattr(config, "last_run_status", "") or "").strip() or None
     runtime_health = _build_doctor_runtime_health_snapshot(
@@ -2386,6 +2390,7 @@ def get_doctor_status(db: Session, *, workspace_id: str, user: User) -> dict[str
         "recent_actions": recent_actions_payload,
         "quick_action_cooldowns": quick_action_cooldowns,
         "quick_action_stats": action_stats,
+        "doctor_state": doctor_state,
         "runtime_health": runtime_health,
     }
 

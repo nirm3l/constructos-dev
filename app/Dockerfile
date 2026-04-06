@@ -26,25 +26,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/home/app/.local/bin:${PATH}" \
     APP_VERSION=${APP_VERSION} \
     APP_BUILD=${APP_BUILD} \
-    APP_ENCRYPTED_BUNDLE_ENABLED=false \
-    APP_ENCRYPTED_BUNDLE_PATH=/opt/constructos/app.tar.gz.enc \
-    APP_BUNDLE_KDF_ITERATIONS=200000 \
-    APP_BUNDLE_TOKEN_SEGMENT_INDEX=2 \
-    APP_BUNDLE_TOKEN_DELIMITER=. \
-    APP_RUNTIME_APP_DIR=/app \
-    APP_DECRYPTED_APP_DIR=/tmp/constructos-app
+    APP_RUNTIME_APP_DIR=/app
 
 ARG APP_UID=10001
 ARG APP_GID=10001
 ARG OPENCODE_VERSION=""
-ARG APP_BUNDLE_ENCRYPT=false
-ARG APP_BUNDLE_PASSWORD=""
-ARG APP_BUNDLE_KDF_ITERATIONS=200000
 
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends dumb-init ca-certificates openssl bash git curl ripgrep docker-cli docker-compose \
+    && apt-get install -y --no-install-recommends dumb-init ca-certificates bash git curl ripgrep docker-cli docker-compose \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=agent-cli-builder /usr/local/bin/node /usr/local/bin/node
@@ -74,29 +65,10 @@ RUN chmod 0755 /usr/local/bin/constructos-entrypoint.sh /usr/local/bin/docker \
     && if [ -x /usr/bin/docker-compose ]; then mv /usr/bin/docker-compose /usr/bin/docker-compose-real; fi \
     && ln -sf /usr/local/bin/docker /usr/bin/docker \
     && ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose \
-    && if [ "${APP_BUNDLE_ENCRYPT}" = "true" ]; then \
-        if [ -z "${APP_BUNDLE_PASSWORD}" ]; then \
-          echo "APP_BUNDLE_PASSWORD is required when APP_BUNDLE_ENCRYPT=true" >&2; \
-          exit 1; \
-        fi; \
-        mkdir -p /opt/constructos; \
-        tar -czf /tmp/constructos-app.tar.gz -C /app .; \
-        openssl enc \
-          -aes-256-cbc \
-          -pbkdf2 \
-          -iter "${APP_BUNDLE_KDF_ITERATIONS}" \
-          -in /tmp/constructos-app.tar.gz \
-          -out /opt/constructos/app.tar.gz.enc \
-          -pass "pass:${APP_BUNDLE_PASSWORD}"; \
-        rm -f /tmp/constructos-app.tar.gz; \
-        find /app -mindepth 1 -delete; \
-        touch /app/.encrypted_bundle_placeholder; \
-      fi \
-    && mkdir -p /opt/constructos \
     && groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid app --create-home --home-dir /home/app app \
     && mkdir -p /data/uploads /home/app/.codex /home/app/.claude /home/app/agent-home /home/app/workspace \
-    && chown -R app:app /app /data/uploads /home/app /opt/constructos
+    && chown -R app:app /app /data/uploads /home/app
 
 USER app
 

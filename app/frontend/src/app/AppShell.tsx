@@ -29,7 +29,6 @@ import {
   seedWorkspaceDoctor,
   startClaudeDeviceAuth,
   startCodexDeviceAuth,
-  submitFeedback,
   submitClaudeDeviceAuthCode,
   submitCodexBrowserCallback,
   updateAdminUserRole,
@@ -444,23 +443,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     retry: 1,
     refetchOnWindowFocus: false,
     refetchInterval: false,
-  })
-  const submitFeedbackMutation = useMutation({
-    mutationFn: (payload: {
-      title: string
-      description: string
-      feedback_type: 'general' | 'feature_request' | 'question' | 'other'
-      context?: Record<string, unknown>
-      metadata?: Record<string, unknown>
-    }) => submitFeedback(userId, payload),
-    onSuccess: () => {
-      setUiError(null)
-      setUiInfo('Feedback submitted successfully.')
-      setTimeout(() => setUiInfo(null), 2500)
-    },
-    onError: (error: unknown) => {
-      setUiError(toErrorMessage(error, 'Feedback submission failed'))
-    },
   })
   const changeMyPasswordMutation = useMutation({
     mutationFn: (payload: { current_password: string; new_password: string }) => authChangePassword(payload),
@@ -1941,16 +1923,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     markUnreadMutation.mutate(id)
   }, [markUnreadMutation])
 
-  const handleNotificationAction = React.useCallback((notificationId: string, action: string) => {
-    void notificationId
-    const normalizedAction = String(action || '').trim()
-    if (!normalizedAction) return
-    if (normalizedAction === 'auto_update_app_images') {
-      setUiInfo('Auto-update action is no longer available in the open-source edition.')
-      setTimeout(() => setUiInfo(null), 2500)
-    }
-  }, [setUiInfo])
-
   const createTaskFromGraphSummary = React.useCallback(async (payload: { title: string; description: string }) => {
     if (!selectedProjectId) throw new Error('No project selected')
     await createTaskMutation.mutateAsync({
@@ -2099,7 +2071,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       markAllReadMutation,
       handleMarkNotificationRead,
       handleMarkNotificationUnread,
-      handleNotificationAction,
       uiError,
       setUiError,
       uiInfo,
@@ -2461,8 +2432,6 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
       saveOnboardingTourProgressPending: onboardingTourPreferencesMutation.isPending,
       changeMyPassword: changeMyPasswordMutation.mutateAsync,
       changeMyPasswordPending: changeMyPasswordMutation.isPending,
-      submitFeedback: submitFeedbackMutation.mutateAsync,
-      submitFeedbackPending: submitFeedbackMutation.isPending,
       projectNames,
       taskListItems,
       taskTeamAgentLabelsByProjectId,

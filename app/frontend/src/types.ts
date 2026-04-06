@@ -208,6 +208,7 @@ export type WorkspaceDoctorStatus = {
     delta_warning: number
     delta_failed: number
   } | null
+  doctor_state?: 'not_run' | 'ready' | string
   runtime_health?: {
     generated_at: string
     overall_status: 'healthy' | 'warning' | 'failing' | string
@@ -432,22 +433,6 @@ export type Notification = {
   dedupe_key?: string | null
   payload?: Record<string, unknown> | null
   source_event?: string | null
-}
-
-export type FeedbackKind = 'general' | 'feature_request' | 'question' | 'other'
-
-export type FeedbackCreateRequest = {
-  title: string
-  description: string
-  feedback_type: FeedbackKind
-  context?: Record<string, unknown>
-  metadata?: Record<string, unknown>
-}
-
-export type FeedbackCreateResponse = {
-  ok: boolean
-  created: boolean
-  feedback: Record<string, unknown>
 }
 
 export type AppVersionPayload = {

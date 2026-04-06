@@ -88,23 +88,6 @@ Client one-liner installer:
 curl -fsSL https://raw.githubusercontent.com/nirm3l/constructos/main/install.sh | ACTIVATION_CODE=ACT-XXXX-XXXX-XXXX-XXXX-XXXX IMAGE_TAG=main INSTALL_COS=true AUTO_DEPLOY=1 bash
 ```
 
-Optional encrypted runtime bundle (PoC only, not strong IP protection):
-```bash
-export APP_BUNDLE_PASSWORD='bundle-secret-segment'
-
-docker build \
-  -f app/Dockerfile \
-  --build-arg APP_BUNDLE_ENCRYPT=true \
-  --build-arg APP_BUNDLE_PASSWORD="${APP_BUNDLE_PASSWORD}" \
-  -t ghcr.io/nirm3l/constructos-task-app:encrypted-poc \
-  ./app
-```
-Runtime env for decrypt-on-start:
-- `APP_ENCRYPTED_BUNDLE_ENABLED=true`
-- `APP_BUNDLE_TOKEN_SEGMENT_INDEX=2` (0-based token segment; for `a.b.c`, this uses `c`)
-
-The image can still be reverse-engineered by a host operator. Treat this as obfuscation, not a security boundary.
-
 2. Check health:
 ```bash
 curl -sS http://localhost:1102/api/health

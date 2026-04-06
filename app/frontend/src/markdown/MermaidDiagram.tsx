@@ -1,14 +1,16 @@
 import React from 'react'
 
 type MermaidApi = typeof import('mermaid')['default']
+type MermaidThemeBrand = 'constructos' | 'symphony'
 type MermaidThemeMode = 'light' | 'dark'
+type MermaidThemeKey = `${MermaidThemeBrand}-${MermaidThemeMode}`
 
 let mermaidApiPromise: Promise<MermaidApi> | null = null
 let mermaidRenderSequence = 0
-let mermaidInitializedTheme: MermaidThemeMode | null = null
+let mermaidInitializedTheme: MermaidThemeKey | null = null
 const mermaidSvgCache = new Map<string, string>()
 const MERMAID_RENDER_DEBOUNCE_MS = 220
-const MERMAID_STYLE_VERSION = 'terminal-green-v2'
+const MERMAID_STYLE_VERSION = 'theme-brand-mode-v3'
 
 function getMermaidApi(): Promise<MermaidApi> {
   if (mermaidApiPromise) return mermaidApiPromise
@@ -16,17 +18,20 @@ function getMermaidApi(): Promise<MermaidApi> {
   return mermaidApiPromise
 }
 
-function isDarkThemeEnabled(): boolean {
-  if (typeof document === 'undefined') return false
-  return document.documentElement.getAttribute('data-theme') === 'dark'
+function getThemeSnapshot(): { brand: MermaidThemeBrand; mode: MermaidThemeMode; key: MermaidThemeKey } {
+  if (typeof document === 'undefined') {
+    return { brand: 'symphony', mode: 'light', key: 'symphony-light' }
+  }
+  const root = document.documentElement
+  const rawBrand = String(root.getAttribute('data-theme-brand') || '').trim().toLowerCase()
+  const rawMode = String(root.getAttribute('data-theme') || '').trim().toLowerCase()
+  const brand: MermaidThemeBrand = rawBrand === 'constructos' ? 'constructos' : 'symphony'
+  const mode: MermaidThemeMode = rawMode === 'dark' ? 'dark' : 'light'
+  return { brand, mode, key: `${brand}-${mode}` }
 }
 
-function getMermaidThemeMode(): MermaidThemeMode {
-  return isDarkThemeEnabled() ? 'dark' : 'light'
-}
-
-function getMermaidThemeVariables(mode: MermaidThemeMode): Record<string, string> {
-  if (mode === 'dark') {
+function getMermaidThemeVariables(theme: MermaidThemeKey): Record<string, string> {
+  if (theme === 'constructos-dark') {
     return {
       fontFamily: '"JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, Monaco, Consolas, monospace',
       background: 'rgba(0, 0, 0, 0)',
@@ -53,35 +58,89 @@ function getMermaidThemeVariables(mode: MermaidThemeMode): Record<string, string
       nodeBorder: '#4db975',
     }
   }
+  if (theme === 'constructos-light') {
+    return {
+      fontFamily: '"JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, Monaco, Consolas, monospace',
+      background: 'rgba(0, 0, 0, 0)',
+      primaryColor: '#d9f8e4',
+      primaryBorderColor: '#2f8f4d',
+      primaryTextColor: '#1f6b39',
+      secondaryColor: '#c5f0d5',
+      tertiaryColor: '#e8fff0',
+      lineColor: '#2f8f4d',
+      textColor: '#1f6b39',
+      mainBkg: '#d9f8e4',
+      secondBkg: '#c5f0d5',
+      tertiaryBkg: '#e8fff0',
+      clusterBkg: '#e7f8ee',
+      clusterBorder: '#2f8f4d',
+      edgeLabelBackground: '#eaf7ef',
+      titleColor: '#1f6b39',
+      actorBkg: '#d9f8e4',
+      actorBorder: '#2f8f4d',
+      labelBoxBkgColor: '#d9f8e4',
+      labelBoxBorderColor: '#2f8f4d',
+      labelTextColor: '#1f6b39',
+      nodeBkg: '#d9f8e4',
+      nodeBorder: '#2f8f4d',
+    }
+  }
+  if (theme === 'symphony-dark') {
+    return {
+      fontFamily: '"Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif',
+      background: 'rgba(0, 0, 0, 0)',
+      primaryColor: '#232734',
+      primaryBorderColor: '#8ea9ff',
+      primaryTextColor: '#ffffff',
+      secondaryColor: '#1b1f2a',
+      tertiaryColor: '#2a3140',
+      lineColor: '#91afea',
+      textColor: '#ffffff',
+      mainBkg: '#232734',
+      secondBkg: '#1b1f2a',
+      tertiaryBkg: '#2a3140',
+      clusterBkg: '#1b1f2a',
+      clusterBorder: '#8ea9ff',
+      edgeLabelBackground: '#1e2431',
+      titleColor: '#ffffff',
+      actorBkg: '#232734',
+      actorBorder: '#8ea9ff',
+      labelBoxBkgColor: '#232734',
+      labelBoxBorderColor: '#8ea9ff',
+      labelTextColor: '#ffffff',
+      nodeBkg: '#232734',
+      nodeBorder: '#8ea9ff',
+    }
+  }
   return {
-    fontFamily: '"JetBrains Mono", "Fira Code", "SFMono-Regular", Menlo, Monaco, Consolas, monospace',
+    fontFamily: '"Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif',
     background: 'rgba(0, 0, 0, 0)',
-    primaryColor: '#d9f8e4',
-    primaryBorderColor: '#2f8f4d',
-    primaryTextColor: '#1f6b39',
-    secondaryColor: '#c5f0d5',
-    tertiaryColor: '#e8fff0',
-    lineColor: '#2f8f4d',
-    textColor: '#1f6b39',
-    mainBkg: '#d9f8e4',
-    secondBkg: '#c5f0d5',
-    tertiaryBkg: '#e8fff0',
-    clusterBkg: '#e7f8ee',
-    clusterBorder: '#2f8f4d',
-    edgeLabelBackground: '#eaf7ef',
-    titleColor: '#1f6b39',
-    actorBkg: '#d9f8e4',
-    actorBorder: '#2f8f4d',
-    labelBoxBkgColor: '#d9f8e4',
-    labelBoxBorderColor: '#2f8f4d',
-    labelTextColor: '#1f6b39',
-    nodeBkg: '#d9f8e4',
-    nodeBorder: '#2f8f4d',
+    primaryColor: '#edf1ff',
+    primaryBorderColor: '#8091de',
+    primaryTextColor: '#222453',
+    secondaryColor: '#e7ebff',
+    tertiaryColor: '#f8f9ff',
+    lineColor: '#7d92e8',
+    textColor: '#222453',
+    mainBkg: '#edf1ff',
+    secondBkg: '#e7ebff',
+    tertiaryBkg: '#f8f9ff',
+    clusterBkg: '#eef2ff',
+    clusterBorder: '#8091de',
+    edgeLabelBackground: '#f3f5ff',
+    titleColor: '#222453',
+    actorBkg: '#edf1ff',
+    actorBorder: '#8091de',
+    labelBoxBkgColor: '#edf1ff',
+    labelBoxBorderColor: '#8091de',
+    labelTextColor: '#222453',
+    nodeBkg: '#edf1ff',
+    nodeBorder: '#8091de',
   }
 }
 
-function getMermaidThemeCss(mode: MermaidThemeMode): string {
-  if (mode === 'dark') {
+function getMermaidThemeCss(theme: MermaidThemeKey): string {
+  if (theme === 'constructos-dark') {
     return `
       svg {
         background-color: transparent !important;
@@ -115,6 +174,74 @@ function getMermaidThemeCss(mode: MermaidThemeMode): string {
       }
     `
   }
+  if (theme === 'constructos-light') {
+    return `
+      svg {
+        background-color: transparent !important;
+      }
+      rect.background, .background {
+        fill: transparent !important;
+      }
+      .node rect, .node circle, .node ellipse, .node polygon, .node path {
+        fill: #d9f8e4 !important;
+        stroke: #2f8f4d !important;
+        stroke-width: 1.5px !important;
+      }
+      .edgePath .path {
+        stroke: #2f8f4d !important;
+        stroke-width: 1.5px !important;
+      }
+      .edgeLabel rect {
+        fill: #eaf7ef !important;
+        opacity: 0.98 !important;
+      }
+      .cluster rect {
+        fill: #e7f8ee !important;
+        stroke: #2f8f4d !important;
+      }
+      .label, .label text, .nodeLabel, .edgeLabel text, .cluster text, text {
+        fill: #1f6b39 !important;
+      }
+      .marker, marker path {
+        fill: #2f8f4d !important;
+        stroke: #2f8f4d !important;
+      }
+    `
+  }
+  if (theme === 'symphony-dark') {
+    return `
+      svg {
+        background-color: transparent !important;
+      }
+      rect.background, .background {
+        fill: transparent !important;
+      }
+      .node rect, .node circle, .node ellipse, .node polygon, .node path {
+        fill: #232734 !important;
+        stroke: #8ea9ff !important;
+        stroke-width: 1.6px !important;
+      }
+      .edgePath .path {
+        stroke: #91afea !important;
+        stroke-width: 1.6px !important;
+      }
+      .edgeLabel rect {
+        fill: #1e2431 !important;
+        opacity: 0.98 !important;
+      }
+      .cluster rect {
+        fill: #1b1f2a !important;
+        stroke: #8ea9ff !important;
+      }
+      .label, .label text, .nodeLabel, .edgeLabel text, .cluster text, text {
+        fill: #ffffff !important;
+      }
+      .marker, marker path {
+        fill: #91afea !important;
+        stroke: #91afea !important;
+      }
+    `
+  }
   return `
     svg {
       background-color: transparent !important;
@@ -123,39 +250,62 @@ function getMermaidThemeCss(mode: MermaidThemeMode): string {
       fill: transparent !important;
     }
     .node rect, .node circle, .node ellipse, .node polygon, .node path {
-      fill: #d9f8e4 !important;
-      stroke: #2f8f4d !important;
+      fill: #edf1ff !important;
+      stroke: #8091de !important;
       stroke-width: 1.5px !important;
     }
     .edgePath .path {
-      stroke: #2f8f4d !important;
+      stroke: #7d92e8 !important;
       stroke-width: 1.5px !important;
     }
     .edgeLabel rect {
-      fill: #eaf7ef !important;
+      fill: #f3f5ff !important;
       opacity: 0.98 !important;
     }
     .cluster rect {
-      fill: #e7f8ee !important;
-      stroke: #2f8f4d !important;
+      fill: #eef2ff !important;
+      stroke: #8091de !important;
     }
     .label, .label text, .nodeLabel, .edgeLabel text, .cluster text, text {
-      fill: #1f6b39 !important;
+      fill: #222453 !important;
     }
     .marker, marker path {
-      fill: #2f8f4d !important;
-      stroke: #2f8f4d !important;
+      fill: #7d92e8 !important;
+      stroke: #7d92e8 !important;
     }
   `
 }
 
-function buildCacheKey(source: string, theme: MermaidThemeMode): string {
+function buildCacheKey(source: string, theme: MermaidThemeKey): string {
   return `${MERMAID_STYLE_VERSION}\n${theme}\n${source}`
 }
 
 function MermaidDiagramComponent({ code }: { code: string }) {
   const source = React.useMemo(() => String(code || '').trim(), [code])
-  const theme = getMermaidThemeMode()
+  const [theme, setTheme] = React.useState<MermaidThemeKey>(() => getThemeSnapshot().key)
+
+  React.useEffect(() => {
+    if (typeof document === 'undefined') return () => {}
+    const root = document.documentElement
+    const syncTheme = () => {
+      const next = getThemeSnapshot().key
+      setTheme((prev) => (prev === next ? prev : next))
+    }
+    syncTheme()
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type !== 'attributes') continue
+        const name = mutation.attributeName || ''
+        if (name === 'data-theme' || name === 'data-theme-brand') {
+          syncTheme()
+          break
+        }
+      }
+    })
+    observer.observe(root, { attributes: true, attributeFilter: ['data-theme', 'data-theme-brand'] })
+    return () => observer.disconnect()
+  }, [])
+
   const cacheKey = source ? buildCacheKey(source, theme) : ''
   const [svg, setSvg] = React.useState(() => (cacheKey ? mermaidSvgCache.get(cacheKey) || '' : ''))
   const [error, setError] = React.useState<string | null>(null)

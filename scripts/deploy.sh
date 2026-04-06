@@ -355,7 +355,7 @@ for i in {1..60}; do
 done
 
 echo "Running Doctor recovery sequence and validating runtime health..."
-DOCTOR_RECOVERY_AFTER_DEPLOY="${DOCTOR_RECOVERY_AFTER_DEPLOY:-true}"
+DOCTOR_RECOVERY_AFTER_DEPLOY="${DOCTOR_RECOVERY_AFTER_DEPLOY:-false}"
 if [[ "$DOCTOR_RECOVERY_AFTER_DEPLOY" == "true" ]]; then
   doctor_username="${DOCTOR_RECOVERY_USERNAME:-$(resolve_compose_env_value "BOOTSTRAP_USERNAME" || true)}"
   doctor_password="${DOCTOR_RECOVERY_PASSWORD:-$(resolve_compose_env_value "BOOTSTRAP_PASSWORD" || true)}"

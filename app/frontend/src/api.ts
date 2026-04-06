@@ -10,8 +10,6 @@ import type {
   PluginDescriptorsPayload,
   AuthMePayload,
   BootstrapPayload,
-  FeedbackCreateRequest,
-  FeedbackCreateResponse,
   AgentChatResponse,
   ChatMessageRecord,
   ChatMcpServer,
@@ -161,11 +159,6 @@ export const getArchitectureExport = (userId: string) =>
   api<ArchitectureExportPayload>('/api/debug/architecture-export', userId)
 export const getPluginDescriptors = (userId: string) =>
   api<PluginDescriptorsPayload>('/api/debug/plugin-descriptors', userId)
-export const submitFeedback = (userId: string, payload: FeedbackCreateRequest) =>
-  api<FeedbackCreateResponse>('/api/support/feedback', userId, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  })
 
 export async function getAppVersion(): Promise<AppVersionPayload> {
   const res = await fetch('/api/version')

@@ -31,7 +31,6 @@ type AppHeaderProps = {
   onMarkUnread: (notificationId: string) => void
   onMarkAllRead: () => void
   isMarkAllReadPending: boolean
-  onNotificationAction: (notificationId: string, action: string) => void
   onOpenTask: (taskId: string, projectId?: string | null) => boolean
   onOpenNote: (noteId: string, projectId?: string | null) => boolean
   onOpenSpecification: (specificationId: string, projectId?: string | null) => void
@@ -149,7 +148,6 @@ export function AppHeader({
   onMarkUnread,
   onMarkAllRead,
   isMarkAllReadPending,
-  onNotificationAction,
   onOpenTask,
   onOpenNote,
   onOpenSpecification,
@@ -174,9 +172,6 @@ export function AppHeader({
   const [notificationPreviewOpen, setNotificationPreviewOpen] = React.useState(false)
   const [notificationPreviewMarkdown, setNotificationPreviewMarkdown] = React.useState('')
   const [notificationPreviewTitle, setNotificationPreviewTitle] = React.useState('Notification')
-  const [notificationPreviewId, setNotificationPreviewId] = React.useState('')
-  const [notificationPreviewAction, setNotificationPreviewAction] = React.useState('')
-  const [notificationPreviewActionLabel, setNotificationPreviewActionLabel] = React.useState('')
   const [notificationPreviewView] = React.useState<'preview'>('preview')
   const openUserGuide = React.useCallback(() => {
     const hasGuideProject = bootstrapData.projects.some((project) => project.id === CONSTRUCTOS_USER_GUIDE_PROJECT_ID)
@@ -275,20 +270,12 @@ export function AppHeader({
                         const markdownMessage = notificationMarkdownMessage(n)
                         const markdownPreview = truncateMarkdownForNotificationList(markdownMessage)
                         const notificationTitle = notificationPayloadText(n, 'title') || 'Notification'
-                        const payload = n.payload && typeof n.payload === 'object' ? (n.payload as Record<string, unknown>) : null
-                        const notificationAction = String(payload?.action || '').trim()
-                        const notificationActionLabel = String(payload?.action_label || '').trim()
-                        const canRunNotificationAction = Boolean(notificationAction)
-                        const inlineNotificationAction = notificationAction === 'auto_update_app_images'
                         const markNotificationRead = () => {
                           if (!n.is_read) onMarkRead(n.id)
                         }
                         const openNotificationPreview = () => {
                           setNotificationPreviewMarkdown(markdownMessage)
                           setNotificationPreviewTitle(notificationTitle)
-                          setNotificationPreviewId(String(n.id || '').trim())
-                          setNotificationPreviewAction(notificationAction)
-                          setNotificationPreviewActionLabel(notificationActionLabel)
                           setNotificationPreviewOpen(true)
                           setShowNotificationsPanel(false)
                           markNotificationRead()
@@ -329,19 +316,6 @@ export function AppHeader({
                                   >
                                     Open full notification
                                   </button>
-                                  {inlineNotificationAction && canRunNotificationAction ? (
-                                    <button
-                                      className="notif-inline-action"
-                                      onClick={(event) => {
-                                        event.stopPropagation()
-                                        onNotificationAction(n.id, notificationAction)
-                                        markNotificationRead()
-                                        setShowNotificationsPanel(false)
-                                      }}
-                                    >
-                                      {notificationActionLabel || 'Update app'}
-                                    </button>
-                                  ) : null}
                                   {n.is_read ? (
                                     <button
                                       className="notif-inline-action"
@@ -353,7 +327,7 @@ export function AppHeader({
                                       Mark unread
                                     </button>
                                   ) : null}
-                                  {(taskId || noteId || specificationId || (canRunNotificationAction && !inlineNotificationAction) || (!taskId && !noteId && !specificationId && projectId)) ? (
+                                  {(taskId || noteId || specificationId || (!taskId && !noteId && !specificationId && projectId)) ? (
                                     <span className="notif-inline-separator" aria-hidden="true">
                                       |
                                     </span>
@@ -395,19 +369,6 @@ export function AppHeader({
                                       }}
                                     >
                                       Open specification
-                                    </button>
-                                  ) : null}
-                                  {canRunNotificationAction && !inlineNotificationAction ? (
-                                    <button
-                                      className="notif-inline-action"
-                                      onClick={(event) => {
-                                        event.stopPropagation()
-                                        onNotificationAction(n.id, notificationAction)
-                                        markNotificationRead()
-                                        setShowNotificationsPanel(false)
-                                      }}
-                                    >
-                                      {notificationActionLabel || (notificationAction === 'auto_update_app_images' ? 'Update app' : 'Run action')}
                                     </button>
                                   ) : null}
                                   {!taskId && !noteId && !specificationId && projectId ? (
@@ -539,17 +500,6 @@ export function AppHeader({
                     Notification details and linked actions.
                   </Dialog.Description>
                 </div>
-                {notificationPreviewAction ? (
-                  <button
-                    className="status-chip"
-                    onClick={() => {
-                      if (!notificationPreviewId) return
-                      onNotificationAction(notificationPreviewId, notificationPreviewAction)
-                    }}
-                  >
-                    {notificationPreviewActionLabel || (notificationPreviewAction === 'auto_update_app_images' ? 'Update app' : 'Run action')}
-                  </button>
-                ) : null}
                 <Dialog.Close asChild>
                   <button
                     type="button"

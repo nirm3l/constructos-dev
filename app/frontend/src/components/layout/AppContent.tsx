@@ -8,6 +8,9 @@ import { toggleTheme } from '../../theme'
 
 export function AppContent({ state }: { state: any }) {
   const tourControlsRef = React.useRef<{ startQuick: () => void; startAdvanced: () => void } | null>(null)
+  const doctorStatusPayload = state.workspaceDoctorQuery?.data ?? null
+  const doctorState = String(doctorStatusPayload?.doctor_state || '').trim().toLowerCase()
+  const doctorReady = doctorState === 'ready'
 
   const handleHeaderProjectSelect = React.useCallback((projectId: string) => {
     const normalizedProjectId = String(projectId || '').trim()
@@ -115,11 +118,6 @@ export function AppContent({ state }: { state: any }) {
             : state.markUnreadMutation.mutate(notificationId)}
         onMarkAllRead={() => state.markAllReadMutation.mutate()}
         isMarkAllReadPending={Boolean(state.markAllReadMutation?.isPending)}
-        onNotificationAction={(notificationId, action) => {
-          if (typeof state.handleNotificationAction === 'function') {
-            state.handleNotificationAction(notificationId, action)
-          }
-        }}
         onOpenTask={state.openTask}
         onOpenNote={state.openNote}
         onOpenSpecification={state.openSpecification}
@@ -127,7 +125,7 @@ export function AppContent({ state }: { state: any }) {
           state.setSelectedProjectId(projectId)
           state.setTab('projects')
         }}
-        doctorRuntimeStatus={state.workspaceDoctorQuery?.data?.runtime_health?.overall_status ?? null}
+        doctorRuntimeStatus={doctorReady ? (doctorStatusPayload?.runtime_health?.overall_status ?? null) : null}
         onOpenDoctorIncident={state.openWorkspaceDoctorIncident}
         onStartQuickTour={() => tourControlsRef.current?.startQuick()}
         onStartAdvancedTour={() => tourControlsRef.current?.startAdvanced()}

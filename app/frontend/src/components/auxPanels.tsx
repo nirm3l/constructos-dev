@@ -102,17 +102,6 @@ function isFinalClaudeAuthStatus(payload: AgentAuthStatus | null | undefined): b
   return status === 'succeeded'
 }
 
-const PROFILE_FEEDBACK_TYPE_OPTIONS: Array<{
-  value: 'general' | 'feature_request' | 'question' | 'other'
-  label: string
-}> = [
-  { value: 'general', label: 'General' },
-  { value: 'feature_request', label: 'Feature request' },
-  { value: 'question', label: 'Question' },
-  { value: 'other', label: 'Other' },
-]
-
-const GITHUB_ISSUES_URL = 'https://github.com/nirm3l/constructos/issues'
 const SEARCH_ANY_VALUE = '__any__'
 
 const SEARCH_TASK_STATUS_OPTIONS = [
@@ -2079,8 +2068,6 @@ export function ProfilePanel({
   submitClaudeDeviceAuthCodePending,
   onDeleteClaudeAuthOverride,
   deleteClaudeAuthOverridePending,
-  submitFeedback,
-  feedbackSubmitting,
 }: {
   userUsername: string
   theme: ThemeKey
@@ -2126,14 +2113,6 @@ export function ProfilePanel({
   submitClaudeDeviceAuthCodePending: boolean
   onDeleteClaudeAuthOverride: () => Promise<unknown>
   deleteClaudeAuthOverridePending: boolean
-  submitFeedback: (payload: {
-    title: string
-    description: string
-    feedback_type: 'general' | 'feature_request' | 'question' | 'other'
-    context?: Record<string, unknown>
-    metadata?: Record<string, unknown>
-  }) => Promise<unknown>
-  feedbackSubmitting: boolean
 }) {
   const nextTheme = toggleTheme(theme)
   const themeMode = getThemeMode(theme)
@@ -2152,15 +2131,11 @@ export function ProfilePanel({
       .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
       .join(' ')
   }
-  const [profileTab, setProfileTab] = React.useState<'preferences' | 'security' | 'feedback'>('preferences')
+  const [profileTab, setProfileTab] = React.useState<'preferences' | 'security'>('preferences')
   const [currentPasswordInput, setCurrentPasswordInput] = React.useState('')
   const [newPasswordInput, setNewPasswordInput] = React.useState('')
   const [confirmPasswordInput, setConfirmPasswordInput] = React.useState('')
   const [passwordFeedback, setPasswordFeedback] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
-  const [feedbackTitleInput, setFeedbackTitleInput] = React.useState('')
-  const [feedbackDescriptionInput, setFeedbackDescriptionInput] = React.useState('')
-  const [feedbackTypeInput, setFeedbackTypeInput] = React.useState<'general' | 'feature_request' | 'question' | 'other'>('general')
-  const [feedbackResult, setFeedbackResult] = React.useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const [runtimeCopyState, setRuntimeCopyState] = React.useState<'idle' | 'copied' | 'error'>('idle')
   const voiceFactRef = React.useRef<HTMLDivElement | null>(null)
   const voiceSelectTriggerRef = React.useRef<HTMLButtonElement | null>(null)
@@ -2238,9 +2213,6 @@ export function ProfilePanel({
     : (saveChatExecutionPreferencesPending || chatExecutionHasPendingChanges)
       ? 'Saving automatically...'
       : null
-  const selectedFeedbackTypeLabel = React.useMemo(() => {
-    return PROFILE_FEEDBACK_TYPE_OPTIONS.find((item) => item.value === feedbackTypeInput)?.label || 'General'
-  }, [feedbackTypeInput])
   const activeExecutionProviderLabel = getAgentExecutionProviderLabel(activeExecutionProvider)
   const activeExecutionModelLabel = formatAgentExecutionModelLabel(
     normalizedPersistedChatModel || agentChatDefaultModel
@@ -2716,12 +2688,6 @@ export function ProfilePanel({
     setConfirmPasswordInput('')
   }, [])
 
-  const resetFeedbackForm = React.useCallback(() => {
-    setFeedbackTitleInput('')
-    setFeedbackDescriptionInput('')
-    setFeedbackTypeInput('general')
-  }, [])
-
   const handleSubmitPasswordChange = React.useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault()
@@ -2757,38 +2723,6 @@ export function ProfilePanel({
       }
     },
     [changePassword, confirmPasswordInput, currentPasswordInput, newPasswordInput, resetPasswordForm]
-  )
-
-  const handleSubmitFeedback = React.useCallback(
-    async (event: React.FormEvent<HTMLFormElement>) => {
-      event.preventDefault()
-      const title = String(feedbackTitleInput || '').trim()
-      const description = String(feedbackDescriptionInput || '').trim()
-      if (title.length < 3) {
-        setFeedbackResult({ tone: 'error', message: 'Feedback title must be at least 3 characters.' })
-        return
-      }
-      if (description.length < 5) {
-        setFeedbackResult({ tone: 'error', message: 'Feedback description must be at least 5 characters.' })
-        return
-      }
-      try {
-        await submitFeedback({
-          title,
-          description,
-          feedback_type: feedbackTypeInput,
-          context: {
-            tab: 'profile',
-          },
-        })
-        resetFeedbackForm()
-        setFeedbackResult({ tone: 'success', message: 'Feedback sent successfully.' })
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to send feedback.'
-        setFeedbackResult({ tone: 'error', message })
-      }
-    },
-    [feedbackDescriptionInput, feedbackTitleInput, feedbackTypeInput, resetFeedbackForm, submitFeedback]
   )
 
   const handleThemeChange = React.useCallback((nextValue: string) => {
@@ -2980,7 +2914,7 @@ export function ProfilePanel({
             </div>
             <div className="profile-head-copy">
               <h2>Profile</h2>
-              <p className="meta">Personal preferences, account security, and feedback</p>
+              <p className="meta">Personal preferences and account security</p>
             </div>
           </div>
           <div className="profile-head-chips">
@@ -3003,8 +2937,7 @@ export function ProfilePanel({
           onValueChange={(nextValue) => {
             if (
               nextValue === 'preferences' ||
-              nextValue === 'security' ||
-              nextValue === 'feedback'
+              nextValue === 'security'
             ) {
               setProfileTab(nextValue)
             }
@@ -3022,12 +2955,6 @@ export function ProfilePanel({
                 <Icon path="M12 2l7 4v6c0 5-3.5 9-7 10-3.5-1-7-5-7-10V6l7-4zM9 12h6M12 9v6" />
               </span>
               <span>Security</span>
-            </Tabs.Trigger>
-            <Tabs.Trigger className="profile-tab-trigger" value="feedback">
-              <span className="profile-tab-trigger-icon" aria-hidden="true">
-                <Icon path="M21 15a2 2 0 0 1-2 2H8l-5 5V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-              </span>
-              <span>Feedback</span>
             </Tabs.Trigger>
           </Tabs.List>
 
@@ -3317,130 +3244,6 @@ export function ProfilePanel({
                     </Accordion.Content>
                   </Accordion.Item>
                 </Accordion.Root>
-              </section>
-            </div>
-          </Tabs.Content>
-
-          <Tabs.Content className="profile-tab-content" value="feedback">
-            <div className="profile-pane-grid">
-              <section className="profile-pane-card profile-bug-report" aria-label="Feedback">
-                <Accordion.Root className="profile-accordion" type="single" collapsible defaultValue="submit-feedback">
-                  <Accordion.Item className="profile-accordion-item" value="submit-feedback">
-                    <Accordion.Header className="profile-accordion-header">
-                      <Accordion.Trigger className="profile-accordion-trigger">
-                        <span className="profile-accordion-head">
-                          <span className="profile-accordion-title">Leave feedback</span>
-                          <span className="profile-accordion-meta">Product feedback routed to support pipeline</span>
-                        </span>
-                        <span className="status-chip">Support</span>
-                        <span className="profile-accordion-chevron" aria-hidden="true">
-                          <Icon path="M6 9l6 6 6-6" />
-                        </span>
-                      </Accordion.Trigger>
-                    </Accordion.Header>
-                    <Accordion.Content className="profile-accordion-content">
-                      <form className="profile-bug-form" onSubmit={handleSubmitFeedback}>
-                        <label className="field-control">
-                          <span className="field-label">Topic</span>
-                          <input
-                            value={feedbackTitleInput}
-                            onChange={(event) => setFeedbackTitleInput(event.target.value)}
-                            placeholder="Short feedback title"
-                          />
-                        </label>
-                        <label className="field-control">
-                          <span className="field-label">Type</span>
-                          <Select.Root
-                            value={feedbackTypeInput}
-                            onValueChange={(value: 'general' | 'feature_request' | 'question' | 'other') => setFeedbackTypeInput(value)}
-                          >
-                            <Select.Trigger
-                              className="quickadd-project-trigger taskdrawer-select-trigger profile-select-trigger"
-                              aria-label="Feedback type"
-                            >
-                              <Select.Value />
-                              <Select.Icon asChild>
-                                <span className="quickadd-project-trigger-icon" aria-hidden="true">
-                                  <Icon path="M6 9l6 6 6-6" />
-                                </span>
-                              </Select.Icon>
-                            </Select.Trigger>
-                            <Select.Portal>
-                              <Select.Content className="quickadd-project-content profile-select-content" position="popper" sideOffset={6}>
-                                <Select.Viewport className="quickadd-project-viewport">
-                                  {PROFILE_FEEDBACK_TYPE_OPTIONS.map((option) => (
-                                    <Select.Item key={option.value} value={option.value} className="quickadd-project-item">
-                                      <Select.ItemText>{option.label}</Select.ItemText>
-                                      <Select.ItemIndicator className="quickadd-project-item-indicator">
-                                        <Icon path="M5 13l4 4L19 7" />
-                                      </Select.ItemIndicator>
-                                    </Select.Item>
-                                  ))}
-                                </Select.Viewport>
-                              </Select.Content>
-                            </Select.Portal>
-                          </Select.Root>
-                          <span className="meta">{selectedFeedbackTypeLabel}</span>
-                        </label>
-                        <label className="field-control">
-                          <span className="field-label">Details</span>
-                          <textarea
-                            rows={5}
-                            value={feedbackDescriptionInput}
-                            onChange={(event) => setFeedbackDescriptionInput(event.target.value)}
-                            placeholder="Describe your feedback"
-                          />
-                        </label>
-                        <div className="row wrap profile-actions">
-                          <button
-                            className="primary"
-                            type="submit"
-                            disabled={feedbackSubmitting || !feedbackTitleInput.trim() || !feedbackDescriptionInput.trim()}
-                          >
-                            {feedbackSubmitting ? 'Sending...' : 'Send feedback'}
-                          </button>
-                          <button
-                            className="button-secondary"
-                            type="button"
-                            onClick={resetFeedbackForm}
-                            disabled={feedbackSubmitting}
-                          >
-                            Reset
-                          </button>
-                        </div>
-                      </form>
-                      {feedbackResult ? (
-                        <div className={`notice ${feedbackResult.tone === 'error' ? 'notice-error' : ''}`.trim()}>
-                          {feedbackResult.message}
-                        </div>
-                      ) : null}
-                    </Accordion.Content>
-                  </Accordion.Item>
-                </Accordion.Root>
-              </section>
-
-              <section className="profile-pane-card" aria-label="GitHub issues">
-                <div className="profile-pane-head">
-                  <h3>
-                    <span className="profile-pane-head-icon" aria-hidden="true">
-                      <Icon path="M9 3h6l1 2h3v4h-2l-1 8H8L7 9H5V5h3zM10 11h4M10 14h4" />
-                    </span>
-                    <span>Bug reports</span>
-                  </h3>
-                  <span className="status-chip">GitHub</span>
-                </div>
-                <p className="meta">For reproducible defects and stack traces, open an issue in the project repository.</p>
-                <div className="row wrap profile-actions" style={{ marginTop: 4 }}>
-                  <a
-                    className="primary"
-                    href={GITHUB_ISSUES_URL}
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{ textDecoration: 'none' }}
-                  >
-                    Open GitHub Issues
-                  </a>
-                </div>
               </section>
             </div>
           </Tabs.Content>
