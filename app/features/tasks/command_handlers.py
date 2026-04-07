@@ -903,13 +903,13 @@ def _resolve_available_system_bot_assignee_for_project(
             preferred_provider = None
 
     if preferred_provider == "codex":
-        preferred_fallback_providers = ("claude", "opencode", "codex")
+        preferred_fallback_providers = ("codex", "claude", "opencode")
     elif preferred_provider == "claude":
-        preferred_fallback_providers = ("claude", "opencode", "codex")
+        preferred_fallback_providers = ("claude", "codex", "opencode")
     elif preferred_provider == "opencode":
         preferred_fallback_providers = ("opencode", "claude", "codex")
     else:
-        preferred_fallback_providers = ("codex", "opencode", "claude")
+        preferred_fallback_providers = ("codex", "claude", "opencode")
     for provider in preferred_fallback_providers:
         if resolve_provider_effective_auth_source(provider) == "none":
             continue
