@@ -5,6 +5,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: release-images-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
