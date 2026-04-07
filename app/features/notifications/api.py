@@ -146,6 +146,16 @@ async def notifications_stream(
                     timed_out = False
                 flush_now = False
                 emitted = False
+                auth_event_payload: dict[str, object] | None = None
+                if signal_received and signal_reason.startswith(_AGENT_AUTH_REALTIME_REASON_PREFIX):
+                    provider = signal_reason.removeprefix(_AGENT_AUTH_REALTIME_REASON_PREFIX).strip()
+                    payload: dict[str, object] = {"provider": provider} if provider else {}
+                    if provider in {"codex", "claude", "opencode"}:
+                        try:
+                            payload["auth_status"] = get_provider_auth_status(provider)
+                        except Exception:
+                            pass
+                    auth_event_payload = payload
 
                 with SessionLocal() as db:
                     items = list_notifications_after_cursor_read_model(db, user.id, notification_cursor, limit=50)
@@ -177,18 +187,12 @@ async def notifications_stream(
                     yield "event: task_event\ndata: {}\n\n"
                     emitted = True
 
+                if auth_event_payload is not None:
+                    yield f"event: auth_event\ndata: {json.dumps(auth_event_payload)}\n\n"
+                    emitted = True
+
                 if not emitted:
                     if signal_received:
-                        if signal_reason.startswith(_AGENT_AUTH_REALTIME_REASON_PREFIX):
-                            provider = signal_reason.removeprefix(_AGENT_AUTH_REALTIME_REASON_PREFIX).strip()
-                            payload = {"provider": provider} if provider else {}
-                            if provider in {"codex", "claude", "opencode"}:
-                                try:
-                                    payload["auth_status"] = get_provider_auth_status(provider)
-                                except Exception:
-                                    pass
-                            yield f"event: auth_event\ndata: {json.dumps(payload)}\n\n"
-                            continue
                         # Forward a lightweight refresh event even when no new rows are
                         # visible in current notification/activity cursors.
                         yield "event: task_event\ndata: {}\n\n"
