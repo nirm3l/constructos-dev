@@ -1462,8 +1462,6 @@ class AgentTaskService:
             member_id = str(available_agent_member_ids_by_provider.get(provider) or "").strip()
             if not member_id:
                 continue
-            if resolve_provider_effective_auth_source(provider) == "none":
-                continue
             if member_id in seen:
                 continue
             seen.add(member_id)

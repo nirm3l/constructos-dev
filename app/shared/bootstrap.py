@@ -2368,29 +2368,62 @@ def _backfill_specification_streams_from_read_model(db: Session) -> None:
 def _backfill_project_members_for_existing_projects(db: Session) -> None:
     projects = db.execute(select(Project).where(Project.is_deleted == False)).scalars().all()
     for project in projects:
-        has_members = db.execute(
-            select(func.count(ProjectMember.id)).where(
-                ProjectMember.project_id == project.id,
-            )
-        ).scalar() or 0
-        if has_members > 0:
-            continue
-        # Safe default: assign workspace owners to existing projects.
-        owners = db.execute(
+        has_members = (
+            db.execute(
+                select(func.count(ProjectMember.id)).where(
+                    ProjectMember.project_id == project.id,
+                )
+            ).scalar()
+            or 0
+        )
+        if has_members <= 0:
+            # Safe default: assign workspace owners to projects that ended up with no members.
+            owners = db.execute(
+                select(WorkspaceMember.user_id).where(
+                    WorkspaceMember.workspace_id == project.workspace_id,
+                    WorkspaceMember.role.in_(["Owner", "Admin"]),
+                )
+            ).scalars().all()
+            if not owners:
+                owners = [DEFAULT_USER_ID]
+            for uid in dict.fromkeys(owners):
+                db.add(
+                    ProjectMember(
+                        workspace_id=project.workspace_id,
+                        project_id=project.id,
+                        user_id=uid,
+                        role="Owner",
+                    )
+                )
+
+        # Ensure all provider system bots are present as project members once they
+        # exist in the workspace. This keeps routing stable when auth state changes.
+        workspace_system_bot_ids = db.execute(
             select(WorkspaceMember.user_id).where(
                 WorkspaceMember.workspace_id == project.workspace_id,
-                WorkspaceMember.role.in_(["Owner", "Admin"]),
+                WorkspaceMember.user_id.in_(
+                    [CODEX_SYSTEM_USER_ID, CLAUDE_SYSTEM_USER_ID, OPENCODE_SYSTEM_USER_ID]
+                ),
             )
         ).scalars().all()
-        if not owners:
-            owners = [DEFAULT_USER_ID]
-        for uid in dict.fromkeys(owners):
+        if not workspace_system_bot_ids:
+            continue
+        existing_project_member_ids = set(
+            db.execute(
+                select(ProjectMember.user_id).where(
+                    ProjectMember.project_id == project.id,
+                )
+            ).scalars().all()
+        )
+        for bot_user_id in dict.fromkeys(workspace_system_bot_ids):
+            if bot_user_id in existing_project_member_ids:
+                continue
             db.add(
                 ProjectMember(
                     workspace_id=project.workspace_id,
                     project_id=project.id,
-                    user_id=uid,
-                    role="Owner",
+                    user_id=bot_user_id,
+                    role="Contributor",
                 )
             )
 
