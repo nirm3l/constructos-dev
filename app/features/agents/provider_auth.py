@@ -813,7 +813,7 @@ def _monitor_interactive_device_auth_session(
                 chunk_text=chunk.decode("utf-8", errors="ignore"),
                 master_fd=master_fd,
             )
-            if provider != "claude" and _provider_auth_home_ready(provider, resolve_provider_system_override_home(provider)) and process.poll() is None:
+            if _provider_auth_home_ready(provider, resolve_provider_system_override_home(provider)) and process.poll() is None:
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
                 except Exception:
@@ -853,7 +853,7 @@ def _monitor_device_auth_session(*, provider: str, session_id: str, process: sub
                 continue
             _append_output_line(provider, session, raw_line)
             session.updated_at = _utcnow_iso()
-            if provider != "claude" and _provider_auth_home_ready(provider, resolve_provider_system_override_home(provider)):
+            if _provider_auth_home_ready(provider, resolve_provider_system_override_home(provider)):
                 session.status = "succeeded"
                 session.error = None
                 should_terminate = True
