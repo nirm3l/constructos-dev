@@ -420,13 +420,19 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     staleTime: 60_000,
     refetchOnWindowFocus: false,
   })
+  const authStatusPendingRefetchInterval = React.useCallback((query: { state: { data?: unknown } }) => {
+    const data = (query?.state?.data ?? null) as { login_session?: { status?: string | null } | null } | null
+    const status = String(data?.login_session?.status || '').trim().toLowerCase()
+    if (status === 'pending') return 2_000
+    return false
+  }, [])
   const codexAuthStatus = useQuery({
     queryKey: ['codex-auth-status', userId],
     queryFn: () => getCodexAuthStatus(userId),
     enabled: Boolean(bootstrap.data),
     retry: 1,
     refetchOnWindowFocus: false,
-    refetchInterval: false,
+    refetchInterval: authStatusPendingRefetchInterval,
   })
   const claudeAuthStatus = useQuery({
     queryKey: ['claude-auth-status', userId],
@@ -434,7 +440,7 @@ function App({ logout, sessionUserId }: { logout: () => void; sessionUserId: str
     enabled: Boolean(bootstrap.data),
     retry: 1,
     refetchOnWindowFocus: false,
-    refetchInterval: false,
+    refetchInterval: authStatusPendingRefetchInterval,
   })
   const opencodeAuthStatus = useQuery({
     queryKey: ['opencode-auth-status', userId],
