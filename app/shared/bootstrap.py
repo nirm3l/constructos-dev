@@ -2377,11 +2377,16 @@ def _backfill_project_members_for_existing_projects(db: Session) -> None:
             or 0
         )
         if has_members <= 0:
-            # Safe default: assign workspace owners to projects that ended up with no members.
+            # Safe default: assign human workspace owners/admins when a project has no members.
+            # System bots are added in the dedicated block below as Contributors.
             owners = db.execute(
-                select(WorkspaceMember.user_id).where(
+                select(WorkspaceMember.user_id)
+                .join(User, User.id == WorkspaceMember.user_id)
+                .where(
                     WorkspaceMember.workspace_id == project.workspace_id,
                     WorkspaceMember.role.in_(["Owner", "Admin"]),
+                    User.is_active == True,  # noqa: E712
+                    User.user_type != "agent",
                 )
             ).scalars().all()
             if not owners:
