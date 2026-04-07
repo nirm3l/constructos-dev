@@ -84,6 +84,8 @@ from shared.core import (
     load_specification_view,
 )
 from features.agents.agent_mcp_adapter import run_structured_agent_prompt
+from features.agents.command_runtime_registry import resolve_provider_for_command_id
+from features.agents.execution_provider import parse_execution_model
 from features.agents.intent_classifier import (
     AUTOMATION_REQUEST_INTENT_FIELDS,
     classify_instruction_intent,
@@ -131,6 +133,7 @@ from shared.project_repository import (
     resolve_project_repository_path,
 )
 from shared.settings import agent_system_username_for_provider
+from shared.settings import agent_system_user_id_for_provider
 from shared.task_relationships import normalize_task_relationships
 from shared.task_delivery import normalize_delivery_mode
 from shared.knowledge_graph import (
@@ -1351,6 +1354,48 @@ class AgentTaskService:
 
     def _resolve_mcp_actor_user_id(self) -> str:
         return str(self._actor_user_id or MCP_ACTOR_USER_ID).strip() or MCP_ACTOR_USER_ID
+
+    def _resolve_command_execution_provider(
+        self,
+        *,
+        command_id: str | None,
+        actor_user: UserModel | None,
+    ) -> str | None:
+        resolved = resolve_provider_for_command_id(command_id)
+        if resolved:
+            return resolved
+        actor_model = str(getattr(actor_user, "agent_chat_model", "") or "").strip()
+        provider, _model = parse_execution_model(actor_model)
+        return provider
+
+    @staticmethod
+    def _resolve_project_agent_user_id_for_provider(
+        *,
+        db,
+        workspace_id: str,
+        project_id: str | None,
+        provider: str | None,
+    ) -> str:
+        normalized_provider = str(provider or "").strip().lower()
+        target_user_id = str(agent_system_user_id_for_provider(normalized_provider) or "").strip()
+        normalized_project_id = str(project_id or "").strip()
+        if not target_user_id or not normalized_project_id:
+            return target_user_id
+        member_row = db.execute(
+            select(ProjectMember.user_id)
+            .join(UserModel, UserModel.id == ProjectMember.user_id)
+            .where(
+                ProjectMember.workspace_id == workspace_id,
+                ProjectMember.project_id == normalized_project_id,
+                ProjectMember.user_id == target_user_id,
+                UserModel.is_active == True,  # noqa: E712
+                UserModel.user_type == "agent",
+            )
+            .limit(1)
+        ).first()
+        if member_row is not None:
+            return str(member_row[0] or "").strip() or target_user_id
+        return target_user_id
 
     def _resolve_preference_target_user_id(self, user_id: str | None) -> str:
         explicit_user_id = str(user_id or "").strip()
@@ -6086,6 +6131,26 @@ class AgentTaskService:
                     "labels": normalized_labels or [],
                 },
             )
+            effective_assignee_id = str(assignee_id or "").strip() or None
+            command_provider = self._resolve_command_execution_provider(
+                command_id=effective_command_id,
+                actor_user=user,
+            )
+            provider_agent_assignee_id = self._resolve_project_agent_user_id_for_provider(
+                db=db,
+                workspace_id=resolved_workspace_id,
+                project_id=resolved_project_id,
+                provider=command_provider,
+            )
+            if provider_agent_assignee_id:
+                if effective_assignee_id:
+                    assignee_user = db.get(UserModel, effective_assignee_id)
+                    assignee_user_type = str(getattr(assignee_user, "user_type", "") or "").strip().lower()
+                    # Keep explicit human assignees; enforce provider-specific assignment for agent assignees.
+                    if assignee_user_type == "agent" and effective_assignee_id != provider_agent_assignee_id:
+                        effective_assignee_id = provider_agent_assignee_id
+                else:
+                    effective_assignee_id = provider_agent_assignee_id
             payload_kwargs: dict[str, Any] = {
                 "workspace_id": resolved_workspace_id,
                 "project_id": resolved_project_id,
@@ -6098,7 +6163,7 @@ class AgentTaskService:
                 "external_refs": external_refs or [],
                 "attachment_refs": attachment_refs or [],
                 "specification_id": specification_id,
-                "assignee_id": assignee_id,
+                "assignee_id": effective_assignee_id,
                 "assigned_agent_code": assigned_agent_code,
                 "labels": normalized_labels or [],
             }
