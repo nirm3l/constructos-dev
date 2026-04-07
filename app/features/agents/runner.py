@@ -2276,6 +2276,17 @@ def _extract_commit_shas_from_text(text: str | None) -> set[str]:
     return {str(match).lower() for match in _COMMIT_SHA_EXPLICIT_RE.findall(raw)}
 
 
+def _git_sha_equivalent(lhs: str | None, rhs: str | None) -> bool:
+    left = str(lhs or "").strip().lower()
+    right = str(rhs or "").strip().lower()
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    # Accept short/full SHA equality by prefix when providers return abbreviated SHAs.
+    return left.startswith(right) or right.startswith(left)
+
+
 def _task_has_git_delivery_completion_evidence(
     *,
     state: dict | None,
@@ -2768,7 +2779,7 @@ def _validate_execution_outcome_contract(
     if branch and not bool(_TASK_BRANCH_RE.fullmatch(branch)):
         return "Runner error: execution outcome contract branch must use task/<...> format."
 
-    if after_head_sha and commit_sha and after_head_sha != commit_sha:
+    if after_head_sha and commit_sha and not _git_sha_equivalent(after_head_sha, commit_sha):
         return "Runner error: execution outcome contract commit_sha mismatches git evidence."
     if task_branch and branch and task_branch != branch:
         return "Runner error: execution outcome contract branch mismatches task branch evidence."
@@ -2857,7 +2868,7 @@ def _validate_execution_outcome_contract(
             return "Runner error: Developer automation requires commit_sha in execution outcome contract."
         if not branch:
             return "Runner error: Developer automation requires branch in execution outcome contract."
-        if branch_head_sha and commit_sha and branch_head_sha != commit_sha:
+        if branch_head_sha and commit_sha and not _git_sha_equivalent(branch_head_sha, commit_sha):
             return "Runner error: Developer automation commit_sha must match the current task branch HEAD."
         if require_dev_tests and (not tests_run or not tests_passed):
             return "Runner error: Developer automation requires tests_run=true and tests_passed=true."
