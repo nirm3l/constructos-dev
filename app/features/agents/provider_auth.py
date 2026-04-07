@@ -350,6 +350,22 @@ def _read_claude_auth_status(home_path: Path) -> dict[str, object] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _claude_auth_file_logged_in(auth_path: Path) -> bool:
+    payload = _read_json_file(auth_path)
+    if not isinstance(payload, dict):
+        return False
+    logged_in_flag = payload.get("loggedIn")
+    if isinstance(logged_in_flag, bool):
+        return logged_in_flag
+    oauth_account = payload.get("oauthAccount")
+    if isinstance(oauth_account, dict) and oauth_account:
+        return True
+    api_key = payload.get("apiKey")
+    if isinstance(api_key, str) and api_key.strip():
+        return True
+    return False
+
+
 def _provider_auth_home_ready(provider: str, home_path: Path | None) -> bool:
     spec = _provider_spec(provider)
     if spec.provider == "opencode":
@@ -362,7 +378,11 @@ def _provider_auth_home_ready(provider: str, home_path: Path | None) -> bool:
     if spec.provider != "claude":
         return True
     status_payload = _read_claude_auth_status(home_path)
-    return bool(status_payload and status_payload.get("loggedIn") is True)
+    if isinstance(status_payload, dict):
+        logged_in = status_payload.get("loggedIn")
+        if isinstance(logged_in, bool):
+            return logged_in
+    return _claude_auth_file_logged_in(auth_path)
 
 
 def _provider_home_from_auth_path(provider: str, auth_path: Path | None) -> Path | None:

@@ -496,6 +496,25 @@ def test_claude_auth_status_uses_host_mount_when_available(tmp_path, monkeypatch
     assert payload["host_auth_available"] is True
 
 
+def test_claude_auth_status_uses_host_mount_when_cli_status_is_empty(tmp_path, monkeypatch):
+    client = build_client(tmp_path, monkeypatch)
+
+    import features.agents.provider_auth as provider_auth
+
+    host_auth_path = Path(os.environ["HOME"]) / ".claude.json"
+    _write_auth_file(host_auth_path)
+
+    monkeypatch.setattr(provider_auth, "_read_claude_auth_status", lambda _home_path: None)
+
+    response = client.get('/api/agents/claude-auth')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["configured"] is True
+    assert payload["effective_source"] in {"host_mount", "system_override"}
+    assert payload["host_auth_available"] is True
+
+
 def test_claude_auth_status_requires_logged_in_cli_state(tmp_path, monkeypatch):
     client = build_client(tmp_path, monkeypatch)
 

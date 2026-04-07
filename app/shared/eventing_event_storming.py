@@ -806,6 +806,7 @@ def _default_artifact_scope_classification() -> dict[str, Any]:
         "confidence": 0.0,
         "reason": "",
         "domain_text": "",
+        "classifier_unavailable": False,
     }
 
 
@@ -821,6 +822,7 @@ def _normalize_artifact_scope_classification(values: dict[str, Any] | None) -> d
         normalized["confidence"] = 0.0
     normalized["reason"] = str(parsed.get("reason") or "").strip()[:600]
     normalized["domain_text"] = str(parsed.get("domain_text") or "").strip()[:EVENT_STORMING_PROMPT_SOURCE_MAX_CHARS]
+    normalized["classifier_unavailable"] = bool(parsed.get("classifier_unavailable"))
     return normalized
 
 
@@ -894,7 +896,7 @@ def _classify_event_storming_artifact_scope(
             entity_id,
             exc,
         )
-        parsed = {}
+        parsed = {"classifier_unavailable": True}
     normalized = _normalize_artifact_scope_classification(parsed if isinstance(parsed, dict) else {})
     _EVENT_STORMING_SCOPE_CLASSIFICATION_CACHE.set(cache_key, normalized)
     return normalized
@@ -922,6 +924,7 @@ def _prepare_snapshot_for_analysis(
     prepared["artifact_scope"] = str(classification.get("artifact_scope") or "unknown")
     prepared["artifact_scope_confidence"] = float(classification.get("confidence") or 0.0)
     prepared["artifact_scope_reason"] = str(classification.get("reason") or "")
+    prepared["classifier_unavailable"] = bool(classification.get("classifier_unavailable"))
     effective_text = str(classification.get("domain_text") or "").strip()
     if prepared["artifact_scope"] in {"product_domain", "mixed"}:
         if effective_text:
@@ -962,6 +965,29 @@ def _latest_done_input_hash(db, *, project_id: str, entity_type: str, entity_id:
     ).scalar_one_or_none()
     text = str(row or "").strip()
     return text or None
+
+
+def _latest_done_artifact_scope(db, *, project_id: str, entity_type: str, entity_id: str) -> str | None:
+    rows = db.execute(
+        select(EventStormingAnalysisRun.output_json)
+        .where(
+            EventStormingAnalysisRun.project_id == project_id,
+            EventStormingAnalysisRun.entity_type == entity_type,
+            EventStormingAnalysisRun.entity_id == entity_id,
+            EventStormingAnalysisRun.status == "done",
+        )
+        .order_by(EventStormingAnalysisRun.id.desc())
+        .limit(12)
+    ).scalars().all()
+    for raw in rows:
+        try:
+            payload = json.loads(str(raw or "{}"))
+        except Exception:
+            continue
+        scope = str(payload.get("artifact_scope") or "").strip().lower()
+        if scope in _EVENT_STORMING_ARTIFACT_SCOPES:
+            return scope
+    return None
 
 
 def _clear_artifact_links(*, project_id: str, entity_type: str, entity_id: str) -> None:
@@ -1014,6 +1040,17 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
 
     artifact_scope = str(snapshot.get("artifact_scope") or "").strip().lower() or "unknown"
     if not bool(snapshot.get("analysis_eligible")) or artifact_scope not in {"product_domain", "mixed"}:
+        classifier_unavailable = bool(snapshot.get("classifier_unavailable"))
+        if classifier_unavailable and artifact_scope == "unknown":
+            return 0, 0, {
+                "components": [],
+                "relations": [],
+                "artifact_scope": artifact_scope,
+                "artifact_scope_confidence": float(snapshot.get("artifact_scope_confidence") or 0.0),
+                "artifact_scope_reason": str(snapshot.get("artifact_scope_reason") or ""),
+                "inference_method": "scope_classifier_unavailable",
+                "skipped": "artifact_scope_classifier_unavailable",
+            }
         _clear_artifact_links(project_id=project_id, entity_type=entity_type, entity_id=entity_id)
         _prune_orphan_components(project_id=project_id)
         return 0, 0, {
@@ -1110,6 +1147,24 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
             write=True,
         )
 
+    if not component_ids:
+        # Preserve existing links/components when extraction returns no components.
+        # Empty extraction can be transient (auth/runtime/model issues) and should not
+        # destructively clear the graph.
+        return 0, 0, {
+            "components": [],
+            "relations": [],
+            "usage": usage_payload or {},
+            "prompt_chars": prompt_chars,
+            "context_frame_mode": context_frame_mode,
+            "context_frame_revision": context_frame_revision,
+            "artifact_scope": artifact_scope,
+            "artifact_scope_confidence": float(snapshot.get("artifact_scope_confidence") or 0.0),
+            "artifact_scope_reason": str(snapshot.get("artifact_scope_reason") or ""),
+            "inference_method": "ai_agent_empty",
+            "skipped": "ai_empty_components_preserved",
+        }
+
     if component_ids:
         run_graph_query(
             f"""
@@ -1125,9 +1180,6 @@ def _sync_graph_for_job(job: EventStormingAnalysisJob, snapshot: dict[str, Any] 
             },
             write=True,
         )
-    else:
-        _clear_artifact_links(project_id=project_id, entity_type=entity_type, entity_id=entity_id)
-
     for item in components:
         run_graph_query(
             f"""
@@ -1248,6 +1300,22 @@ def _process_analysis_job(job_id: int) -> None:
                     entity_id=str(job.entity_id or "").strip(),
                     snapshot=snapshot,
                 )
+                if prepared_snapshot is not None and bool(prepared_snapshot.get("classifier_unavailable")):
+                    previous_scope = _latest_done_artifact_scope(
+                        db,
+                        project_id=str(job.project_id or "").strip(),
+                        entity_type=str(job.entity_type or "").strip(),
+                        entity_id=str(job.entity_id or "").strip(),
+                    )
+                    if previous_scope in {"product_domain", "mixed", "delivery_process"}:
+                        prepared_snapshot["artifact_scope"] = str(previous_scope)
+                        prepared_snapshot["artifact_scope_reason"] = (
+                            "Reused previous artifact scope because classifier was unavailable."
+                        )
+                        prepared_snapshot["artifact_scope_confidence"] = float(
+                            prepared_snapshot.get("artifact_scope_confidence") or 0.0
+                        )
+                        prepared_snapshot["analysis_eligible"] = previous_scope in {"product_domain", "mixed"}
                 input_hash = _build_snapshot_input_hash(
                     project_id=str(job.project_id or "").strip(),
                     entity_type=str(job.entity_type or "").strip().lower(),
