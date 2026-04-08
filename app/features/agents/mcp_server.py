@@ -18,6 +18,7 @@ TASK_CREATE_TOOL_DESCRIPTION = (
     "Use agent slots already defined in the project's Team Mode configuration; avoid hardcoded mappings. "
     "Keep titles neutral; do not encode role/agent in title. "
     "Set status to choose an initial task status at creation time. "
+    "Always pass execution_provider ('codex'|'claude'|'opencode') matching the active chat model provider for deterministic bot assignment. "
     "execution_triggers accepts JSON string, array, or object. "
     "If execution_triggers includes non-manual triggers (status_change with scope='external' or schedule), "
     "provide non-empty instruction in the same create call. "
@@ -907,6 +908,7 @@ def create_mcp():
         schedule_timezone: str | None = None,
         assignee_id: str | None = None,
         assigned_agent_code: str | None = None,
+        execution_provider: str | None = None,
         labels: str | list[str] | None = None,
         command_id: str | None = None,
     ) -> dict[str, Any]:
@@ -935,6 +937,7 @@ def create_mcp():
             schedule_timezone=schedule_timezone,
             assignee_id=assignee_id,
             assigned_agent_code=assigned_agent_code,
+            execution_provider=execution_provider,
             labels=labels,
             command_id=command_id,
         )

@@ -677,6 +677,7 @@ def _build_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     runtime_assignment_guidance = (
         f"- Active chat execution provider for this run: {runtime_provider_label}.\n"
         f"- If the user does not explicitly specify task assignees during setup/resource creation, default assignments to the {runtime_provider_label} system bot.\n"
+        f"- For each create_task mutation, pass execution_provider='{runtime_provider}' so backend assignment is deterministic.\n"
     )
     if base_command_id:
         runtime_assignment_guidance += (
@@ -1036,6 +1037,7 @@ def _build_resume_prompt(ctx: dict, *, structured_response: bool = True) -> str:
     runtime_assignment_guidance = (
         f"- Active chat execution provider for this run: {runtime_provider_label}.\n"
         f"- If the user does not explicitly specify task assignees during setup/resource creation, default assignments to the {runtime_provider_label} system bot.\n"
+        f"- For each create_task mutation, pass execution_provider='{runtime_provider}' so backend assignment is deterministic.\n"
     )
     if base_command_id:
         runtime_assignment_guidance += (
