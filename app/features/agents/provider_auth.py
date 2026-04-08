@@ -674,6 +674,7 @@ def get_provider_device_auth_session(provider: str, session_id: str) -> dict[str
 def _finalize_device_auth_session(*, provider: str, session_id: str, returncode: int) -> None:
     spec = _provider_spec(provider)
     home_path = resolve_provider_system_override_home(provider)
+    should_publish = False
     with _DEVICE_AUTH_LOCK:
         session = _DEVICE_AUTH_SESSIONS.get(spec.provider)
         if session is None or session.session_id != session_id:
@@ -683,20 +684,22 @@ def _finalize_device_auth_session(*, provider: str, session_id: str, returncode:
         if session.cancel_requested:
             session.status = "cancelled"
             session.error = None
-            return
-        if _provider_auth_home_ready(spec.provider, home_path):
+            should_publish = True
+        elif _provider_auth_home_ready(spec.provider, home_path):
             session.status = "succeeded"
             session.error = None
-            return
-        session.status = "failed"
-        if session.error:
-            return
-        detail = session.output_excerpt[-1] if session.output_excerpt else ""
-        if detail:
-            session.error = detail
+            should_publish = True
         else:
-            session.error = f"{spec.display_name} login exited with status {returncode}."
-    _publish_auth_realtime_signal(provider)
+            session.status = "failed"
+            if not session.error:
+                detail = session.output_excerpt[-1] if session.output_excerpt else ""
+                if detail:
+                    session.error = detail
+                else:
+                    session.error = f"{spec.display_name} login exited with status {returncode}."
+            should_publish = True
+    if should_publish:
+        _publish_auth_realtime_signal(provider)
 
 
 def _handle_interactive_device_auth_output(

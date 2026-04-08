@@ -1044,6 +1044,56 @@ def test_claude_auth_submit_code_waits_for_configured_status(monkeypatch):
     assert payload["configured"] is True
 
 
+def test_finalize_device_auth_session_publishes_realtime_signal_on_success(monkeypatch):
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import features.agents.provider_auth as provider_auth
+
+    published: list[str] = []
+    session = provider_auth.DeviceAuthSessionState(
+        session_id="session-finalize-success",
+        status="pending",
+        started_at="2026-04-08T18:00:00Z",
+        updated_at="2026-04-08T18:00:00Z",
+        login_method="claudeai",
+    )
+
+    monkeypatch.setitem(provider_auth._DEVICE_AUTH_SESSIONS, "claude", session)
+    monkeypatch.setattr(provider_auth, "_publish_auth_realtime_signal", lambda provider: published.append(provider))
+    monkeypatch.setattr(provider_auth, "_provider_auth_home_ready", lambda _provider, _home_path: True)
+
+    provider_auth._finalize_device_auth_session(provider="claude", session_id="session-finalize-success", returncode=0)
+
+    assert session.status == "succeeded"
+    assert published == ["claude"]
+
+
+def test_finalize_device_auth_session_publishes_realtime_signal_on_cancel(monkeypatch):
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import features.agents.provider_auth as provider_auth
+
+    published: list[str] = []
+    session = provider_auth.DeviceAuthSessionState(
+        session_id="session-finalize-cancel",
+        status="pending",
+        started_at="2026-04-08T18:00:00Z",
+        updated_at="2026-04-08T18:00:00Z",
+        login_method="claudeai",
+        cancel_requested=True,
+    )
+
+    monkeypatch.setitem(provider_auth._DEVICE_AUTH_SESSIONS, "claude", session)
+    monkeypatch.setattr(provider_auth, "_publish_auth_realtime_signal", lambda provider: published.append(provider))
+
+    provider_auth._finalize_device_auth_session(provider="claude", session_id="session-finalize-cancel", returncode=0)
+
+    assert session.status == "cancelled"
+    assert published == ["claude"]
+
+
 def test_agents_chat_returns_claude_guidance_when_selected_provider_auth_missing(tmp_path, monkeypatch):
     client = build_client(tmp_path, monkeypatch)
     bootstrap = client.get('/api/bootstrap').json()
