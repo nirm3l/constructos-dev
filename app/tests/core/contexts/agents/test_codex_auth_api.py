@@ -515,6 +515,38 @@ def test_claude_auth_status_uses_host_mount_when_cli_status_is_empty(tmp_path, m
     assert payload["host_auth_available"] is True
 
 
+def test_claude_auth_status_ignores_metadata_only_host_mount(tmp_path, monkeypatch):
+    client = build_client(tmp_path, monkeypatch)
+
+    import features.agents.provider_auth as provider_auth
+
+    host_auth_path = Path(os.environ["HOME"]) / ".claude.json"
+    host_auth_path.parent.mkdir(parents=True, exist_ok=True)
+    host_auth_path.write_text(
+        json.dumps(
+            {
+                "oauthAccount": {
+                    "accountUuid": "abc",
+                    "emailAddress": "user@example.com",
+                    "organizationUuid": "org-1",
+                }
+            },
+            ensure_ascii=True,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(provider_auth, "_read_claude_auth_status", lambda _home_path: None)
+
+    response = client.get('/api/agents/claude-auth')
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["configured"] is False
+    assert payload["effective_source"] == "none"
+    assert payload["host_auth_available"] is False
+
+
 def test_claude_auth_status_requires_logged_in_cli_state(tmp_path, monkeypatch):
     client = build_client(tmp_path, monkeypatch)
 

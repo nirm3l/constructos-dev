@@ -358,7 +358,30 @@ def _claude_auth_file_logged_in(auth_path: Path) -> bool:
     if isinstance(logged_in_flag, bool):
         return logged_in_flag
     oauth_account = payload.get("oauthAccount")
-    if isinstance(oauth_account, dict) and oauth_account:
+    if isinstance(oauth_account, dict):
+        oauth_access_token = str(
+            oauth_account.get("accessToken")
+            or oauth_account.get("access_token")
+            or ""
+        ).strip()
+        oauth_refresh_token = str(
+            oauth_account.get("refreshToken")
+            or oauth_account.get("refresh_token")
+            or ""
+        ).strip()
+        if oauth_access_token or oauth_refresh_token:
+            return True
+    top_level_access_token = str(
+        payload.get("accessToken")
+        or payload.get("access_token")
+        or ""
+    ).strip()
+    top_level_refresh_token = str(
+        payload.get("refreshToken")
+        or payload.get("refresh_token")
+        or ""
+    ).strip()
+    if top_level_access_token or top_level_refresh_token:
         return True
     api_key = payload.get("apiKey")
     if isinstance(api_key, str) and api_key.strip():
