@@ -82,7 +82,7 @@ from .codex_auth import (
 )
 from .execution_provider import encode_execution_model, parse_execution_model, resolve_execution_provider
 from .provider_auth import get_provider_auth_status, resolve_provider_effective_auth_source
-from .command_runtime_registry import remember_provider_for_command_id
+from .command_runtime_registry import remember_provider_for_command_id, remember_provider_for_workspace_id
 from .gateway import build_ui_gateway
 from features.chat.application import ChatApplicationService
 from features.chat.command_handlers import (
@@ -2809,6 +2809,7 @@ def agent_chat(
     model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     execution_provider = resolve_execution_provider(model)
     remember_provider_for_command_id(command_id=command_id, provider=execution_provider)
+    remember_provider_for_workspace_id(workspace_id=payload.workspace_id, provider=execution_provider)
     if resolve_provider_effective_auth_source(execution_provider) == "none":
         alternate_provider = _resolve_alternate_configured_provider(execution_provider)
         attachment_refs = [item.model_dump() for item in payload.attachment_refs or []]
@@ -3162,6 +3163,7 @@ def agent_chat_stream(
     model, reasoning_effort = _resolve_chat_execution_preferences(payload, user)
     execution_provider = resolve_execution_provider(model)
     remember_provider_for_command_id(command_id=command_id, provider=execution_provider)
+    remember_provider_for_workspace_id(workspace_id=payload.workspace_id, provider=execution_provider)
     if resolve_provider_effective_auth_source(execution_provider) == "none":
         alternate_provider = _resolve_alternate_configured_provider(execution_provider)
         attachment_refs = [item.model_dump() for item in payload.attachment_refs or []]

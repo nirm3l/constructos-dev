@@ -84,7 +84,7 @@ from shared.core import (
     load_specification_view,
 )
 from features.agents.agent_mcp_adapter import run_structured_agent_prompt
-from features.agents.command_runtime_registry import resolve_provider_for_command_id
+from features.agents.command_runtime_registry import resolve_provider_for_command_id, resolve_provider_for_workspace_id
 from features.agents.execution_provider import parse_execution_model
 from features.agents.intent_classifier import (
     AUTOMATION_REQUEST_INTENT_FIELDS,
@@ -1359,11 +1359,15 @@ class AgentTaskService:
         self,
         *,
         command_id: str | None,
+        workspace_id: str | None,
         actor_user: UserModel | None,
     ) -> str | None:
         resolved = resolve_provider_for_command_id(command_id)
         if resolved:
             return resolved
+        resolved_workspace = resolve_provider_for_workspace_id(workspace_id)
+        if resolved_workspace:
+            return resolved_workspace
         actor_model = str(getattr(actor_user, "agent_chat_model", "") or "").strip()
         provider, _model = parse_execution_model(actor_model)
         return provider
@@ -6134,6 +6138,7 @@ class AgentTaskService:
             effective_assignee_id = str(assignee_id or "").strip() or None
             command_provider = self._resolve_command_execution_provider(
                 command_id=effective_command_id,
+                workspace_id=resolved_workspace_id,
                 actor_user=user,
             )
             provider_agent_assignee_id = self._resolve_project_agent_user_id_for_provider(
