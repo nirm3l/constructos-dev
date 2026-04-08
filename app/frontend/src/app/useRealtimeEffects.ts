@@ -490,14 +490,26 @@ export function useRealtimeEffects(c: any) {
         const provider = String(payload?.provider || '').trim().toLowerCase()
         if (provider === 'codex' && payload.auth_status && typeof payload.auth_status === 'object') {
           qc.setQueryData(['codex-auth-status', userId], payload.auth_status)
+          scheduleBootstrapRefresh()
+          if (workspaceId) {
+            qc.invalidateQueries({ queryKey: ['admin-users', userId, workspaceId] })
+          }
           return
         }
         if (provider === 'claude' && payload.auth_status && typeof payload.auth_status === 'object') {
           qc.setQueryData(['claude-auth-status', userId], payload.auth_status)
+          scheduleBootstrapRefresh()
+          if (workspaceId) {
+            qc.invalidateQueries({ queryKey: ['admin-users', userId, workspaceId] })
+          }
           return
         }
         if (provider === 'opencode' && payload.auth_status && typeof payload.auth_status === 'object') {
           qc.setQueryData(['opencode-auth-status', userId], payload.auth_status)
+          scheduleBootstrapRefresh()
+          if (workspaceId) {
+            qc.invalidateQueries({ queryKey: ['admin-users', userId, workspaceId] })
+          }
         }
       } catch {
         // Ignore malformed auth events.
