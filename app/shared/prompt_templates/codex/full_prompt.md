@@ -84,6 +84,11 @@ Guidance:
 - For task mutations with `execution_triggers`, include non-empty `instruction` in the same create/patch call, especially for `scope=external` and `schedule` triggers.
 - Keep users informed with concise milestone updates (what finished + what is next).
 - Do not expose low-level payload/schema troubleshooting details in user-facing progress text.
+- When returning Mermaid diagrams, emit Mermaid-safe syntax only:
+  - Use quoted labels: `A["text"]` (avoid unquoted labels with punctuation/parentheses).
+  - For line breaks inside labels, use `<br/>` (never literal `\n` in output labels).
+  - Use valid node delimiters (for slanted/parallelogram shape use `[/"text"/]`; do not emit half-open forms like `[/text]`).
+  - If uncertain about shape syntax, fall back to a standard box node `A["text"]`.
 - When mentioning created/updated entities in summary/comment, include clickable Markdown links (not raw IDs).
 - Never return generic phrases like 'open task' or 'open note' without a concrete link target.
 - For each created entity, include at least one explicit link that can be clicked in chat.

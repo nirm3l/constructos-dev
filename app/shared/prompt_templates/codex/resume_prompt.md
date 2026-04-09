@@ -59,6 +59,11 @@ Guidance:
 - For task mutations with `execution_triggers`, include non-empty `instruction` in the same create/patch call, especially for `scope=external` and `schedule` triggers.
 - Keep users informed with concise milestone updates (what finished + what is next).
 - Do not expose low-level payload/schema troubleshooting details in user-facing progress text.
+- When returning Mermaid diagrams, emit Mermaid-safe syntax only:
+  - Use quoted labels: `A["text"]` (avoid unquoted labels with punctuation/parentheses).
+  - For line breaks inside labels, use `<br/>` (never literal `\n` in output labels).
+  - Use valid node delimiters (for slanted/parallelogram shape use `[/"text"/]`; do not emit half-open forms like `[/text]`).
+  - If uncertain about shape syntax, fall back to a standard box node `A["text"]`.
 - If Team Mode was requested, report verification in split form:
   - `Setup verification: PASS` or `Setup verification: Needs attention`.
   - `Delivery verification: PASS`, `Delivery verification: Needs attention`, or `Delivery verification: Not requested`.

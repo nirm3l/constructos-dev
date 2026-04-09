@@ -12,6 +12,81 @@ const mermaidSvgCache = new Map<string, string>()
 const MERMAID_RENDER_DEBOUNCE_MS = 220
 const MERMAID_STYLE_VERSION = 'theme-brand-mode-v3'
 
+function normalizeLabelText(label: string): string {
+  return label.replace(/\\n/g, '<br/>').replace(/"/g, '&quot;').trim()
+}
+
+function quoteSquareLabelsWithLineBreaks(source: string): string {
+  return source.replace(/\b([A-Za-z][\w:-]*)\[([^\]\n]+)\]/g, (full, nodeId: string, rawLabel: string) => {
+    const label = String(rawLabel || '')
+    if (!label) return full
+    if (label.startsWith('"') && label.endsWith('"')) return full
+    if (!/\\n|<br\s*\/?\s*>/i.test(label)) return full
+    return `${nodeId}["${normalizeLabelText(label)}"]`
+  })
+}
+
+function fixHalfOpenSlantedNodes(source: string): string {
+  return source.replace(/\[\/([^\]\n]*?)\](?=\s*(?:--|==|-\.|$))/g, (_full, label: string) => {
+    const trimmed = String(label || '').trim()
+    if (!trimmed) return '[//]'
+    if (trimmed.endsWith('/')) return `[/${trimmed}]`
+    return `[/${trimmed}/]`
+  })
+}
+
+function normalizeLineBreakNodes(source: string): string {
+  let normalized = source
+  normalized = normalized.replace(/\b([A-Za-z][\w:-]*)\(([^\)\n]*?(?:\\n|<br\s*\/?\s*>)[^\)\n]*?)\)/gi, (_full, nodeId: string, rawLabel: string) => {
+    return `${nodeId}["${normalizeLabelText(rawLabel)}"]`
+  })
+  normalized = normalized.replace(/\b([A-Za-z][\w:-]*)\{([^\}\n]*?(?:\\n|<br\s*\/?\s*>)[^\}\n]*?)\}/gi, (_full, nodeId: string, rawLabel: string) => {
+    return `${nodeId}["${normalizeLabelText(rawLabel)}"]`
+  })
+  return normalized
+}
+
+function quoteSquareLabelsWithPunctuation(source: string): string {
+  return source.replace(/\b([A-Za-z][\w:-]*)\[([^\]\n]+)\]/g, (full, nodeId: string, rawLabel: string) => {
+    const label = String(rawLabel || '')
+    if (!label) return full
+    if (label.startsWith('"') && label.endsWith('"')) return full
+    if (!/[()]/.test(label)) return full
+    return `${nodeId}["${normalizeLabelText(label)}"]`
+  })
+}
+
+function buildMermaidCandidates(source: string): string[] {
+  const candidates: string[] = []
+  const add = (value: string) => {
+    const trimmed = value.trim()
+    if (!trimmed || candidates.includes(trimmed)) return
+    candidates.push(trimmed)
+  }
+
+  add(source)
+
+  const withLineBreaks = source.replace(/\\n/g, '<br/>')
+  add(withLineBreaks)
+
+  const fixedSlanted = fixHalfOpenSlantedNodes(withLineBreaks)
+  add(fixedSlanted)
+
+  const quotedBreaks = quoteSquareLabelsWithLineBreaks(fixedSlanted)
+  add(quotedBreaks)
+
+  const normalizedBreakShapes = normalizeLineBreakNodes(quotedBreaks)
+  add(normalizedBreakShapes)
+
+  const quotedPunctuation = quoteSquareLabelsWithPunctuation(normalizedBreakShapes)
+  add(quotedPunctuation)
+
+  const withHtmlBr = quotedPunctuation.replace(/<br\s*\/>/gi, '<br>')
+  add(withHtmlBr)
+
+  return candidates
+}
+
 function getMermaidApi(): Promise<MermaidApi> {
   if (mermaidApiPromise) return mermaidApiPromise
   mermaidApiPromise = import('mermaid').then((mod) => mod.default)
@@ -349,11 +424,27 @@ function MermaidDiagramComponent({ code }: { code: string }) {
           mermaidInitializedTheme = theme
         }
         mermaidRenderSequence += 1
-        const renderId = `mermaid-diagram-${mermaidRenderSequence}`
-        const rendered = await mermaid.render(renderId, source)
+        const candidates = buildMermaidCandidates(source)
+        let renderedSvg = ''
+        let lastError: unknown = null
+        for (let index = 0; index < candidates.length; index += 1) {
+          const candidate = candidates[index]
+          if (typeof candidate !== 'string' || !candidate) continue
+          try {
+            const renderId = `mermaid-diagram-${mermaidRenderSequence}-${index}`
+            const rendered = await mermaid.render(renderId, candidate)
+            renderedSvg = rendered.svg
+            break
+          } catch (candidateError) {
+            lastError = candidateError
+          }
+        }
+        if (!renderedSvg) {
+          throw lastError || new Error('Failed to render Mermaid diagram.')
+        }
         if (cancelled) return
-        mermaidSvgCache.set(cacheKey, rendered.svg)
-        setSvg(rendered.svg)
+        mermaidSvgCache.set(cacheKey, renderedSvg)
+        setSvg(renderedSvg)
         setError(null)
       } catch (err) {
         if (cancelled) return
