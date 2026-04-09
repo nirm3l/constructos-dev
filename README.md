@@ -28,8 +28,11 @@ It combines task orchestration, specification workflows, knowledge graph context
 ### Notes + Mermaid Diagram Preview
 ![Mermaid preview inside notes](docs/images/screenshots/notes-mermaid-preview.png)
 
-### Workflow Completion View
-![Completed workflow tasks](docs/images/screenshots/tasks-list-completed-workflow.png)
+### Generated Project Report (with Mermaid)
+![Generated project report note](docs/images/screenshots/notes-project-report-mermaid.png)
+
+### Workspace Settings and Auth Providers
+![Workspace settings and provider auth](docs/images/screenshots/settings-workspace-auth.png)
 
 ## Architecture At A Glance
 ```mermaid
