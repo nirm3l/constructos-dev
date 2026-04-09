@@ -951,6 +951,35 @@ def test_claude_interactive_auth_confirms_trusted_folder_prompt(tmp_path, monkey
     assert writes == [b"\r"]
 
 
+def test_claude_interactive_auth_marks_session_failed_on_oauth_error(tmp_path, monkeypatch):
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import features.agents.provider_auth as provider_auth
+
+    published: list[str] = []
+    session = provider_auth.DeviceAuthSessionState(
+        session_id="session-oauth-fail",
+        status="pending",
+        started_at="2026-04-08T18:00:00Z",
+        updated_at="2026-04-08T18:00:00Z",
+        login_method="claudeai",
+    )
+    monkeypatch.setitem(provider_auth._DEVICE_AUTH_SESSIONS, "claude", session)
+    monkeypatch.setattr(provider_auth, "_publish_auth_realtime_signal", lambda provider: published.append(provider))
+
+    provider_auth._handle_interactive_device_auth_output(
+        provider="claude",
+        session_id="session-oauth-fail",
+        chunk_text="OAutherror: Request failed with status code 500",
+        master_fd=77,
+    )
+
+    assert session.status == "failed"
+    assert "OAutherror" in str(session.error)
+    assert published == ["claude"]
+
+
 def test_claude_auth_reconstructs_wrapped_verification_uri():
     import sys
 

@@ -64,6 +64,41 @@ curl -sS http://localhost:1102/api/health
 - MCP endpoint: `http://localhost:8091/mcp`
 - KurrentDB UI: `http://localhost:2113/web/index.html`
 
+## Install, Uninstall, and COS CLI
+### Install (Local Source Build)
+```bash
+./scripts/deploy.sh
+```
+
+Useful environment variables:
+- `DEPLOY_SOURCE=local` (default): build images from local source.
+- `DEPLOY_TARGET=auto|base|ubuntu-gpu|macos-m4`: choose compose overlay.
+- `APP_COMPOSE_PROJECT_NAME=constructos-app`: fixed compose project scope.
+
+### Install (Public GHCR Images)
+```bash
+DEPLOY_SOURCE=ghcr IMAGE_TAG=vX.Y.Z ./scripts/deploy.sh
+```
+
+### Full Reset (Fresh Recreate)
+```bash
+./scripts/recreate_from_zero.sh
+```
+
+### Stop / Uninstall
+```bash
+docker compose -p constructos-app -f docker-compose.yml down
+```
+
+### COS CLI
+```bash
+cos --help
+cos doctor
+cos tasks list
+```
+
+For full install and operations details, see `docs/constructos-install-and-cos.md`.
+
 ## Development
 ```bash
 # Full clean redeploy (resets DB + volumes)

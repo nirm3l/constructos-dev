@@ -741,6 +741,8 @@ def _handle_interactive_device_auth_output(
     login_method_choice: bytes | None = None
     schedule_login_method_choice = False
     should_confirm_completion = False
+    should_mark_failed = False
+    failure_message = ""
     with _DEVICE_AUTH_LOCK:
         session = _DEVICE_AUTH_SESSIONS.get(provider)
         if session is None or session.session_id != session_id:
@@ -792,6 +794,12 @@ def _handle_interactive_device_auth_output(
         ):
             session.completion_prompt_confirmed = True
             should_confirm_completion = True
+        if provider == "claude" and "oautherror" in normalized_compact:
+            should_mark_failed = True
+            failure_message = next(
+                (line for line in reversed(lines) if "oautherror" in line.lower()),
+                "OAuth error while validating Claude login.",
+            )
         if (
             provider == "claude"
             and not session.trust_prompt_confirmed
@@ -802,7 +810,12 @@ def _handle_interactive_device_auth_output(
         ):
             session.trust_prompt_confirmed = True
             should_confirm_completion = True
+        if should_mark_failed:
+            session.status = "failed"
+            session.error = str(failure_message or "").strip() or "OAuth error while validating Claude login."
         session.updated_at = _utcnow_iso()
+    if should_mark_failed:
+        _publish_auth_realtime_signal(provider)
     if should_confirm_theme:
         try:
             os.write(master_fd, b"\r")
@@ -859,6 +872,20 @@ def _monitor_interactive_device_auth_session(
                 chunk_text=chunk.decode("utf-8", errors="ignore"),
                 master_fd=master_fd,
             )
+            should_terminate_failed = False
+            with _DEVICE_AUTH_LOCK:
+                session = _DEVICE_AUTH_SESSIONS.get(provider)
+                if session is not None and session.session_id == session_id and session.status == "failed":
+                    should_terminate_failed = True
+            if should_terminate_failed and process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except Exception:
+                    try:
+                        process.terminate()
+                    except Exception:
+                        pass
+                break
             if _provider_auth_home_ready(provider, resolve_provider_system_override_home(provider)) and process.poll() is None:
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
